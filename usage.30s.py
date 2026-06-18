@@ -16,19 +16,101 @@ import glob
 import json
 import re
 from datetime import datetime, timedelta, date
+from pathlib import Path
 
 HOME = os.path.expanduser("~")
+APPDATA = os.environ.get("APPDATA") or os.path.join(HOME, "AppData", "Roaming")
+LOCALAPPDATA = os.environ.get("LOCALAPPDATA") or os.path.join(HOME, "AppData", "Local")
+
+
+def _expand_path(path):
+    if not path:
+        return None
+    return os.path.abspath(os.path.expandvars(os.path.expanduser(path.strip())))
+
+
+def _path_candidates(env_name, *defaults):
+    vals = []
+    raw = os.environ.get(env_name, "")
+    if raw:
+        for item in raw.split(os.pathsep):
+            p = _expand_path(item)
+            if p:
+                vals.append(p)
+    for item in defaults:
+        p = _expand_path(item)
+        if p:
+            vals.append(p)
+    out = []
+    seen = set()
+    for p in vals:
+        key = os.path.normcase(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _first_existing_file(paths):
+    for path in paths:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _glob_unique(patterns):
+    seen = set()
+    for pattern in patterns:
+        for path in glob.glob(pattern, recursive=True):
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield path
+
+
+def _sqlite_ro_uri(path):
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
 CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
-GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
+GEMINI_DIRS = _path_candidates(
+    "TOKEI_GEMINI_DIR",
+    os.path.join(HOME, ".gemini", "tmp"),
+    os.path.join(HOME, ".gemini", "gemini-cli", "conversations"),
+)
 GROK_DIR = os.path.join(HOME, ".grok", "sessions")
-QODER_DIR = os.path.join(HOME, ".qoder")
 HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
-OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode", "storage", "message")
+OPENCODE_DIRS = _path_candidates(
+    "TOKEI_OPENCODE_DIR",
+    os.path.join(HOME, ".local", "share", "opencode", "storage", "message"),
+    os.path.join(APPDATA, "opencode", "storage", "message"),
+    os.path.join(LOCALAPPDATA, "opencode", "storage", "message"),
+)
 OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+QODER_DB_PATHS = _path_candidates(
+    "TOKEI_QODER_DB",
+    os.path.join(HOME, "Library", "Application Support", "QoderWork", "data", "agents.db"),
+    os.path.join(APPDATA, "QoderWork", "data", "agents.db"),
+    os.path.join(LOCALAPPDATA, "QoderWork", "data", "agents.db"),
+)
+QODER_LOG_DIRS = _path_candidates(
+    "TOKEI_QODER_LOG_DIR",
+    os.path.join(HOME, "Library", "Application Support", "QoderWork", "logs"),
+    os.path.join(APPDATA, "QoderWork", "logs"),
+    os.path.join(LOCALAPPDATA, "QoderWork", "logs"),
+)
+CLAUDE_CACHE_DIRS = _path_candidates(
+    "TOKEI_CLAUDE_CACHE_DIR",
+    os.path.join(HOME, "Library", "Application Support", "Claude", "Cache", "Cache_Data"),
+    os.path.join(APPDATA, "Claude", "Cache", "Cache_Data"),
+    os.path.join(LOCALAPPDATA, "Claude", "Cache", "Cache_Data"),
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -283,6 +365,14 @@ def _empty_gemini():
     ranges = {k: {"in": 0, "out": 0, "cached": 0, "thoughts": 0,
                   "cost": 0.0, "models": {}, "sessions": set()} for k in RANGE_KEYS}
     return {"ranges": ranges}
+
+
+def _gemini_session_files():
+    patterns = []
+    for root in GEMINI_DIRS:
+        patterns.append(os.path.join(root, "*", "chats", "session-*.json"))
+        patterns.append(os.path.join(root, "**", "session-*.json"))
+    return list(_glob_unique(patterns))
 
 
 def _empty_grok():
@@ -670,11 +760,12 @@ def scan_codex(bounds, cache):
 # assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
 # (total=input+output+thoughts,cached⊂input)。增量快照共用 sessionId,按 lastUpdated 去重。
 def scan_gemini(bounds):
-    if not os.path.isdir(GEMINI_DIR):
+    files = _gemini_session_files()
+    if not files:
         return _empty_gemini()
     scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"], bounds["year"]).timestamp()
     best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
-    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
+    for f in files:
         try:
             if os.path.getmtime(f) < scan_from:
                 continue
@@ -725,8 +816,6 @@ def scan_gemini(bounds):
                 mm["in"] += inp; mm["out"] += out
                 mm["cached"] += cached; mm["thoughts"] += th; mm["cost"] += cost
     return {"ranges": B}
-
-
 # ---------- Grok CLI ----------
 # 日志:~/.grok/sessions/<cwd>/<uuid>/{summary.json,signals.json,events.jsonl,updates.jsonl}
 # 当前 Grok CLI 本地日志未落 prompt_tokens/completion_tokens usage;官方 API 响应有 usage。
@@ -839,7 +928,6 @@ def scan_grok(bounds):
 # ---------- Qoder ----------
 # QoderWork SQLite:~/Library/Application Support/QoderWork/data/agents.db
 # messages 表 metadata 含 durationMs / contextUsageRatio(token 字段目前全 0)。
-_QODER_DB = os.path.join(HOME, "Library", "Application Support", "QoderWork", "data", "agents.db")
 
 
 def scan_qoder(bounds, cache):
@@ -848,11 +936,12 @@ def scan_qoder(bounds, cache):
     empty = {k: {"in": 0, "out": 0, "sessions": 0, "calls": 0,
                  "duration": 0, "ctx_sum": 0.0, "ctx_count": 0}
              for k in RANGE_KEYS}
-    if not os.path.isfile(_QODER_DB):
+    qoder_db = _first_existing_file(QODER_DB_PATHS)
+    if not qoder_db:
         return {"ranges": empty}
 
     try:
-        sig = f"{os.path.getmtime(_QODER_DB)}:{os.path.getsize(_QODER_DB)}"
+        sig = f"{qoder_db}:{os.path.getmtime(qoder_db)}:{os.path.getsize(qoder_db)}"
     except OSError:
         return {"ranges": empty}
 
@@ -860,7 +949,7 @@ def scan_qoder(bounds, cache):
     if not entry or entry.get("sig") != sig:
         days = {}
         try:
-            conn = _sqlite3.connect(f"file:{_QODER_DB}?mode=ro", uri=True)
+            conn = _sqlite3.connect(_sqlite_ro_uri(qoder_db), uri=True)
             for row in conn.execute("""
                 SELECT date(created_at,'unixepoch','localtime') as day,
                        COUNT(*) as calls,
@@ -919,8 +1008,9 @@ def scan_qoder(bounds, cache):
 
     # 从 QoderWork 日志提取最新 credit 额度
     quota = None
-    qw_logs = os.path.join(HOME, "Library", "Application Support", "QoderWork", "logs")
-    if os.path.isdir(qw_logs):
+    for qw_logs in QODER_LOG_DIRS:
+        if not os.path.isdir(qw_logs):
+            continue
         log_dirs = sorted(glob.glob(os.path.join(qw_logs, "2*")), reverse=True)
         for ld in log_dirs[:2]:
             main_log = os.path.join(ld, "main.log")
@@ -942,12 +1032,14 @@ def scan_qoder(bounds, cache):
                 pass
             if quota:
                 break
+        if quota:
+            break
 
     # 当前模型
     model = None
     try:
         import sqlite3 as _sq
-        conn = _sq.connect(f"file:{_QODER_DB}?mode=ro", uri=True)
+        conn = _sq.connect(_sqlite_ro_uri(qoder_db), uri=True)
         row = conn.execute("SELECT value FROM app_settings WHERE key='modelLevel'").fetchone()
         if row:
             model = row[0].strip('"')
@@ -976,7 +1068,7 @@ def _hermes_db_paths():
 def _scan_hermes_db(db_path, _sq):
     days = {}
     try:
-        conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True)
         for row in conn.execute("""
             SELECT date(started_at,'unixepoch','localtime') as day,
                    COUNT(*) as cnt, model,
@@ -1090,7 +1182,7 @@ def scan_openclaw(bounds, cache):
             if not entry or entry.get("sig") != sig:
                 task_days = {}
                 try:
-                    conn = _sq.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True)
+                    conn = _sq.connect(_sqlite_ro_uri(OPENCLAW_DB), uri=True)
                     for row in conn.execute("""
                         SELECT date(created_at/1000,'unixepoch','localtime') as day,
                                COUNT(*) as total,
@@ -1325,60 +1417,62 @@ def scan_pi(bounds, cache):
 def scan_opencode(bounds, cache):
     fc = cache.setdefault("opencode", {})
     B = _empty_token_ranges()
-    if not os.path.isdir(OPENCODE_DIR):
+    roots = [d for d in OPENCODE_DIRS if os.path.isdir(d)]
+    if not roots:
         return {"ranges": B}
 
     stale = set(fc.keys())
 
-    for sess_dir in glob.glob(os.path.join(OPENCODE_DIR, "ses_*")):
-        for f in glob.glob(os.path.join(sess_dir, "msg_*.json")):
-            stale.discard(f)
-            try:
-                st = os.stat(f)
-            except OSError:
-                continue
-            sig = f"{st.st_mtime}:{st.st_size}"
-            entry = fc.get(f)
-            if entry and entry.get("sig") == sig:
-                day_data = entry.get("day")
-            else:
+    for root in roots:
+        for sess_dir in glob.glob(os.path.join(root, "ses_*")):
+            for f in glob.glob(os.path.join(sess_dir, "msg_*.json")):
+                stale.discard(f)
                 try:
-                    d = json.load(open(f, encoding="utf-8"))
-                except Exception:
+                    st = os.stat(f)
+                except OSError:
                     continue
-                if d.get("role") != "assistant":
-                    fc[f] = {"sig": sig, "day": None}
-                    continue
-                t = (d.get("time") or {}).get("created", 0)
-                if not t:
-                    fc[f] = {"sig": sig, "day": None}
-                    continue
-                tok = d.get("tokens") or {}
-                ca = tok.get("cache") or {}
-                model = d.get("modelID", "")
-                day_data = {
-                    "date": datetime.fromtimestamp(t / 1000).strftime("%Y-%m-%d"),
-                    "in": tok.get("input", 0) or 0,
-                    "out": tok.get("output", 0) or 0,
-                    "reason": tok.get("reasoning", 0) or 0,
-                    "cr": ca.get("read", 0) or 0,
-                    "cw": ca.get("write", 0) or 0,
-                    "cost": d.get("cost", 0) or 0,
-                    "session": d.get("sessionID", ""),
-                    "models": {},
-                }
-                _add_model_usage(day_data["models"], model, day_data["in"], day_data["out"],
-                                 day_data["cr"], day_data["cw"], day_data["reason"], day_data["cost"])
-                fc[f] = {"sig": sig, "day": day_data}
+                sig = f"{st.st_mtime}:{st.st_size}"
+                entry = fc.get(f)
+                if entry and entry.get("sig") == sig:
+                    day_data = entry.get("day")
+                else:
+                    try:
+                        d = json.load(open(f, encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if d.get("role") != "assistant":
+                        fc[f] = {"sig": sig, "day": None}
+                        continue
+                    t = (d.get("time") or {}).get("created", 0)
+                    if not t:
+                        fc[f] = {"sig": sig, "day": None}
+                        continue
+                    tok = d.get("tokens") or {}
+                    ca = tok.get("cache") or {}
+                    model = d.get("modelID", "")
+                    day_data = {
+                        "date": datetime.fromtimestamp(t / 1000).strftime("%Y-%m-%d"),
+                        "in": tok.get("input", 0) or 0,
+                        "out": tok.get("output", 0) or 0,
+                        "reason": tok.get("reasoning", 0) or 0,
+                        "cr": ca.get("read", 0) or 0,
+                        "cw": ca.get("write", 0) or 0,
+                        "cost": d.get("cost", 0) or 0,
+                        "session": d.get("sessionID", ""),
+                        "models": {},
+                    }
+                    _add_model_usage(day_data["models"], model, day_data["in"], day_data["out"],
+                                     day_data["cr"], day_data["cw"], day_data["reason"], day_data["cost"])
+                    fc[f] = {"sig": sig, "day": day_data}
 
-            if not day_data:
-                continue
-            try:
-                dd = date.fromisoformat(day_data["date"])
-            except ValueError:
-                continue
-            for k in classify_date(dd, bounds):
-                _merge_token_day(B[k], day_data, day_data.get("session"))
+                if not day_data:
+                    continue
+                try:
+                    dd = date.fromisoformat(day_data["date"])
+                except ValueError:
+                    continue
+                for k in classify_date(dd, bounds):
+                    _merge_token_day(B[k], day_data, day_data.get("session"))
 
     for p in stale:
         fc.pop(p, None)
@@ -1394,9 +1488,6 @@ def fmt_reset(epoch):
 
 # ---------- Claude 套餐用量(读 Claude Desktop 的 Chromium HTTP 缓存) ----------
 # 数据来自桌面应用每 ~10min 轮询 /usage 的响应(zstd 压缩),纯本地只读。
-CLAUDE_CACHE = os.path.join(
-    HOME, "Library", "Application Support", "Claude", "Cache", "Cache_Data"
-)
 
 
 def _iso_to_epoch(s):
@@ -1417,9 +1508,12 @@ def _zstd_decompress(data):
 
 
 def _scan_claude_plan_raw():
-    if not os.path.isdir(CLAUDE_CACHE):
+    files = []
+    for cache_dir in CLAUDE_CACHE_DIRS:
+        if os.path.isdir(cache_dir):
+            files.extend(glob.glob(os.path.join(cache_dir, "*_0")))
+    if not files:
         return {}
-    files = glob.glob(os.path.join(CLAUDE_CACHE, "*_0"))
     files.sort(key=os.path.getmtime, reverse=True)
     cand = None
     for f in files[:200]:
@@ -1815,7 +1909,7 @@ def _scan_local_models():
                         pass
         except OSError:
             pass
-    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
+    for f in _gemini_session_files():
         try:
             with open(f, encoding="utf-8", errors="ignore") as fh:
                 for msg in json.load(fh).get("messages", []):
