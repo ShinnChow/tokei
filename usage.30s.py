@@ -238,7 +238,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 7
+_SCAN_CACHE_VERSION = 10
 
 
 def _load_scan_cache():
@@ -669,61 +669,135 @@ def scan_codex(bounds, cache):
 # 日志:~/.gemini/tmp/<projectHash>/chats/session-*.json
 # assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
 # (total=input+output+thoughts,cached⊂input)。增量快照共用 sessionId,按 lastUpdated 去重。
-def scan_gemini(bounds):
-    if not os.path.isdir(GEMINI_DIR):
-        return _empty_gemini()
-    scan_from = min(bounds["yesterday"], bounds["week"], bounds["month"], bounds["year"]).timestamp()
-    best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
-    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
-        try:
-            if os.path.getmtime(f) < scan_from:
-                continue
-        except OSError:
-            continue
-        try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                d = json.load(fh)
-        except Exception:
-            continue
-        sid = d.get("sessionId") or f
-        lu = d.get("lastUpdated") or ""
-        if sid not in best or lu > best[sid][0]:
-            best[sid] = (lu, d)
-
+def scan_gemini(bounds, cache):
+    fc = cache.setdefault("gemini", {})
     B = {k: {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0,
              "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
-    for sid, (lu, d) in best.items():
-        for m in d.get("messages", []):
-            if m.get("type") != "gemini":
+    
+    if not os.path.isdir(GEMINI_DIR):
+        return {"ranges": B}
+
+    today_d = bounds["today"].date()
+    yest_d = bounds["yesterday"].date()
+    week_d = bounds["week"].date()
+    lw_start_d = bounds["last_week"].date()
+    lw_end_d = bounds["last_week_end"].date()
+    month_d = bounds["month"].date()
+    year_d = bounds["year"].date()
+
+    stale = set(fc.keys())
+    
+    # 扫描所有 .jsonl 会话文件
+    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.jsonl")):
+        stale.discard(f)
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        
+        sig = f"{st.st_mtime}:{st.st_size}"
+        entry = fc.get(f)
+        
+        # 如果签名不一致, 重新解析
+        if not entry or entry.get("sig") != sig:
+            days = {}
+            sid = os.path.basename(f)
+            # mid -> {ts_str, tk, model}
+            # 必须先完整读完文件,找到每个消息ID最新的那条记录,再汇总
+            latest_mids = {}
+            
+            try:
+                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        try:
+                            o = json.loads(line)
+                        except Exception:
+                            continue
+                        
+                        msgs = []
+                        if o.get("type") == "gemini":
+                            msgs = [o]
+                        else:
+                            updates = o.get("$set") or o.get("$push") or {}
+                            msgs = updates.get("messages") or o.get("messages") or []
+
+                        for m in msgs:
+                            if not isinstance(m, dict) or m.get("type") != "gemini":
+                                continue
+                            mid = m.get("id")
+                            tk = m.get("tokens")
+                            ts_str = m.get("timestamp")
+                            model = m.get("model")
+
+                            if not mid or not tk or not ts_str:
+                                continue
+                            
+                            # 如果当前消息比已记录的更新,则替换
+                            if mid not in latest_mids or ts_str > latest_mids[mid]["ts_str"]:
+                                latest_mids[mid] = {"ts_str": ts_str, "tk": tk, "model": model}
+            except OSError:
                 continue
-            tk = m.get("tokens")
-            if not tk:
+
+            # 现在,只使用最新的消息记录进行汇总
+            for mid, data in latest_mids.items():
+                dt = parse_ts(data["ts_str"])
+                if not dt:
+                    continue
+                local_dt = dt.astimezone()
+                dk = local_dt.date().isoformat()
+                day = days.setdefault(dk, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, 
+                                           "cost": 0.0, "models": {}})
+                
+                tk = data["tk"]
+                model = data["model"]
+                inp = tk.get("input", 0) or 0
+                out = tk.get("output", 0) or 0
+                cached = tk.get("cached", 0) or 0
+                th = tk.get("thoughts", 0) or 0
+                
+                p = gemini_price(model)
+                cost = (max(inp - cached, 0) / 1e6 * p["in"]
+                        + cached / 1e6 * p["cache_read"]
+                        + (out + th) / 1e6 * p["out"])
+                
+                day["in"] += inp; day["out"] += out
+                day["cached"] += cached; day["thoughts"] += th
+                day["cost"] += cost
+                
+                mm = day["models"].setdefault(model, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0})
+                mm["in"] += inp; mm["out"] += out
+                mm["cached"] += cached; mm["thoughts"] += th
+                mm["cost"] += cost
+            
+            fc[f] = {"sig": sig, "days": days, "sid": sid}
+            
+    # 清理过期缓存
+    for p in stale:
+        fc.pop(p, None)
+        
+    # 将缓存数据组装到 B (Range Buckets)
+    for f, entry in fc.items():
+        sid = entry.get("sid", f)
+        for dk, day in entry.get("days", {}).items():
+            try:
+                d = date.fromisoformat(dk)
+            except ValueError:
                 continue
-            dt = parse_ts(m.get("timestamp", ""))
-            if dt is None:
-                continue
-            ks = classify(dt.astimezone(), bounds)
-            if not ks:
-                continue
-            model = m.get("model")
-            inp = tk.get("input", 0) or 0
-            out = tk.get("output", 0) or 0
-            cached = tk.get("cached", 0) or 0
-            th = tk.get("thoughts", 0) or 0
-            p = gemini_price(model)
-            cost = (max(inp - cached, 0) / 1e6 * p["in"]
-                    + cached / 1e6 * p["cache_read"]
-                    + (out + th) / 1e6 * p["out"])
+            ks = classify_date(d, bounds)
+            
             for k in ks:
                 b = B[k]
                 b["sessions"].add(sid)
-                b["in"] += inp; b["out"] += out
-                b["cached"] += cached; b["thoughts"] += th; b["cost"] += cost
-                mm = b["models"].setdefault(
-                    model, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0})
-                mm["in"] += inp; mm["out"] += out
-                mm["cached"] += cached; mm["thoughts"] += th; mm["cost"] += cost
+                b["in"] += day["in"]; b["out"] += day["out"]
+                b["cached"] += day["cached"]; b["thoughts"] += day["thoughts"]
+                b["cost"] += day["cost"]
+                for mn, mv in day["models"].items():
+                    mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0})
+                    mm["in"] += mv["in"]; mm["out"] += mv["out"]
+                    mm["cached"] += mv["cached"]; mm["thoughts"] += mv["thoughts"]
+                    mm["cost"] += mv["cost"]
+                    
     return {"ranges": B}
 
 
@@ -1485,7 +1559,7 @@ def compute():
     errors = {}
     cc = _safe_scan("claude", lambda: scan_claude(bounds, cache), _empty_claude, errors)
     cx = _safe_scan("codex", lambda: scan_codex(bounds, cache), _empty_codex, errors)
-    gm = _safe_scan("gemini", lambda: scan_gemini(bounds), _empty_gemini, errors)
+    gm = _safe_scan("gemini", lambda: scan_gemini(bounds, cache), _empty_gemini, errors)
     gk = _safe_scan("grok", lambda: scan_grok(bounds), _empty_grok, errors)
     qd = _safe_scan("qoder", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
@@ -2246,7 +2320,7 @@ def wrapped():
     if period in ("all", "365d"):
         try:
             bounds = range_bounds()
-            gm = scan_gemini(bounds)
+            gm = scan_gemini(bounds, cache)
             yr = gm["ranges"].get("year", {})
             gm_tok = yr.get("in", 0) + yr.get("out", 0) + yr.get("cached", 0) + yr.get("thoughts", 0)
             total_tokens += gm_tok
