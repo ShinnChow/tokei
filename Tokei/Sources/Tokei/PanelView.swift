@@ -6,7 +6,10 @@ struct PanelView: View {
     var scrollable = true
     @State private var sel: RangeKey = .today
     @State private var claudeModelsOpen = false
+    @State private var codexModelsOpen = false
     @State private var geminiModelsOpen = false
+    @State private var zcodeModelsOpen = false
+    @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
@@ -28,12 +31,14 @@ struct PanelView: View {
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
     @AppStorage("showHermes") private var showHermes = true
+    @AppStorage("showZcode") private var showZcode = true
+    @AppStorage("showMimoCode") private var showMimoCode = true
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showOpenCode") private var showOpenCode = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showOpenClaw, showPi, showOpenCode].filter { $0 }.count
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showZcode, showMimoCode, showOpenClaw, showPi, showOpenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -210,6 +215,7 @@ struct PanelView: View {
         let gr = u.gemini.ranges.get(sel), kr = u.grok.ranges.get(sel)
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
+        let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel), or = u.opencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude, active: cr.sessions > 0,
@@ -226,6 +232,10 @@ struct PanelView: View {
                          tint: Theme.qoderwork, content: AnyView(qoderworkBlock(u.qoderwork, qwr))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr))),
+            ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
+                         tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen))),
+            ToolCardItem(id: "mimocode", name: "MimoCode", visible: showMimoCode, active: mr.sessions > 0,
+                         tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MimoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw, active: lr.tasks > 0 || lr.in + lr.out > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
@@ -306,6 +316,9 @@ struct PanelView: View {
                     if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
                     return items
                 }(), tint: Theme.codex)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $codexModelsOpen, tint: Theme.codex)
+                }
                 if x.p5 != nil || x.pw != nil { thinDivider }
                 if let p5 = x.p5 {
                     quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.codex)
@@ -1137,6 +1150,8 @@ struct PanelView: View {
                 settingsRow("Qoder", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
                 settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
+                settingsRow("ZCode", tint: Theme.zcode, isOn: $showZcode)
+                settingsRow("MimoCode", tint: Theme.mimocode, isOn: $showMimoCode)
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
@@ -1657,7 +1672,7 @@ struct PanelView: View {
 
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes", "openclaw", "pi", "opencode"]
+            let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes", "zcode", "mimocode", "openclaw", "pi", "opencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

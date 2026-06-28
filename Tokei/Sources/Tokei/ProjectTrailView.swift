@@ -245,6 +245,8 @@ struct ProjectTrailView: View {
         case "codex": return Theme.codex
         case "grok": return Theme.grok
         case "hermes": return Theme.hermes
+        case "zcode": return Theme.zcode
+        case "mimocode": return Theme.mimocode
         case "pi": return Theme.pi
         default: return Theme.tTertiary
         }

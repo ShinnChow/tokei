@@ -85,6 +85,31 @@ struct CodexRange: Codable {
     var reason: Int
     var cost: Double
     var sessions: Int = 0
+    var models: [TokenModelStat] = []
+
+    init(hit: Double = 0, `in` input: Int = 0, cached: Int = 0, out: Int = 0,
+         reason: Int = 0, cost: Double = 0, sessions: Int = 0, models: [TokenModelStat] = []) {
+        self.hit = hit
+        self.in = input
+        self.cached = cached
+        self.out = out
+        self.reason = reason
+        self.cost = cost
+        self.sessions = sessions
+        self.models = models
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hit = try c.decodeIfPresent(Double.self, forKey: .hit) ?? 0
+        `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
+        cached = try c.decodeIfPresent(Int.self, forKey: .cached) ?? 0
+        out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
+        reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
+        cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
+    }
 }
 
 struct CodexRanges: Codable {
@@ -522,12 +547,14 @@ struct Usage: Codable {
     var qoderwork: QoderStat
     var qoder: QoderIdeStat
     var hermes: HermesStat
+    var zcode: TokenUsageStat
+    var mimocode: TokenUsageStat
     var openclaw: OpenClawStat
     var pi: TokenUsageStat
     var opencode: TokenUsageStat
 
     enum CodingKeys: String, CodingKey {
-        case claude, codex, gemini, grok, qoder, qoderwork, hermes, openclaw, pi, opencode
+        case claude, codex, gemini, grok, qoder, qoderwork, hermes, zcode, mimocode, openclaw, pi, opencode
     }
 
     init(from decoder: Decoder) throws {
@@ -542,6 +569,8 @@ struct Usage: Codable {
         qoder = (try? c.decodeIfPresent(QoderIdeStat.self, forKey: .qoder))
             ?? QoderIdeStat(ranges: .empty, model: nil)
         hermes = try c.decode(HermesStat.self, forKey: .hermes)
+        zcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .zcode) ?? TokenUsageStat(ranges: .empty)
+        mimocode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .mimocode) ?? TokenUsageStat(ranges: .empty)
         openclaw = try c.decode(OpenClawStat.self, forKey: .openclaw)
         pi = try c.decodeIfPresent(TokenUsageStat.self, forKey: .pi) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)

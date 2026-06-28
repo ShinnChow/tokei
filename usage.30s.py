@@ -30,6 +30,8 @@ OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+ZCODE_DB = os.path.join(HOME, ".zcode", "cli", "db", "db.sqlite")
+MIMO_DB = os.path.join(HOME, ".local", "share", "mimocode", "mimocode.db")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -91,6 +93,7 @@ _FAMILY = [
     ("qwen",     "qwen/qwen3.7-max"),
     ("deepseek", "deepseek/deepseek-v4-pro"),
     ("glm",      "z-ai/glm-5.2"),
+    ("mimo",     "xiaomi/mimo-v2.5-pro"),
 ]
 
 
@@ -117,6 +120,8 @@ def _normalize(model: str):
         return "deepseek/" + m
     if m.startswith("glm"):
         return "z-ai/" + m
+    if m.startswith("mimo"):
+        return "xiaomi/" + m
     return m
 
 
@@ -137,6 +142,30 @@ def _resolve_id(model: str):
         if kw in low:
             return rep
     return "anthropic/claude-opus-4.8"
+
+
+def _known_id_or_raw(model: str):
+    """模型明细展示用:能匹配价格表则规范化,未知名称保留原文。"""
+    s = (model or "").strip()
+    if not s or s.lower() == "<synthetic>":
+        return None
+    if s in _OV_ALIASES:
+        return _OV_ALIASES[s]
+    norm = _normalize(model)
+    if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
+        return norm
+    low = s.lower()
+    if "gemini" in low:
+        return "google/gemini-3.1-pro-preview" if "pro" in low else "google/gemini-3.5-flash"
+    for kw, rep in _FAMILY:
+        if kw in low:
+            return rep
+    return s
+
+
+def _has_known_price(model: str):
+    cid = _known_id_or_raw(model)
+    return bool(cid and (cid in _OV_MODELS or cid in _PRICING_DB or cid in _DEFAULT_PRICES))
 
 
 def _raw_price(model: str):
@@ -182,6 +211,19 @@ def nice_model(m: str) -> str:
         if key in s:
             mt = re.search(r"(\d+)-(\d+)", s)
             return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
+    if "gpt" in s:
+        mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
+        ver = mt.group(1) if mt else ""
+        mini = " Mini" if "mini" in s else ""
+        return f"GPT-{ver}{mini}" if ver else "GPT"
+    if "mimo" in s:
+        name = m.split("/")[-1] if "/" in m else m
+        ver = re.sub(r"^mimo[- ]?v?", "", name, flags=re.I).strip()
+        parts = [p for p in ver.split("-") if p]
+        if not parts:
+            return "MiMo"
+        head = "MiMo-V" + parts[0] if parts[0][0].isdigit() else "MiMo-" + parts[0]
+        return "-".join([head] + [p.capitalize() for p in parts[1:]])
     name = re.sub(r"[-:](free|preview|latest)$", "", m.split("/")[-1]).replace("-", " ")
     return " ".join(w[:1].upper() + w[1:] if w[:1].isalpha() else w
                     for w in name.split())
@@ -344,6 +386,14 @@ def _empty_opencode():
 
 
 def _empty_pi():
+    return _empty_opencode()
+
+
+def _empty_zcode():
+    return _empty_opencode()
+
+
+def _empty_mimocode():
     return _empty_opencode()
 
 
@@ -547,7 +597,7 @@ def _claude_usage(line, want_dt=False):
 # ---------- Codex ----------
 def scan_codex(bounds, cache):
     fc = cache.setdefault("codex", {})
-    B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0, "sessions": set()}
+    B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0, "sessions": set(), "models": {}}
          for k in RANGE_KEYS}
     cx_base = _raw_price("openai/gpt-5.5")
     if not os.path.isdir(CODEX_DIR):
@@ -576,14 +626,22 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{mtime}:{size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig:
+        if not entry or entry.get("sig") != sig or entry.get("model_version") != 1:
             days = {}
             file_limits = None; file_limits_ts = None; file_plan = None
             file_g_limits = None; file_g_ts = None; file_g_plan = None
             file_last_total = None
+            file_model = None
             try:
                 with open(f, "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
+                        if '"turn_context"' in line or '"session_meta"' in line:
+                            try:
+                                o = json.loads(line)
+                            except Exception:
+                                continue
+                            payload = o.get("payload") or {}
+                            file_model = payload.get("model") or file_model
                         if '"token_count"' not in line:
                             continue
                         try:
@@ -619,15 +677,18 @@ def scan_codex(bounds, cache):
                             p_cr = cx_base["cache_read"] * (2 if hi else 1)
                             cost = (li - lc) / 1e6 * p_in + lc / 1e6 * p_cr + lo / 1e6 * p_out
                             day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
-                                                       "reason": 0, "cost": 0.0})
+                                                       "reason": 0, "cost": 0.0, "models": {}})
                             day["in"] += li; day["cached"] += lc
                             day["out"] += lo; day["reason"] += lr; day["cost"] += cost
+                            if file_model:
+                                _add_model_usage(day["models"], _known_id_or_raw(file_model),
+                                                 max(li - lc, 0), lo, lc, 0, lr, cost)
             except OSError:
                 continue
             fc[f] = {"sig": sig, "days": days,
                      "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                      "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
-                     "last_total": file_last_total}
+                     "last_total": file_last_total, "model_version": 1}
 
     for p in stale:
         fc.pop(p, None)
@@ -650,6 +711,10 @@ def scan_codex(bounds, cache):
                 b["sessions"].add(f)
                 b["in"] += day["in"]; b["cached"] += day["cached"]
                 b["out"] += day["out"]; b["reason"] += day["reason"]; b["cost"] += day["cost"]
+                for mn, mv in day.get("models", {}).items():
+                    _add_model_usage(b["models"], mn, mv.get("in", 0), mv.get("out", 0),
+                                     mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
+                                     mv.get("cost", 0))
 
     # Find latest limits across all cached files
     latest_limits = None; latest_ts = None; plan_type = None
@@ -996,7 +1061,7 @@ def scan_qoder_ide(bounds, cache):
         return empty
 
     entry = fc.get("data")
-    if not entry or entry.get("sig") != sig:
+    if not entry or entry.get("sig") != sig or entry.get("version") != 1:
         days = {}  # date_str → {in, out, cached, session_ids, sub_agent_ids, calls, messages, duration}
         latest_model = None
         try:
@@ -1188,6 +1253,137 @@ def scan_hermes(bounds, cache):
                 for mn, mv in day.get("models", {}).items():
                     mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
                     mm["in"] += mv["in"]; mm["out"] += mv["out"]; mm["cost"] += mv["cost"]
+    return {"ranges": B}
+
+
+# ---------- ZCode ----------
+# SQLite:~/.zcode/cli/db/db.sqlite — model_usage 表
+def scan_zcode(bounds, cache):
+    import sqlite3 as _sq
+    fc = cache.setdefault("zcode", {})
+
+    if not os.path.isfile(ZCODE_DB):
+        return _empty_zcode()
+
+    try:
+        sig = f"{os.path.getmtime(ZCODE_DB)}:{os.path.getsize(ZCODE_DB)}"
+    except OSError:
+        return _empty_zcode()
+
+    entry = fc.get("db")
+    if not entry or entry.get("sig") != sig:
+        days = {}
+        try:
+            conn = _sq.connect(f"file:{ZCODE_DB}?mode=ro", uri=True)
+            try:
+                rows = conn.execute("""
+                    SELECT date(completed_at/1000,'unixepoch','localtime') as day,
+                           COUNT(*) as cnt, model_id,
+                           COALESCE(SUM(input_tokens),0),
+                           COALESCE(SUM(output_tokens),0),
+                           COALESCE(SUM(cache_read_input_tokens),0),
+                           COALESCE(SUM(cache_creation_input_tokens),0),
+                           COALESCE(SUM(reasoning_tokens),0)
+                    FROM model_usage
+                    WHERE status = 'completed' AND completed_at > 0
+                    GROUP BY day, model_id
+                """)
+                for dk, cnt, model, inp, out, cr, cw, reason in rows:
+                    if not dk:
+                        continue
+                    mid = _known_id_or_raw(model)
+                    if mid and _has_known_price(mid):
+                        p = _raw_price(mid)
+                        cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
+                    else:
+                        cost = 0.0
+                    day = days.setdefault(dk, _empty_token_day())
+                    day["sessions"] = day.get("sessions", 0) + int(cnt or 0)
+                    _add_token_usage(day, inp, out, cr, cw, reason, cost, mid)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        fc["db"] = {"sig": sig, "days": days, "version": 1}
+        entry = fc["db"]
+
+    B = _empty_token_ranges()
+    for dk, day in entry.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            before = len(B[k]["sessions"])
+            _merge_token_day(B[k], day)
+            B[k]["sessions"].update(f"{ZCODE_DB}:{dk}:{i}" for i in range(before, before + day.get("sessions", 0)))
+    return {"ranges": B}
+
+
+# ---------- MimoCode ----------
+# SQLite:~/.local/share/mimocode/mimocode.db — message 表(data JSON)
+def scan_mimocode(bounds, cache):
+    import sqlite3 as _sq
+    fc = cache.setdefault("mimocode", {})
+
+    if not os.path.isfile(MIMO_DB):
+        return _empty_mimocode()
+
+    try:
+        sig = f"{os.path.getmtime(MIMO_DB)}:{os.path.getsize(MIMO_DB)}"
+    except OSError:
+        return _empty_mimocode()
+
+    entry = fc.get("db")
+    if not entry or entry.get("sig") != sig or entry.get("version") != 1:
+        days = {}
+        try:
+            conn = _sq.connect(f"file:{MIMO_DB}?mode=ro", uri=True)
+            try:
+                for row in conn.execute("""SELECT data FROM message WHERE data LIKE '%"role":"assistant"%'"""):
+                    try:
+                        msg = json.loads(row[0])
+                    except Exception:
+                        continue
+                    if msg.get("role") != "assistant":
+                        continue
+                    created = (msg.get("time") or {}).get("created", 0)
+                    if not created:
+                        continue
+                    tok = msg.get("tokens") or {}
+                    ca = tok.get("cache") or {}
+                    model = msg.get("modelID", "")
+                    inp = tok.get("input", 0) or 0
+                    out = tok.get("output", 0) or 0
+                    cr = ca.get("read", 0) or 0
+                    cw = ca.get("write", 0) or 0
+                    reason = tok.get("reasoning", 0) or 0
+                    cost = msg.get("cost", 0) or 0
+                    mid = _known_id_or_raw(model)
+                    if not cost and mid and _has_known_price(mid):
+                        p = _raw_price(mid)
+                        cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
+                    dk = datetime.fromtimestamp(created / 1000).strftime("%Y-%m-%d")
+                    day = days.setdefault(dk, _empty_token_day())
+                    day["sessions"] = day.get("sessions", 0) + 1
+                    _add_token_usage(day, inp, out, cr, cw, reason, cost, mid)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        fc["db"] = {"sig": sig, "days": days, "version": 1}
+        entry = fc["db"]
+
+    B = _empty_token_ranges()
+    for dk, day in entry.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            before = len(B[k]["sessions"])
+            _merge_token_day(B[k], day)
+            B[k]["sessions"].update(f"{MIMO_DB}:{dk}:{i}" for i in range(before, before + day.get("sessions", 0)))
     return {"ranges": B}
 
 
@@ -1631,6 +1827,8 @@ def compute():
     qd = _safe_scan("qoderwork", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
     qi = _safe_scan("qoder_ide", lambda: scan_qoder_ide(bounds, cache), _empty_qoder_ide, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
+    zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
+    mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
@@ -1653,7 +1851,7 @@ def compute():
         hit = (b["cached"] / b["in"] * 100) if b["in"] else 0.0
         return {"hit": hit, "in": b["in"] - b["cached"], "cached": b["cached"],
                 "out": b["out"], "reason": b["reason"], "cost": b["cost"],
-                "sessions": len(b["sessions"])}
+                "sessions": len(b["sessions"]), "models": _format_token_models(b.get("models", {}))}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
@@ -1732,6 +1930,8 @@ def compute():
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
+    zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
+    mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -1781,6 +1981,12 @@ def compute():
         "hermes": {
             "ranges": hranges,
         },
+        "zcode": {
+            "ranges": zcranges,
+        },
+        "mimocode": {
+            "ranges": mcranges,
+        },
         "openclaw": {
             "ranges": oranges,
         },
@@ -1799,7 +2005,7 @@ def compute():
 
 def _recalc_costs(result):
     """用本地最新价格表重算所有模型成本,修正历史/同步数据中的价格偏差。"""
-    for tool_key in ("claude", "gemini", "pi", "opencode", "hermes", "openclaw"):
+    for tool_key in ("claude", "gemini", "zcode", "mimocode", "pi", "opencode", "hermes", "openclaw"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -1808,9 +2014,16 @@ def _recalc_costs(result):
             r = ranges.get(rk)
             if not r or "models" not in r:
                 continue
+            if not r["models"]:
+                continue
             total_cost = 0.0
             for m in r["models"]:
                 name = m.get("name", "")
+                if not _has_known_price(name):
+                    total_cost += m.get("cost", 0)
+                    m["pin"] = 0
+                    m["pout"] = 0
+                    continue
                 p = _raw_price(name)
                 ti = m.get("in", 0)
                 to = m.get("out", 0)
@@ -2187,7 +2400,8 @@ def build_daily_costs(period="all", refresh=True):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "opencode": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "zcode": 0.0, "mimocode": 0.0,
+                       "pi": 0.0, "opencode": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
@@ -2219,6 +2433,12 @@ def build_daily_costs(period="all", refresh=True):
             d["x_in"] += day.get("in", 0); d["x_out"] += day.get("out", 0)
             d["x_cached"] += day.get("cached", 0); d["x_reason"] += day.get("reason", 0)
             d["tokens"] += day.get("in", 0) + day.get("out", 0)
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Codex)"
+                m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "codex"})
+                m["cost"] += mv.get("cost", 0)
+                for key in TOKEN_FIELDS:
+                    m[key] += mv.get(key, 0)
 
     for fp, entry in cache.get("pi", {}).items():
         for dk, day in entry.get("days", {}).items():
@@ -2256,6 +2476,21 @@ def build_daily_costs(period="all", refresh=True):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MimoCode")):
+        for fp, entry in cache.get(tool_key, {}).items():
+            for dk, day in entry.get("days", {}).items():
+                if cutoff and dk < cutoff:
+                    continue
+                d = days.setdefault(dk, _empty())
+                d[tool_key] += day.get("cost", 0)
+                d["tokens"] += token_total(day)
+                for mn, mv in day.get("models", {}).items():
+                    nm = f"{nice_model(mn)} ({suffix})"
+                    m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": tool_key})
+                    m["cost"] += mv.get("cost", 0)
+                    for key in TOKEN_FIELDS:
+                        m[key] += mv.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -2290,12 +2525,13 @@ def build_daily_costs(period="all", refresh=True):
     codex_in = sum(d["x_in"] for d in days.values())
     codex_out = sum(d["x_out"] for d in days.values())
     codex_reason = sum(d["x_reason"] for d in days.values())
-    if codex_total > 0:
+    if codex_total > 0 and not any(v.get("tool") == "codex" for v in models.values()):
         models["GPT-5.5 (Codex)"] = {"cost": round(codex_total, 2), "in": codex_in, "out": codex_out,
                                       "reason": codex_reason, "tool": "codex"}
 
-    daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2), "pi": round(v["pi"], 2),
-              "total": round(v["claude"] + v["codex"] + v["pi"] + v["opencode"], 2),
+    daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
+              "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
+              "total": round(v["claude"] + v["codex"] + v["zcode"] + v["mimocode"] + v["pi"] + v["opencode"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
@@ -2408,6 +2644,9 @@ def build_wrapped(period="all", refresh=True):
             total_tokens += tok
             total_cost += day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Codex)"
+                model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- Hermes (in + out + cr + cw + reason) ---
     for f, entry in cache.get("hermes", {}).items():
@@ -2421,6 +2660,23 @@ def build_wrapped(period="all", refresh=True):
             total_tokens += tok
             total_cost += day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
+
+    # --- ZCode / MimoCode (in + out + cr + cw + reason) ---
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MimoCode")):
+        for f, entry in cache.get(tool_key, {}).items():
+            if not isinstance(entry, dict):
+                continue
+            for dk, day in entry.get("days", {}).items():
+                if cutoff and dk < cutoff:
+                    continue
+                tok = token_total(day)
+                day_tokens[dk] = day_tokens.get(dk, 0) + tok
+                total_tokens += tok
+                total_cost += day.get("cost", 0)
+                weekday[date.fromisoformat(dk).weekday()] += tok
+                for mn, mv in day.get("models", {}).items():
+                    nm = f"{nice_model(mn)} ({suffix})"
+                    model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- OpenClaw (in + out + cr + cw) ---
     for f, entry in cache.get("openclaw", {}).items():

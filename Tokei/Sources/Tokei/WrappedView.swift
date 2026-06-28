@@ -351,7 +351,8 @@ struct BadgeView: View {
 struct ConfettiView: View {
     @State private var fall = false
     private let palette: [Color] = [Theme.claude, Theme.qoder, Theme.qoderwork, Theme.hermes,
-                                    Theme.codex, Theme.gemini, Theme.openclaw]
+                                    Theme.codex, Theme.gemini, Theme.zcode, Theme.mimocode,
+                                    Theme.openclaw]
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .top) {

@@ -124,6 +124,8 @@ struct DashboardView: View {
         case "grok": return Theme.grok
         case "qoder": return Theme.qoder
         case "hermes": return Theme.hermes
+        case "zcode": return Theme.zcode
+        case "mimocode": return Theme.mimocode
         case "openclaw": return Theme.openclaw
         case "pi": return Theme.pi
         case "opencode": return Theme.opencode
@@ -703,7 +705,9 @@ struct DashboardView: View {
 
         let codex = usage.codex.ranges.get(key)
         let codexTokens = codex.in + codex.cached + codex.out + codex.reason
-        if codexTokens > 0 || codex.cost > 0 {
+        if !codex.models.isEmpty {
+            appendTokenModels(codex.models, tool: "codex", suffix: "Codex", to: &out)
+        } else if codexTokens > 0 || codex.cost > 0 {
             out.append(modelCost(name: "GPT-5.5 (Codex)", cost: codex.cost, tool: "codex",
                                  input: codex.in + codex.cached, out: codex.out,
                                  reason: codex.reason, tokens: codexTokens))
@@ -733,6 +737,8 @@ struct DashboardView: View {
         }
 
         appendTokenModels(usage.hermes.ranges.get(key).models, tool: "hermes", suffix: "Hermes", to: &out)
+        appendTokenModels(usage.zcode.ranges.get(key).models, tool: "zcode", suffix: "ZCode", to: &out)
+        appendTokenModels(usage.mimocode.ranges.get(key).models, tool: "mimocode", suffix: "MimoCode", to: &out)
         appendTokenModels(usage.openclaw.ranges.get(key).models, tool: "openclaw", suffix: "OpenClaw", to: &out)
         appendTokenModels(usage.pi.ranges.get(key).models, tool: "pi", suffix: "Pi", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
@@ -782,6 +788,8 @@ struct DashboardView: View {
             + (grok.ctx_used ?? grok.tokens)
             + qoder.in + qoder.cached + qoder.out
             + hermesTotal(usage.hermes.ranges.get(key))
+            + tokenUsageTotal(usage.zcode.ranges.get(key))
+            + tokenUsageTotal(usage.mimocode.ranges.get(key))
             + openClawTotal(usage.openclaw.ranges.get(key))
             + tokenUsageTotal(usage.pi.ranges.get(key))
             + tokenUsageTotal(usage.opencode.ranges.get(key))
@@ -792,6 +800,8 @@ struct DashboardView: View {
             + usage.codex.ranges.get(key).cost
             + usage.gemini.ranges.get(key).cost
             + usage.hermes.ranges.get(key).cost
+            + usage.zcode.ranges.get(key).cost
+            + usage.mimocode.ranges.get(key).cost
             + usage.openclaw.ranges.get(key).cost
             + usage.pi.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost

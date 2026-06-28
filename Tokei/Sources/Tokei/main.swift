@@ -175,12 +175,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let showP = ud.object(forKey: "showPi") as? Bool ?? true
                 let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                 let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
+                let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
+                let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
                 var total = 0
                 if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                 if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached + r.reason) }
                 if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                 if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                 if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                 if total > 0 {
                     seg(Fmt.human(total), .secondaryLabelColor)
                 } else {
