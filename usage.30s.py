@@ -446,12 +446,12 @@ def scan_claude(bounds, cache):
             cur_file = f
         sig = f"{mtime}:{size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig:
+        if not entry or entry.get("sig") != sig or entry.get("usage_version") != 2:
             days = {}
             hours = [0] * 24
             dh = set()
             proj = None
-            seen_mids = set()
+            seen_events = set()
             try:
                 with open(f, "r", encoding="utf-8", errors="ignore") as fh:
                     for line in fh:
@@ -460,11 +460,12 @@ def scan_claude(bounds, cache):
                         u = _claude_usage(line, want_dt=True)
                         if not u:
                             continue
-                        mid = u.get("mid")
-                        if mid:
-                            if mid in seen_mids:
+                        # message.id 会在流式/工具调用过程中重复出现；顶层 uuid 才是日志事件 id。
+                        eid = u.get("eid")
+                        if eid:
+                            if eid in seen_events:
                                 continue
-                            seen_mids.add(mid)
+                            seen_events.add(eid)
                         dt = u["dt"]
                         dk = dt.date().isoformat()
                         day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
@@ -482,7 +483,8 @@ def scan_claude(bounds, cache):
                             proj = u["cwd"]
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "days": days, "hours": hours, "dh": sorted(dh), "proj": proj}
+            fc[f] = {"sig": sig, "days": days, "hours": hours, "dh": sorted(dh),
+                     "proj": proj, "usage_version": 2}
 
     for p in stale:
         fc.pop(p, None)
@@ -558,7 +560,8 @@ def _claude_usage(line, want_dt=False):
         write_cost = (w5 or 0) / 1e6 * p["write5m"] + (w1 or 0) / 1e6 * p["write1h"]
     cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + write_cost
     res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cost": cost,
-           "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id")}
+           "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id"),
+           "eid": o.get("uuid")}
     if want_dt:
         res["dt"] = dt
     return res
