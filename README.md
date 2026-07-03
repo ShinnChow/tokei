@@ -125,7 +125,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + SQLite |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
-| OpenCode | `~/.opencode/sessions/*.json` |
+| OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/*/msg_*.json` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 
 ## 对比 CodexBar

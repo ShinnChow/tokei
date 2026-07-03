@@ -16,7 +16,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `sessions` 表 |
 | OpenClaw | `~/.openclaw/tasks/runs.sqlite` | SQLite, `task_runs` 表 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
-| OpenCode | `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | JSON, `tokens` + `cost` |
+| OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 
 ---
 
@@ -174,7 +174,7 @@ cost = (input - cached)/1M × price_in
 
 ### Pi Coding Agent CLI / OpenCode 成本
 
-Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 直接使用消息 JSON 中的 `cost` 字段。若 Pi 成本字段缺失，则按统一价格表用 input/output/cache_read/cache_write 回退估算。
+Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQLite `message.data` 中的 `cost` 字段，旧版 JSON 文件同口径。若 Pi 成本字段缺失，则按统一价格表用 input/output/cache_read/cache_write 回退估算。
 
 ### Grok / Qoder / OpenClaw
 

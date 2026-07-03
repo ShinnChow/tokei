@@ -25,6 +25,7 @@ GROK_DIR = os.path.join(HOME, ".grok", "sessions")
 QODER_DIR = os.path.join(HOME, ".qoder")
 HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
 OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode", "storage", "message")
+OPENCODE_DB = os.path.join(HOME, ".local", "share", "opencode", "opencode.db")
 OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
@@ -1320,9 +1321,65 @@ def scan_pi(bounds, cache):
 
 
 # ---------- OpenCode ----------
-# JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
+# 新版 SQLite: ~/.local/share/opencode/opencode.db — message 表 data JSON。
+# 旧版 JSON: ~/.local/share/opencode/storage/message/<session>/msg_*.json。
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
+def _scan_opencode_db(bounds):
+    B = _empty_token_ranges()
+    if not os.path.isfile(OPENCODE_DB):
+        return None
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+        rows = conn.execute("SELECT session_id, time_created, data FROM message").fetchall()
+        conn.close()
+    except Exception:
+        return None
+
+    saw_usage = False
+    for sid, created, raw in rows:
+        try:
+            d = json.loads(raw)
+        except Exception:
+            continue
+        if d.get("role") != "assistant":
+            continue
+        tok = d.get("tokens") or {}
+        ca = tok.get("cache") or {}
+        day_data = {
+            "in": tok.get("input", 0) or 0,
+            "out": tok.get("output", 0) or 0,
+            "reason": tok.get("reasoning", 0) or 0,
+            "cr": ca.get("read", 0) or 0,
+            "cw": ca.get("write", 0) or 0,
+            "cost": d.get("cost", 0) or 0,
+            "session": sid,
+            "models": {},
+        }
+        if not token_total(day_data) and not day_data["cost"]:
+            continue
+        t = (d.get("time") or {}).get("created") or created
+        if not t:
+            continue
+        day_data["date"] = datetime.fromtimestamp(t / 1000).strftime("%Y-%m-%d")
+        model = d.get("modelID", "")
+        _add_model_usage(day_data["models"], model, day_data["in"], day_data["out"],
+                         day_data["cr"], day_data["cw"], day_data["reason"], day_data["cost"])
+        try:
+            dd = date.fromisoformat(day_data["date"])
+        except ValueError:
+            continue
+        saw_usage = True
+        for k in classify_date(dd, bounds):
+            _merge_token_day(B[k], day_data, sid)
+    return {"ranges": B} if saw_usage else None
+
+
 def scan_opencode(bounds, cache):
+    from_db = _scan_opencode_db(bounds)
+    if from_db is not None:
+        return from_db
+
     fc = cache.setdefault("opencode", {})
     B = _empty_token_ranges()
     if not os.path.isdir(OPENCODE_DIR):
