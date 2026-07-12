@@ -48,8 +48,9 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 - 总量 = `input_tokens + output_tokens`（即 `total_tokens`）
 
 Codex 的子代理和分叉 rollout 可能重放父任务历史。Tokei 使用
-`total_token_usage + last_token_usage` 组成快照键,在全部 rollout 文件中只保留最早出现的一次;
-子代理后续产生的新快照继续计入。
+`session_meta.forked_from_id` 找到父会话,再用 `total_token_usage + last_token_usage`
+组成快照键扣除子会话开头复制的父会话前缀。缺少 fork 元数据时,只对较长的相同前缀
+做保守去重,避免把两个独立会话里偶然相同的 token 快照误删。
 
 **Gemini CLI** — `tokens.input` 已包含缓存:
 - 输入 = `tokens.input - tokens.cached`

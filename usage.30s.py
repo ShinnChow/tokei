@@ -274,7 +274,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 12
+_SCAN_CACHE_VERSION = 13
 
 
 def _load_scan_cache():
@@ -687,36 +687,94 @@ def fetch_codex_live_limits():
         return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
 
 
-def _codex_deduped_days(file_cache):
-    """Return per-file daily usage after removing replayed snapshots globally."""
-    owners = {}
-    for file_path, entry in file_cache.items():
-        for event_index, event in enumerate(entry.get("events", [])):
-            if not isinstance(event, list) or len(event) != 11:
-                continue
-            total_values = event[2:6]
-            if all(value is not None for value in total_values):
-                key = tuple(event[2:10])
-            else:
-                # A last_token_usage without a cumulative total cannot be matched safely.
-                key = ("unique", file_path, event_index)
-            rank = (event[0], file_path, event_index)
-            current = owners.get(key)
-            if current is None or rank < current[0]:
-                owners[key] = (rank, file_path, event)
+def _codex_event_key(event):
+    if not isinstance(event, list) or len(event) != 11:
+        return None
+    total_values = event[2:6]
+    if not all(value is not None for value in total_values):
+        return None
+    return tuple(event[2:10])
 
+
+def _codex_add_event(days, event):
+    dk = event[1]
+    li, lc, lo, lr, cost = event[6:11]
+    day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
+                               "reason": 0, "cost": 0.0})
+    day["in"] += li
+    day["cached"] += lc
+    day["out"] += lo
+    day["reason"] += lr
+    day["cost"] += cost
+
+
+def _codex_prefix_match_count(child_events, parent_events):
+    n = 0
+    while n < len(child_events) and n < len(parent_events):
+        child_key = _codex_event_key(child_events[n])
+        parent_key = _codex_event_key(parent_events[n])
+        if child_key is None or child_key != parent_key:
+            break
+        n += 1
+    return n
+
+
+def _codex_replayed_event_indexes(file_cache):
+    by_sid = {}
+    ordered = []
+    for file_path, entry in file_cache.items():
+        events = entry.get("events") or []
+        if events:
+            ordered.append((file_path, entry))
+        sid = entry.get("session_id")
+        if sid:
+            by_sid[sid] = (file_path, entry)
+
+    drops = {}
+    for file_path, entry in ordered:
+        parent = by_sid.get(entry.get("forked_from_id"))
+        if not parent:
+            continue
+        n = _codex_prefix_match_count(entry.get("events") or [], parent[1].get("events") or [])
+        if n:
+            drops.setdefault(file_path, set()).update(range(n))
+
+    # Some Codex replay files do not carry fork metadata. Only use this
+    # heuristic for longer matching prefixes; a one-event match can be a real
+    # independent session with the same usage numbers.
+    for file_path, entry in ordered:
+        if drops.get(file_path):
+            continue
+        child_events = entry.get("events") or []
+        if not child_events:
+            continue
+        child_first_ts = child_events[0][0]
+        best = 0
+        for parent_path, parent_entry in ordered:
+            if parent_path == file_path:
+                continue
+            parent_events = parent_entry.get("events") or []
+            if not parent_events or parent_events[0][0] >= child_first_ts:
+                continue
+            best = max(best, _codex_prefix_match_count(child_events, parent_events))
+        if best >= 2:
+            drops.setdefault(file_path, set()).update(range(best))
+    return drops
+
+
+def _codex_deduped_days(file_cache):
+    """Return per-file daily usage after removing copied rollout prefixes."""
+    drops = _codex_replayed_event_indexes(file_cache)
     days_by_file = {}
-    for _, file_path, event in owners.values():
-        dk = event[1]
-        li, lc, lo, lr, cost = event[6:11]
-        days = days_by_file.setdefault(file_path, {})
-        day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
-                                   "reason": 0, "cost": 0.0})
-        day["in"] += li
-        day["cached"] += lc
-        day["out"] += lo
-        day["reason"] += lr
-        day["cost"] += cost
+    for file_path, entry in file_cache.items():
+        skip = drops.get(file_path, set())
+        for event_index, event in enumerate(entry.get("events", [])):
+            if event_index in skip or _codex_event_key(event) is None:
+                if event_index in skip:
+                    continue
+                if not isinstance(event, list) or len(event) != 11:
+                    continue
+            _codex_add_event(days_by_file.setdefault(file_path, {}), event)
     return days_by_file
 
 
@@ -768,6 +826,28 @@ def _iter_codex_token_lines(path, chunk_size=64 * 1024, header_limit=4 * 1024):
         yield bytes(candidate)
 
 
+def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
+    try:
+        with open(path, "rb", buffering=0) as fh:
+            for _ in range(max_lines):
+                line = fh.readline(max_line_bytes)
+                if not line:
+                    break
+                if b'"session_meta"' not in line:
+                    continue
+                try:
+                    o = json.loads(line.decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                if o.get("type") != "session_meta":
+                    continue
+                meta = o.get("payload") or {}
+                return meta.get("session_id") or meta.get("id"), meta.get("forked_from_id")
+    except OSError:
+        pass
+    return None, None
+
+
 def scan_codex(bounds, cache):
     fc = cache.setdefault("codex", {})
     B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0, "sessions": set()}
@@ -801,6 +881,7 @@ def scan_codex(bounds, cache):
         entry = fc.get(f)
         if not entry or entry.get("sig") != sig:
             events = []
+            session_id, forked_from_id = _codex_session_meta(f)
             file_limits = None; file_limits_ts = None; file_plan = None
             file_g_limits = None; file_g_ts = None; file_g_plan = None
             file_last_total = None
@@ -855,6 +936,7 @@ def scan_codex(bounds, cache):
             except OSError:
                 continue
             fc[f] = {"sig": sig, "events": events, "days": {},
+                     "session_id": session_id, "forked_from_id": forked_from_id,
                      "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                      "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
                      "last_total": file_last_total}
