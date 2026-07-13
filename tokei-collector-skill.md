@@ -39,6 +39,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 - OpenClaw (`~/.openclaw/`)
 - Pi Coding Agent CLI (`~/.pi/agent/sessions/`)
 - OpenCode (`~/.local/share/opencode/`)
+- Qwen Code (`~/.qwen/`)
 
 ## 卸载
 

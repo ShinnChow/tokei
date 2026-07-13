@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程工具** 上的用量、成本和性能——全部基于本地日志，零网络流量。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **11 款 AI 编程工具** 上的用量、成本和性能——全部基于本地日志，零网络流量。
 
 ### 支持的工具
 
@@ -33,7 +33,9 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
+| **Qwen Code** | Token、思考量、成本、模型 |
 | **Qoder** | Token、调用次数、配额 |
+| **QoderWork** | Token、调用次数、配额 |
 
 ## 功能一览
 
@@ -126,13 +128,15 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + SQLite |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | OpenCode | `~/.opencode/sessions/*.json` |
+| Qwen Code | `~/.qwen/usage_record.jsonl` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
+| QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 
 ## 对比 CodexBar
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
 |------|:-----:|:---------:|
-| 支持工具 | 9 | 40+ |
+| 支持工具 | 11 | 40+ |
 | Token 级用量分析 | ✅ | — |
 | 成本估算（317 模型） | ✅ | 部分 |
 | 数据面板（图表 + 热力图） | ✅ | — |
@@ -233,11 +237,11 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **9 AI coding tools** in real-time — all from local log files, with zero network traffic.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **11 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
 **Features:** Real-time monitoring (30s refresh) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Hermes, OpenClaw, Pi Coding Agent CLI, OpenCode, Qoder
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Hermes, OpenClaw, Pi Coding Agent CLI, OpenCode, Qwen Code, Qoder, QoderWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

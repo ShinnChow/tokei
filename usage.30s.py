@@ -1798,7 +1798,6 @@ def scan_qwencode(bounds, cache):
     if not os.path.isfile(QWEN_CODE_USAGE):
         return {"ranges": B}
 
-    sig_key = QWEN_CODE_USAGE
     try:
         st = os.stat(QWEN_CODE_USAGE)
     except OSError:
@@ -1831,16 +1830,20 @@ def scan_qwencode(bounds, cache):
                 day_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
                 models = {}
                 total_in = total_out = total_cr = total_reason = 0
+                total_cost = 0.0
                 for model_name, mv in d.get("models", {}).items():
                     inp = mv.get("inputTokens", 0) or 0
                     out = mv.get("outputTokens", 0) or 0
                     cr = mv.get("cachedTokens", 0) or 0
                     reason = mv.get("thoughtsTokens", 0) or 0
-                    _add_model_usage(models, model_name, inp, out, cr, 0, reason, 0)
+                    p = price_for(model_name)
+                    model_cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"]
+                    _add_model_usage(models, model_name, inp, out, cr, 0, reason, model_cost)
                     total_in += inp
                     total_out += out
                     total_cr += cr
                     total_reason += reason
+                    total_cost += model_cost
                 day_data = {
                     "date": day_str,
                     "in": total_in,
@@ -1848,8 +1851,8 @@ def scan_qwencode(bounds, cache):
                     "cr": total_cr,
                     "cw": 0,
                     "reason": total_reason,
-                    "cost": 0,
-                    "session": d.get("sessionId", ""),
+                    "cost": total_cost,
+                    "session": d.get("sessionId") or None,
                     "models": models,
                 }
                 entries.append(day_data)
@@ -2522,7 +2525,7 @@ def build_daily_costs(period="all", refresh=True):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "opencode": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "opencode": 0.0, "qwencode": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
@@ -2591,6 +2594,23 @@ def build_daily_costs(period="all", refresh=True):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
+    qwencode_entries = cache.get("qwencode", {}).get("entries", [])
+    for entry in qwencode_entries:
+        dk = entry.get("date")
+        if not dk:
+            continue
+        if cutoff and dk < cutoff:
+            continue
+        d = days.setdefault(dk, _empty())
+        d["qwencode"] += entry.get("cost", 0)
+        d["tokens"] += token_total(entry)
+        for mn, mv in entry.get("models", {}).items():
+            nm = f"{nice_model(mn)} (Qwen Code)"
+            m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "qwencode"})
+            m["cost"] += mv.get("cost", 0)
+            for key in TOKEN_FIELDS:
+                m[key] += mv.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -2630,7 +2650,8 @@ def build_daily_costs(period="all", refresh=True):
                                       "reason": codex_reason, "tool": "codex"}
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2), "pi": round(v["pi"], 2),
-              "total": round(v["claude"] + v["codex"] + v["pi"] + v["opencode"], 2),
+              "qwencode": round(v["qwencode"], 2),
+              "total": round(v["claude"] + v["codex"] + v["pi"] + v["opencode"] + v["qwencode"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
@@ -2782,6 +2803,22 @@ def build_wrapped(period="all", refresh=True):
             total_tokens += tok
             total_cost += day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
+
+    # --- Qwen Code (in + out + cr + reason) ---
+    for entry in cache.get("qwencode", {}).get("entries", []):
+        dk = entry.get("date")
+        if not dk:
+            continue
+        if cutoff and dk < cutoff:
+            continue
+        tok = token_total(entry)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        total_tokens += tok
+        total_cost += entry.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        for mn, mv in entry.get("models", {}).items():
+            nm = f"{nice_model(mn)} (Qwen Code)"
+            model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
     for f, entry in cache.get("pi", {}).items():
