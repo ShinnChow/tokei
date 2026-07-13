@@ -39,6 +39,7 @@ enum Theme {
     static let openclaw = Color(red: 0.85, green: 0.45, blue: 0.68) // 玫红
     static let pi = Color(red: 0.74, green: 0.58, blue: 0.95)       // 柔紫
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
+    static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16

@@ -9,6 +9,7 @@ struct PanelView: View {
     @State private var geminiModelsOpen = false
     @State private var piModelsOpen = false
     @State private var openCodeModelsOpen = false
+    @State private var qwenCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
@@ -31,9 +32,10 @@ struct PanelView: View {
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showOpenCode") private var showOpenCode = true
+    @AppStorage("showQwenCode") private var showQwenCode = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showOpenClaw, showPi, showOpenCode].filter { $0 }.count
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showOpenClaw, showPi, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -211,6 +213,7 @@ struct PanelView: View {
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel), or = u.opencode.ranges.get(sel)
+        let qcr = u.qwencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude, active: cr.sessions > 0,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
@@ -232,6 +235,8 @@ struct PanelView: View {
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
+            ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
+                         tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen))),
         ]
     }
 
@@ -1175,6 +1180,7 @@ struct PanelView: View {
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
+                settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
             }
         }
         .onChange(of: showQoder) { enabled in

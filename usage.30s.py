@@ -32,6 +32,7 @@ OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+QWEN_CODE_DIR = os.path.join(HOME, ".qwen")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -368,6 +369,10 @@ def _empty_opencode():
 
 def _empty_pi():
     return _empty_opencode()
+
+
+def _empty_qwencode():
+    return {"ranges": _empty_token_ranges()}
 
 
 def token_total(day):
@@ -1783,6 +1788,86 @@ def scan_opencode(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Qwen Code ----------
+QWEN_CODE_USAGE = os.path.join(QWEN_CODE_DIR, "usage_record.jsonl")
+
+
+def scan_qwencode(bounds, cache):
+    fc = cache.setdefault("qwencode", {})
+    B = _empty_token_ranges()
+    if not os.path.isfile(QWEN_CODE_USAGE):
+        return {"ranges": B}
+
+    sig_key = QWEN_CODE_USAGE
+    try:
+        st = os.stat(QWEN_CODE_USAGE)
+    except OSError:
+        return {"ranges": B}
+    sig = f"{st.st_mtime}:{st.st_size}"
+    if fc.get("sig") == sig:
+        for entry in fc.get("entries", []):
+            try:
+                dd = date.fromisoformat(entry["date"])
+            except (ValueError, KeyError):
+                continue
+            for k in classify_date(dd, bounds):
+                _merge_token_day(B[k], entry, entry.get("session"))
+        return {"ranges": B}
+
+    entries = []
+    try:
+        with open(QWEN_CODE_USAGE, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                ts = d.get("timestamp") or d.get("startTime", 0)
+                if not ts:
+                    continue
+                day_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                models = {}
+                total_in = total_out = total_cr = total_reason = 0
+                for model_name, mv in d.get("models", {}).items():
+                    inp = mv.get("inputTokens", 0) or 0
+                    out = mv.get("outputTokens", 0) or 0
+                    cr = mv.get("cachedTokens", 0) or 0
+                    reason = mv.get("thoughtsTokens", 0) or 0
+                    _add_model_usage(models, model_name, inp, out, cr, 0, reason, 0)
+                    total_in += inp
+                    total_out += out
+                    total_cr += cr
+                    total_reason += reason
+                day_data = {
+                    "date": day_str,
+                    "in": total_in,
+                    "out": total_out,
+                    "cr": total_cr,
+                    "cw": 0,
+                    "reason": total_reason,
+                    "cost": 0,
+                    "session": d.get("sessionId", ""),
+                    "models": models,
+                }
+                entries.append(day_data)
+    except OSError:
+        return {"ranges": B}
+
+    fc["sig"] = sig
+    fc["entries"] = entries
+    for entry in entries:
+        try:
+            dd = date.fromisoformat(entry["date"])
+        except ValueError:
+            continue
+        for k in classify_date(dd, bounds):
+            _merge_token_day(B[k], entry, entry.get("session"))
+    return {"ranges": B}
+
+
 def fmt_reset(epoch):
     try:
         return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%m-%d %H:%M")
@@ -1891,6 +1976,7 @@ def compute():
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
+    qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     _save_scan_cache(cache)
 
     def claude_range(b):
@@ -1989,6 +2075,7 @@ def compute():
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
+    qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -2038,6 +2125,9 @@ def compute():
         "opencode": {
             "ranges": ocranges,
         },
+        "qwencode": {
+            "ranges": qwcranges,
+        },
     }
     if errors:
         result["_errors"] = errors
@@ -2047,7 +2137,7 @@ def compute():
 
 def _recalc_costs(result):
     """用本地最新价格表重算所有模型成本,修正历史/同步数据中的价格偏差。"""
-    for tool_key in ("claude", "gemini", "pi", "opencode", "hermes", "openclaw"):
+    for tool_key in ("claude", "gemini", "pi", "opencode", "qwencode", "hermes", "openclaw"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
