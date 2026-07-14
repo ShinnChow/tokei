@@ -10,6 +10,7 @@ struct PanelView: View {
     @State private var piModelsOpen = false
     @State private var workBuddyModelsOpen = false
     @State private var openCodeModelsOpen = false
+    @State private var qwenCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
@@ -33,10 +34,11 @@ struct PanelView: View {
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showOpenCode") private var showOpenCode = true
+    @AppStorage("showQwenCode") private var showQwenCode = true
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes,
-         showOpenClaw, showPi, showWorkBuddy, showOpenCode].filter { $0 }.count
+         showOpenClaw, showPi, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -215,6 +217,7 @@ struct PanelView: View {
         let hr = u.hermes.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
+        let qcr = u.qwencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude, active: cr.sessions > 0,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
@@ -238,6 +241,8 @@ struct PanelView: View {
                          tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
+            ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
+                         tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen))),
         ]
     }
 
@@ -1228,6 +1233,7 @@ struct PanelView: View {
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
+                settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -1761,7 +1767,7 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
-                         "openclaw", "pi", "workbuddy", "opencode"]
+                         "openclaw", "pi", "workbuddy", "opencode", "qwencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

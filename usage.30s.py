@@ -11,6 +11,7 @@
 #   Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl (assistant 行 message.usage)
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
+#   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 
 import os
 import sys
@@ -34,6 +35,8 @@ OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("QWEN_HOME", os.path.join(HOME, ".qwen"))))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -107,6 +110,7 @@ def _normalize(model: str):
     m = (model or "").strip().lower()
     if not m or m == "<synthetic>":
         return None
+    m = re.sub(r"\s+", "-", m)
     m = re.sub(r"[:\-]free$", "", m)                  # 免费档按基础价
     if "/" in m:
         return m                                      # 已是 OpenRouter 格式
@@ -274,7 +278,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 12
+_SCAN_CACHE_VERSION = 13
 
 
 def _load_scan_cache():
@@ -381,6 +385,10 @@ def _empty_pi():
 
 
 def _empty_workbuddy():
+    return _empty_opencode()
+
+
+def _empty_qwencode():
     return _empty_opencode()
 
 
@@ -2188,6 +2196,261 @@ def scan_opencode(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Qwen Code ----------
+# 新版逐请求日志提供实时、按小时数据；旧版会话汇总用于补齐历史。
+# 两种来源按 sessionId 去重，逐请求日志覆盖同一会话的汇总快照。
+QWEN_CODE_USAGE = os.path.join(QWEN_CODE_DIR, "usage_record.jsonl")
+
+
+def _qwen_number(value):
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _qwen_runtime_dirs():
+    def resolve(path):
+        return os.path.abspath(os.path.expanduser(str(path)))
+
+    env_dir = os.environ.get("QWEN_RUNTIME_DIR")
+    if env_dir:
+        return [resolve(env_dir)]
+    settings = _load_json(os.path.join(QWEN_CODE_DIR, "settings.json"), {})
+    advanced = settings.get("advanced") if isinstance(settings, dict) else {}
+    configured = advanced.get("runtimeOutputDir") if isinstance(advanced, dict) else None
+    if isinstance(configured, str) and configured and (
+            os.path.isabs(os.path.expanduser(configured)) or configured.startswith("~")):
+        return [resolve(configured)]
+    return [QWEN_CODE_DIR]
+
+
+def _qwen_token_usage_files():
+    files = set()
+    for runtime_dir in _qwen_runtime_dirs():
+        files.update(glob.glob(os.path.join(runtime_dir, "usage", "token-usage-*.jsonl")))
+    return sorted(files)
+
+
+def _qwen_datetime(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
+            return datetime.fromtimestamp(seconds).astimezone()
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        dt = parse_ts(value)
+        return dt.astimezone() if dt else None
+    return None
+
+
+def _qwen_usage_parts(model, values):
+    values = values if isinstance(values, dict) else {}
+    input_total = _qwen_number(values.get("inputTokens"))
+    cached = _qwen_number(values.get("cachedTokens"))
+    if input_total == 0 and cached > 0:
+        input_total = cached
+    cached = min(cached, input_total)
+    inp = max(input_total - cached, 0)
+    out = _qwen_number(values.get("outputTokens"))
+    reason = _qwen_number(values.get("thoughtsTokens"))
+    price = _raw_price(model)
+    cost = ((inp * price["in"] + cached * price["cache_read"]
+             + (out + reason) * price["out"]) / 1e6)
+    return inp, out, cached, reason, cost
+
+
+def _qwen_request_entry(record):
+    if not isinstance(record, dict):
+        return None
+    version = _qwen_number(record.get("schemaVersion"))
+    record_id = str(record.get("id") or "").strip()
+    session = str(record.get("sessionId") or "").strip()
+    model = str(record.get("model") or "unknown")
+    if not record_id or not session or version != 1:
+        return None
+
+    dt = _qwen_datetime(record.get("timestamp"))
+    day_str = str(record.get("localDate") or "")
+    try:
+        date.fromisoformat(day_str)
+    except ValueError:
+        day_str = dt.date().isoformat() if dt else ""
+    if not day_str:
+        return None
+
+    inp, out, cached, reason, cost = _qwen_usage_parts(model, record)
+    models = {}
+    _add_model_usage(models, model, inp, out, cached, 0, reason, cost)
+    return {
+        "date": day_str,
+        "hour": dt.hour if dt else None,
+        "in": inp,
+        "out": out,
+        "cr": cached,
+        "cw": 0,
+        "reason": reason,
+        "cost": cost,
+        "session": session,
+        "models": models,
+    }
+
+
+def _qwen_summary_entry(record):
+    if not isinstance(record, dict) or record.get("version") != 1:
+        return None
+    session = str(record.get("sessionId") or "").strip()
+    dt = _qwen_datetime(record.get("timestamp") or record.get("startTime"))
+    models_raw = record.get("models") or {}
+    if not session or not dt or not isinstance(models_raw, dict):
+        return None
+
+    models = {}
+    total_in = total_out = total_cr = total_reason = 0
+    total_cost = 0.0
+    for model, values in models_raw.items():
+        inp, out, cached, reason, cost = _qwen_usage_parts(str(model), values)
+        _add_model_usage(models, str(model), inp, out, cached, 0, reason, cost)
+        total_in += inp
+        total_out += out
+        total_cr += cached
+        total_reason += reason
+        total_cost += cost
+    return {
+        "date": dt.date().isoformat(),
+        "hour": dt.hour,
+        "in": total_in,
+        "out": total_out,
+        "cr": total_cr,
+        "cw": 0,
+        "reason": total_reason,
+        "cost": total_cost,
+        "session": session,
+        "project": record.get("project") or "",
+        "models": models,
+    }
+
+
+def _qwen_read_jsonl(paths):
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    try:
+                        value = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(value, dict):
+                        yield value
+        except OSError:
+            continue
+
+
+def _qwen_group_entries(entries):
+    grouped = {}
+    for entry in entries:
+        key = (entry.get("session"), entry.get("date"), entry.get("hour"))
+        target = grouped.get(key)
+        if target is None:
+            target = {
+                "date": entry.get("date"),
+                "hour": entry.get("hour"),
+                "in": 0,
+                "out": 0,
+                "cr": 0,
+                "cw": 0,
+                "reason": 0,
+                "cost": 0.0,
+                "session": entry.get("session"),
+                "project": entry.get("project") or "",
+                "models": {},
+            }
+            grouped[key] = target
+        _add_token_usage(target, entry.get("in", 0), entry.get("out", 0),
+                         entry.get("cr", 0), entry.get("cw", 0), entry.get("reason", 0),
+                         entry.get("cost", 0))
+        for model, values in entry.get("models", {}).items():
+            _add_model_usage(target["models"], model, values.get("in", 0), values.get("out", 0),
+                             values.get("cr", 0), values.get("cw", 0), values.get("reason", 0),
+                             values.get("cost", 0))
+    return list(grouped.values())
+
+
+def _qwen_entries(token_files, summary_file):
+    request_entries = {}
+    for record in _qwen_read_jsonl(token_files):
+        record_id = str(record.get("id") or "").strip()
+        entry = _qwen_request_entry(record)
+        if record_id and entry is not None:
+            request_entries[record_id] = entry
+
+    entries = list(request_entries.values())
+    request_sessions = set()
+    for entry in entries:
+        request_sessions.add(entry["session"])
+
+    summaries = {}
+    if summary_file:
+        for record in _qwen_read_jsonl([summary_file]):
+            session = str(record.get("sessionId") or "").strip()
+            if session:
+                summaries[session] = record
+    for session, record in summaries.items():
+        if session in request_sessions:
+            continue
+        entry = _qwen_summary_entry(record)
+        if entry is not None:
+            entries.append(entry)
+    return _qwen_group_entries(entries)
+
+
+def _qwen_source_signature(paths):
+    import hashlib
+    digest = hashlib.sha256()
+    found = False
+    for path in sorted(paths):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        found = True
+        digest.update(path.encode("utf-8", errors="ignore"))
+        digest.update(f"\0{st.st_mtime_ns}\0{st.st_size}\0".encode())
+    return digest.hexdigest() if found else None
+
+
+def scan_qwencode(bounds, cache):
+    fc = cache.setdefault("qwencode", {})
+    B = _empty_token_ranges()
+    token_files = _qwen_token_usage_files()
+    summary_file = QWEN_CODE_USAGE if os.path.isfile(QWEN_CODE_USAGE) else None
+    sources = token_files + ([summary_file] if summary_file else [])
+    sig = _qwen_source_signature(sources)
+    if sig is None:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    if fc.get("sig") != sig:
+        entries = _qwen_entries(token_files, summary_file)
+        fc.clear()
+        fc.update({"sig": sig, "entries": entries})
+        cache["_dirty"] = True
+
+    for entry in fc.get("entries", []):
+        try:
+            day = date.fromisoformat(entry["date"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        for key in classify_date(day, bounds):
+            _merge_token_day(B[key], entry, entry.get("session"))
+    return {"ranges": B}
+
+
 def fmt_reset(epoch):
     try:
         return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%m-%d %H:%M")
@@ -2297,6 +2560,7 @@ def compute():
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
+    qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     _save_scan_cache(cache)
 
     def claude_range(b):
@@ -2397,6 +2661,7 @@ def compute():
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
+    qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -2449,6 +2714,9 @@ def compute():
         "opencode": {
             "ranges": ocranges,
         },
+        "qwencode": {
+            "ranges": qwcranges,
+        },
     }
     if errors:
         result["_errors"] = errors
@@ -2458,7 +2726,7 @@ def compute():
 
 def _recalc_costs(result):
     """用本地最新价格表重算所有模型成本,修正历史/同步数据中的价格偏差。"""
-    for tool_key in ("claude", "gemini", "pi", "workbuddy", "opencode", "hermes", "openclaw"):
+    for tool_key in ("claude", "gemini", "pi", "workbuddy", "opencode", "qwencode", "hermes", "openclaw"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -2481,6 +2749,11 @@ def _recalc_costs(result):
                 elif tool_key == "gemini":
                     cached = m.get("cached", 0)
                     cost = ti / 1e6 * p["in"] + to / 1e6 * p["out"] + cached / 1e6 * p["cache_read"]
+                elif tool_key == "qwencode":
+                    cr = m.get("cr", 0)
+                    reason = m.get("reason", 0)
+                    cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
+                            + cr / 1e6 * p["cache_read"])
                 else:
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
@@ -2634,6 +2907,18 @@ def main():
         print(f"今日 缓存读 {human(wt['cr']):>6} {F}")
         print(f"今日 ≈成本  ${wt['cost']:.2f} {F}")
         print("---")
+    # Qwen Code 块
+    qt = d["qwencode"]["ranges"]["today"]
+    if qt["sessions"] > 0:
+        print(f"Qwen Code {HEAD}")
+        print(f"命中率   {qt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(qt['in']):>6} {F}")
+        print(f"今日 输出   {human(qt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(qt['cr']):>6} {F}")
+        if qt.get("reason"):
+            print(f"今日 思考   {human(qt['reason']):>6} {F}")
+        print(f"今日 ≈成本  ${qt['cost']:.2f} {F}")
+        print("---")
     print("刷新 | refresh=true")
 
 
@@ -2736,6 +3021,17 @@ def _scan_local_models():
                         pass
         except OSError:
             pass
+    for record in _qwen_read_jsonl(_qwen_token_usage_files()):
+        model = record.get("model")
+        if model:
+            models.add(str(model))
+    if os.path.isfile(QWEN_CODE_USAGE):
+        for record in _qwen_read_jsonl([QWEN_CODE_USAGE]):
+            raw_models = record.get("models") or {}
+            if not isinstance(raw_models, dict):
+                continue
+            for model in raw_models.keys():
+                models.add(str(model))
     return models
 
 
@@ -2870,11 +3166,13 @@ def build_daily_costs(period="all", refresh=True):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "workbuddy": 0.0, "opencode": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "workbuddy": 0.0,
+                       "opencode": 0.0, "qwencode": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
+                       "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "tokens": 0, "sessions": 0}
 
     for fp, entry in cache.get("claude", {}).items():
@@ -2956,6 +3254,25 @@ def build_daily_costs(period="all", refresh=True):
         for key in TOKEN_FIELDS:
             m[key] += record.get(key, 0)
 
+    qwencode_entries = cache.get("qwencode", {}).get("entries", [])
+    for entry in qwencode_entries:
+        dk = entry.get("date")
+        if not dk:
+            continue
+        if cutoff and dk < cutoff:
+            continue
+        d = days.setdefault(dk, _empty())
+        d["qwencode"] += entry.get("cost", 0)
+        d["q_in"] += entry.get("in", 0); d["q_out"] += entry.get("out", 0)
+        d["q_cr"] += entry.get("cr", 0); d["q_reason"] += entry.get("reason", 0)
+        d["tokens"] += token_total(entry)
+        for mn, mv in entry.get("models", {}).items():
+            nm = f"{nice_model(mn)} (Qwen Code)"
+            m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "qwencode"})
+            m["cost"] += mv.get("cost", 0)
+            for key in TOKEN_FIELDS:
+                m[key] += mv.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -2995,12 +3312,14 @@ def build_daily_costs(period="all", refresh=True):
                                       "reason": codex_reason, "tool": "codex"}
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2), "pi": round(v["pi"], 2),
-              "workbuddy": round(v["workbuddy"], 2),
-              "total": round(v["claude"] + v["codex"] + v["pi"] + v["workbuddy"] + v["opencode"], 2),
+              "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
+              "total": round(v["claude"] + v["codex"] + v["pi"] + v["workbuddy"]
+                             + v["opencode"] + v["qwencode"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
+              "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
               "tokens": v["tokens"]}
              for dk, v in sorted(days.items())]
 
@@ -3149,6 +3468,26 @@ def build_wrapped(period="all", refresh=True):
             total_tokens += tok
             total_cost += day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
+
+    # --- Qwen Code (in + out + cr + reason) ---
+    for entry in cache.get("qwencode", {}).get("entries", []):
+        dk = entry.get("date")
+        if not dk:
+            continue
+        if cutoff and dk < cutoff:
+            continue
+        tok = token_total(entry)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        total_tokens += tok
+        total_cost += entry.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        hour = entry.get("hour")
+        if isinstance(hour, int) and 0 <= hour < 24:
+            hours[hour] += tok
+            all_day_hours.add(f"{dk}:{hour}")
+        for mn, mv in entry.get("models", {}).items():
+            nm = f"{nice_model(mn)} (Qwen Code)"
+            model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
     for f, entry in cache.get("pi", {}).items():

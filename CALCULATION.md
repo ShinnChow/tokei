@@ -16,7 +16,9 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `sessions` 表 |
 | OpenClaw | `~/.openclaw/tasks/runs.sqlite` | SQLite, `task_runs` 表 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
+| WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | OpenCode | `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | JSON, `tokens` + `cost` |
+| Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 
 ---
 
@@ -79,6 +81,17 @@ Codex 的子代理和分叉 rollout 可能重放父任务历史。Tokei 使用
 - 推理 = `usage.reasoning`(如果存在)
 - 成本 = `usage.cost.total`(优先使用)
 
+**Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
+- 输入 = `inputTokens - cachedTokens`
+- 输出 = `outputTokens`
+- 缓存读 = `cachedTokens`
+- 思考 = `thoughtsTokens`
+- 总量 = `inputTokens + outputTokens + thoughtsTokens`
+
+Tokei 优先读取逐请求日志以获得进行中会话和小时分布。旧版 `usage_record.jsonl`
+按 `sessionId` 取最后一份快照,用于补齐逐请求日志出现前的历史。同一会话同时存在两种来源时,
+逐请求日志优先,避免重复累计。
+
 **Grok CLI** — 无输入/输出拆分,仅 `totalTokens`(上下文窗口累计,取最大值,非真实消耗量)。
 
 **Qoder** — `inputTokens` / `outputTokens` 目前全为 0,仅 `durationMs` 和 `contextUsageRatio` 有值。
@@ -91,7 +104,7 @@ Codex 的子代理和分叉 rollout 可能重放父任务历史。Tokei 使用
 
 两种公式,取决于 `input` 是否包含缓存:
 
-### Claude / Hermes / Pi / OpenCode(input 不含缓存)
+### Claude / Hermes / Pi / WorkBuddy / OpenCode / Qwen Code(input 不含缓存)
 
 ```
 hit% = cache_read / (cache_read + cache_write + input) × 100
@@ -165,12 +178,22 @@ cost = (input - cached)/1M × price_in
 ### Gemini CLI 成本公式
 
 ```
-cost = (input - cached)/1M × price_in
+cost = non_cached_input/1M × price_in
      + cached/1M × price_cache_read
      + (output + thoughts)/1M × price_out
 ```
 
 思考 token 按输出价计费。
+
+### Qwen Code 成本公式
+
+```
+cost = non_cached_input/1M × price_in
+     + cached/1M × price_cache_read
+     + (output + thoughts)/1M × price_out
+```
+
+采集后 `input` 已转换为非缓存输入,成本重算时直接按拆分后的输入、缓存和思考字段计算。
 
 ### Hermes 成本
 
