@@ -36,13 +36,42 @@ class CodexDedupedDaysTests(unittest.TestCase):
         )
 
         days = USAGE._codex_deduped_days({
-            "child": {"events": [replay, child_increment]},
-            "parent": {"events": [parent]},
+            "child": {"session_id": "child", "forked_from_id": "parent",
+                      "events": [replay, child_increment]},
+            "parent": {"session_id": "parent", "events": [parent]},
         })
 
         self.assertEqual(days["parent"]["2026-07-10"]["in"], 100)
         self.assertEqual(days["child"]["2026-07-10"]["in"], 50)
         self.assertEqual(days["child"]["2026-07-10"]["out"], 3)
+        parent_hour = datetime.fromisoformat(parent[0]).astimezone().hour
+        child_hour = datetime.fromisoformat(child_increment[0]).astimezone().hour
+        self.assertEqual(days["parent"]["2026-07-10"]["hours"][parent_hour], 105)
+        self.assertEqual(days["child"]["2026-07-10"]["hours"][child_hour], 53)
+
+    def test_matching_snapshots_in_independent_sessions_are_kept(self):
+        first = event(
+            "2026-07-10T00:00:00+00:00",
+            "2026-07-10",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            1.0,
+        )
+        second = event(
+            "2026-07-10T01:00:00+00:00",
+            "2026-07-10",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            1.0,
+        )
+
+        days = USAGE._codex_deduped_days({
+            "a": {"session_id": "a", "events": [first]},
+            "b": {"session_id": "b", "events": [second]},
+        })
+
+        self.assertEqual(days["a"]["2026-07-10"]["in"], 100)
+        self.assertEqual(days["b"]["2026-07-10"]["in"], 100)
 
     def test_events_without_cumulative_total_are_kept(self):
         first = event(
@@ -70,6 +99,51 @@ class CodexDedupedDaysTests(unittest.TestCase):
 
 
 class CodexScanDedupTests(unittest.TestCase):
+    def session_meta(self, sid, forked_from_id=None):
+        payload = {
+            "session_id": forked_from_id or sid,
+            "id": sid,
+            "cwd": "/tmp/project",
+            "model_provider": "custom",
+        }
+        if forked_from_id:
+            payload["forked_from_id"] = forked_from_id
+        return json.dumps({
+            "timestamp": "2024-01-08T00:00:00Z",
+            "type": "session_meta",
+            "payload": payload,
+        })
+
+    def test_session_meta_prefers_own_id_over_parent_session_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-child.jsonl"
+            path.write_text(self.session_meta("child", "parent") + "\n", encoding="utf-8")
+            session_id, parent_id = USAGE._codex_session_meta(path)
+
+        self.assertEqual(session_id, "child")
+        self.assertEqual(parent_id, "parent")
+
+    def test_session_meta_reads_legacy_nested_parent_id(self):
+        meta = {
+            "timestamp": "2024-01-08T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "child",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {"parent_thread_id": "parent"},
+                    },
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-child.jsonl"
+            path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+            session_id, parent_id = USAGE._codex_session_meta(path)
+
+        self.assertEqual(session_id, "child")
+        self.assertEqual(parent_id, "parent")
+
     def token_count(self, ts, total, last):
         return json.dumps({
             "timestamp": ts,
@@ -102,11 +176,15 @@ class CodexScanDedupTests(unittest.TestCase):
             child_total = (150, 120, 8, 3)
             child_last = (50, 40, 3, 1)
             parent.write_text(
-                self.token_count("2024-01-08T00:00:00Z", inherited_total, inherited_total) + "\n",
+                "\n".join([
+                    self.session_meta("parent"),
+                    self.token_count("2024-01-08T00:00:00Z", inherited_total, inherited_total),
+                ]) + "\n",
                 encoding="utf-8",
             )
             child.write_text(
                 "\n".join([
+                    self.session_meta("child", "parent"),
                     self.token_count("2024-01-08T01:00:00Z", inherited_total, inherited_total),
                     self.token_count("2024-01-08T01:01:00Z", child_total, child_last),
                 ]) + "\n",
@@ -135,6 +213,67 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(all_usage["out"], 8)
         self.assertEqual(all_usage["reason"], 3)
         self.assertEqual(len(all_usage["sessions"]), 2)
+
+    def test_scan_keeps_independent_sessions_with_same_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "rollout-first.jsonl"
+            second = root / "rollout-second.jsonl"
+            usage = (100, 80, 5, 2)
+            first.write_text(
+                "\n".join([
+                    self.session_meta("first"),
+                    self.token_count("2024-01-08T00:00:00Z", usage, usage),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "\n".join([
+                    self.session_meta("second"),
+                    self.token_count("2024-01-08T01:00:00Z", usage, usage),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+            bounds = {
+                "today": day,
+                "yesterday": day - timedelta(days=1),
+                "week": day,
+                "last_week": day - timedelta(days=7),
+                "last_week_end": day,
+                "month": day.replace(day=1),
+                "year": day.replace(month=1, day=1),
+            }
+            old_dir = USAGE.CODEX_DIR
+            USAGE.CODEX_DIR = tmp
+            try:
+                result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
+            finally:
+                USAGE.CODEX_DIR = old_dir
+
+        all_usage = result["ranges"]["all"]
+        self.assertEqual(all_usage["in"], 200)
+        self.assertEqual(all_usage["cached"], 160)
+        self.assertEqual(all_usage["out"], 10)
+        self.assertEqual(all_usage["reason"], 4)
+        self.assertEqual(len(all_usage["sessions"]), 2)
+
+
+class ScanCacheMigrationTests(unittest.TestCase):
+    def test_v13_cache_is_invalidated_for_session_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scan-cache.json"
+            path.write_text(json.dumps({"v": 13, "codex": {"stale": {}}}), encoding="utf-8")
+            old_path = USAGE._SCAN_CACHE_FILE
+            USAGE._SCAN_CACHE_FILE = str(path)
+            try:
+                cache = USAGE._load_scan_cache()
+            finally:
+                USAGE._SCAN_CACHE_FILE = old_path
+
+        self.assertEqual(cache["v"], USAGE._SCAN_CACHE_VERSION)
+        self.assertTrue(cache["_dirty"])
+        self.assertNotIn("codex", cache)
 
 
 class CodexTokenLineReaderTests(unittest.TestCase):
