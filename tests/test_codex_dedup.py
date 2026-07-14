@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from test_codex_limits import USAGE
 
@@ -167,6 +168,45 @@ class CodexScanDedupTests(unittest.TestCase):
             },
         })
 
+    def turn_context(self, ts, model):
+        return json.dumps({
+            "timestamp": ts,
+            "type": "turn_context",
+            "payload": {"model": model, "cwd": "/tmp/project"},
+        })
+
+    def test_scan_attributes_each_increment_to_the_active_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-models.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("models"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.4"),
+                self.token_count("2024-01-08T00:01:00Z", (100, 80, 10, 4), (100, 80, 10, 4)),
+                self.turn_context("2024-01-08T00:02:00Z", "gpt-5.5"),
+                self.token_count("2024-01-08T00:03:00Z", (150, 120, 15, 6), (50, 40, 5, 2)),
+            ]) + "\n", encoding="utf-8")
+            day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+            bounds = {
+                "today": day, "yesterday": day - timedelta(days=1), "week": day,
+                "last_week": day - timedelta(days=7), "last_week_end": day,
+                "month": day.replace(day=1), "year": day.replace(month=1, day=1),
+            }
+            old_dir = USAGE.CODEX_DIR
+            USAGE.CODEX_DIR = tmp
+            try:
+                with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                    result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
+            finally:
+                USAGE.CODEX_DIR = old_dir
+
+        models = result["ranges"]["all"]["models"]
+        self.assertEqual(models["openai/gpt-5.4"]["in"], 20)
+        self.assertEqual(models["openai/gpt-5.4"]["cr"], 80)
+        self.assertEqual(models["openai/gpt-5.4"]["out"], 10)
+        self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
+        self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
+        self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
     def test_scan_keeps_child_increment_and_drops_replayed_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -312,6 +352,23 @@ class CodexTokenLineReaderTests(unittest.TestCase):
             lines = list(USAGE._iter_codex_token_lines(path, chunk_size=11))
 
         self.assertEqual(lines, [token])
+
+    def test_extracts_model_without_buffering_following_large_content(self):
+        context = (
+            b'{"timestamp":"2026-07-13T01:02:02Z","type":"turn_context",'
+            b'"payload":{"model":"gpt-5.4","instructions":"' + b"x" * (2 * 1024 * 1024) + b'"}}\n'
+        )
+        token = json.dumps({
+            "timestamp": "2026-07-13T01:02:03Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {}},
+        }, separators=(",", ":")).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-model.jsonl"
+            path.write_bytes(context + token)
+            records = list(USAGE._iter_codex_usage_records(path, chunk_size=19))
+
+        self.assertEqual(records, [("model", "gpt-5.4"), ("token", token)])
 
 
 if __name__ == "__main__":

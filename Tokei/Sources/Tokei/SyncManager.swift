@@ -132,6 +132,8 @@ final class SyncManager {
             mergeRanges(&u.qoderwork.ranges, peer.usage.qoderwork.ranges, pairs)
             mergeRanges(&u.qoder.ranges, peer.usage.qoder.ranges, pairs)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
+            mergeRanges(&u.zcode.ranges, peer.usage.zcode.ranges, pairs)
+            mergeRanges(&u.mimocode.ranges, peer.usage.mimocode.ranges, pairs)
             mergeRanges(&u.openclaw.ranges, peer.usage.openclaw.ranges, pairs)
             mergeRanges(&u.pi.ranges, peer.usage.pi.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
@@ -210,6 +212,7 @@ final class SyncManager {
             d.in += s.in; d.out += s.out; d.cached += s.cached
             d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cached, input: d.in)
+            mergeTokenModels(&d.models, s.models)
             dst.set(pair.dst, d)
         }
     }

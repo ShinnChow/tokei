@@ -6,7 +6,10 @@ struct PanelView: View {
     var scrollable = true
     @State private var sel: RangeKey = .today
     @State private var claudeModelsOpen = false
+    @State private var codexModelsOpen = false
     @State private var geminiModelsOpen = false
+    @State private var zcodeModelsOpen = false
+    @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
     @State private var workBuddyModelsOpen = false
     @State private var openCodeModelsOpen = false
@@ -30,6 +33,8 @@ struct PanelView: View {
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
     @AppStorage("showHermes") private var showHermes = true
+    @AppStorage("showZcode") private var showZcode = true
+    @AppStorage("showMimoCode") private var showMimoCode = true
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
@@ -37,7 +42,7 @@ struct PanelView: View {
     @AppStorage("showQwenCode") private var showQwenCode = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes,
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
@@ -215,6 +220,7 @@ struct PanelView: View {
         let gr = u.gemini.ranges.get(sel), kr = u.grok.ranges.get(sel)
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
+        let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         let qcr = u.qwencode.ranges.get(sel)
@@ -233,6 +239,10 @@ struct PanelView: View {
                          tint: Theme.qoderwork, content: AnyView(qoderworkBlock(u.qoderwork, qwr))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr))),
+            ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
+                         tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen))),
+            ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
+                         tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw, active: lr.tasks > 0 || lr.in + lr.out > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
@@ -317,6 +327,10 @@ struct PanelView: View {
                     if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
                     return items
                 }(), tint: Theme.codex)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $codexModelsOpen, tint: Theme.codex,
+                                         reasonIncludedInOutput: true)
+                }
                 if x.p5 != nil || x.pw != nil { thinDivider }
                 if let p5 = x.p5 {
                     quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.codex)
@@ -647,8 +661,8 @@ struct PanelView: View {
         var id: String { name }
     }
 
-    func tokenModelTotal(_ m: TokenModelStat) -> Int {
-        m.in + m.out + m.cr + m.cw + m.reason
+    func tokenModelTotal(_ m: TokenModelStat, reasonIncludedInOutput: Bool = false) -> Int {
+        m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
     }
 
     func tokenModelHit(_ m: TokenModelStat) -> Double {
@@ -726,7 +740,8 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    func tokenModelDisclosure(_ models: [TokenModelStat], open: Binding<Bool>, tint: Color) -> some View {
+    func tokenModelDisclosure(_ models: [TokenModelStat], open: Binding<Bool>, tint: Color,
+                              reasonIncludedInOutput: Bool = false) -> some View {
         Button {
             open.wrappedValue.toggle()
         } label: {
@@ -750,7 +765,7 @@ struct PanelView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in
-                    let total = tokenModelTotal(m)
+                    let total = tokenModelTotal(m, reasonIncludedInOutput: reasonIncludedInOutput)
                     let hit = tokenModelHit(m)
                     let isExpanded = expandedModels.contains(m.id)
                     VStack(alignment: .leading, spacing: 0) {
@@ -1229,6 +1244,8 @@ struct PanelView: View {
                 settingsRow("Qoder", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
                 settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
+                settingsRow("ZCode", tint: Theme.zcode, isOn: $showZcode)
+                settingsRow("MiMoCode", tint: Theme.mimocode, isOn: $showMimoCode)
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
@@ -1767,7 +1784,7 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
-                         "openclaw", "pi", "workbuddy", "opencode", "qwencode"]
+                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "opencode", "qwencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

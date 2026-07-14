@@ -134,6 +134,8 @@ struct DashboardView: View {
         case "grok": return Theme.grok
         case "qoder": return Theme.qoder
         case "hermes": return Theme.hermes
+        case "zcode": return Theme.zcode
+        case "mimocode": return Theme.mimocode
         case "openclaw": return Theme.openclaw
         case "pi": return Theme.pi
         case "workbuddy": return Theme.workbuddy
@@ -233,7 +235,7 @@ struct DashboardView: View {
                         Circle().fill(Theme.codex).frame(width: 6, height: 6)
                         Text("Codex").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.codex)
                     }
-                    Text("\(Fmt.human(d.x_in + d.x_out + d.x_reason)) tok")
+                    Text("\(Fmt.human(d.x_in + d.x_out)) tok")
                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
                     Text(String(format: "$%.2f", d.codex))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
@@ -757,8 +759,17 @@ struct DashboardView: View {
         }
 
         let codex = usage.codex.ranges.get(key)
-        let codexTokens = codex.in + codex.cached + codex.out + codex.reason
-        if codexTokens > 0 || codex.cost > 0 {
+        let codexTokens = codex.in + codex.cached + codex.out
+        if !codex.models.isEmpty {
+            for model in codex.models {
+                let tokens = model.in + model.cr + model.cw + model.out
+                if tokens > 0 || model.cost > 0 {
+                    out.append(modelCost(name: "\(model.name) (Codex)", cost: model.cost, tool: "codex",
+                                         input: model.in, out: model.out, cr: model.cr, cw: model.cw,
+                                         reason: model.reason, tokens: tokens))
+                }
+            }
+        } else if codexTokens > 0 || codex.cost > 0 {
             out.append(modelCost(name: "GPT-5.5 (Codex)", cost: codex.cost, tool: "codex",
                                  input: codex.in + codex.cached, out: codex.out,
                                  reason: codex.reason, tokens: codexTokens))
@@ -788,6 +799,8 @@ struct DashboardView: View {
         }
 
         appendTokenModels(usage.hermes.ranges.get(key).models, tool: "hermes", suffix: "Hermes", to: &out)
+        appendTokenModels(usage.zcode.ranges.get(key).models, tool: "zcode", suffix: "ZCode", to: &out)
+        appendTokenModels(usage.mimocode.ranges.get(key).models, tool: "mimocode", suffix: "MiMoCode", to: &out)
         appendTokenModels(usage.openclaw.ranges.get(key).models, tool: "openclaw", suffix: "OpenClaw", to: &out)
         appendTokenModels(usage.pi.ranges.get(key).models, tool: "pi", suffix: "Pi", to: &out)
         appendTokenModels(usage.workbuddy.ranges.get(key).models, tool: "workbuddy", suffix: "WorkBuddy", to: &out)
@@ -834,11 +847,13 @@ struct DashboardView: View {
         let grok = usage.grok.ranges.get(key)
         let qoder = usage.qoder.ranges.get(key)
         return claude.in + claude.out + claude.cr + claude.cw
-            + codex.in + codex.cached + codex.out + codex.reason
+            + codex.in + codex.cached + codex.out
             + gemini.in + gemini.cached + gemini.out + gemini.thoughts
             + (grok.ctx_used ?? grok.tokens)
             + qoder.in + qoder.cached + qoder.out
             + hermesTotal(usage.hermes.ranges.get(key))
+            + tokenUsageTotal(usage.zcode.ranges.get(key))
+            + tokenUsageTotal(usage.mimocode.ranges.get(key))
             + openClawTotal(usage.openclaw.ranges.get(key))
             + tokenUsageTotal(usage.pi.ranges.get(key))
             + tokenUsageTotal(usage.workbuddy.ranges.get(key))
@@ -851,6 +866,8 @@ struct DashboardView: View {
             + usage.codex.ranges.get(key).cost
             + usage.gemini.ranges.get(key).cost
             + usage.hermes.ranges.get(key).cost
+            + usage.zcode.ranges.get(key).cost
+            + usage.mimocode.ranges.get(key).cost
             + usage.openclaw.ranges.get(key).cost
             + usage.pi.ranges.get(key).cost
             + usage.workbuddy.ranges.get(key).cost
