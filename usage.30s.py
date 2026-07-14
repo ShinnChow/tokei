@@ -10,6 +10,7 @@
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl (assistant 行 message.usage)
+#   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 
 import os
 import sys
@@ -24,6 +25,7 @@ CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 GROK_DIR = os.path.join(HOME, ".grok", "sessions")
+WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
                             "SharedClientCache", "cache", "db", "local.db")
 HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
@@ -69,6 +71,8 @@ _DEFAULT_PRICES = {
     "deepseek/deepseek-v4-pro":      {"in": 0.435, "out": 0.87, "cache_read": 0.0036, "cache_write": 0.0},
     "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
     "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
+    "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
+    "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
 
 
@@ -94,6 +98,7 @@ _FAMILY = [
     ("qwen",     "qwen/qwen3.7-max"),
     ("deepseek", "deepseek/deepseek-v4-pro"),
     ("glm",      "z-ai/glm-5.2"),
+    ("hy3",      "tencent/hy3"),
 ]
 
 
@@ -120,6 +125,10 @@ def _normalize(model: str):
         return "deepseek/" + m
     if m.startswith("glm"):
         return "z-ai/" + m
+    if m == "hy3":
+        return "tencent/hy3"
+    if m in ("hy3-preview", "hy3 preview"):
+        return "tencent/hy3-preview"
     return m
 
 
@@ -368,6 +377,10 @@ def _empty_opencode():
 
 
 def _empty_pi():
+    return _empty_opencode()
+
+
+def _empty_workbuddy():
     return _empty_opencode()
 
 
@@ -1881,6 +1894,221 @@ def scan_pi(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- WorkBuddy ----------
+# JSONL 文件: ~/.workbuddy/projects/<encoded-cwd>/<session>.jsonl
+# 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
+# 不重复累计；reasoning_tokens 已包含在 output_tokens 中。
+def _workbuddy_number(obj, *keys):
+    if not isinstance(obj, dict):
+        return None
+    for key in keys:
+        if key not in obj:
+            continue
+        value = obj.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _workbuddy_detail_total(value, *keys):
+    if isinstance(value, dict):
+        return _workbuddy_number(value, *keys) or 0
+    if isinstance(value, list):
+        return sum(_workbuddy_number(item, *keys) or 0 for item in value if isinstance(item, dict))
+    return 0
+
+
+def _workbuddy_timestamp(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds).astimezone()
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        dt = parse_ts(value)
+        return dt.astimezone() if dt else None
+    return None
+
+
+def _workbuddy_usage_record(item):
+    message = item.get("message") or {}
+    if not isinstance(message, dict):
+        message = {}
+    provider = item.get("providerData") or message.get("providerData") or {}
+    if not isinstance(provider, dict):
+        provider = {}
+
+    message_usage = message.get("usage") or {}
+    normalized = provider.get("usage") or {}
+    raw = provider.get("rawUsage") or {}
+    sources = [x for x in (message_usage, normalized, raw) if isinstance(x, dict) and x]
+
+    selected = None
+    input_total = output = 0
+    for source in sources:
+        inp = _workbuddy_number(source, "input_tokens", "inputTokens", "input", "prompt_tokens")
+        out = _workbuddy_number(source, "output_tokens", "outputTokens", "output", "completion_tokens")
+        if (inp or 0) + (out or 0) > 0:
+            selected = source
+            input_total = inp or 0
+            output = out or 0
+            break
+    if selected is None:
+        return None
+
+    cache_read_candidates = []
+    cache_write_candidates = []
+    total_candidates = []
+    for source in sources:
+        cache_read_candidates.extend([
+            _workbuddy_number(source, "cache_read_input_tokens", "cacheReadInputTokens",
+                              "cache_read", "cacheRead", "cached_tokens", "cachedTokens") or 0,
+            _workbuddy_number(source, "prompt_cache_hit_tokens") or 0,
+            _workbuddy_detail_total(source.get("inputTokensDetails"), "cached_tokens", "cachedTokens"),
+            _workbuddy_detail_total(source.get("input_tokens_details"), "cached_tokens", "cachedTokens"),
+            _workbuddy_detail_total(source.get("prompt_tokens_details"), "cached_tokens", "cachedTokens"),
+        ])
+        cache_write_candidates.extend([
+            _workbuddy_number(source, "cache_creation_input_tokens", "cacheCreationInputTokens",
+                              "cache_write_input_tokens", "cacheWriteInputTokens",
+                              "prompt_cache_write_tokens", "cache_write", "cacheWrite") or 0,
+        ])
+        total = _workbuddy_number(source, "total_tokens", "totalTokens", "total")
+        if total is not None:
+            total_candidates.append(total)
+
+    cache_read = max(cache_read_candidates, default=0)
+    cache_write = max(cache_write_candidates, default=0)
+    inclusive_input = any(total == input_total + output for total in total_candidates)
+    if inclusive_input:
+        cache_read = min(cache_read, input_total)
+        cache_write = min(cache_write, max(input_total - cache_read, 0))
+        input_tokens = max(input_total - cache_read - cache_write, 0)
+    else:
+        input_tokens = input_total
+
+    timestamp_value = item.get("timestamp") or message.get("timestamp")
+    dt = _workbuddy_timestamp(timestamp_value)
+    if dt is None:
+        return None
+
+    model = (provider.get("requestModelName") or provider.get("requestModelId")
+             or provider.get("model") or message.get("model") or item.get("model") or "unknown")
+    price = _raw_price(str(model))
+    cost = (input_tokens / 1e6 * price["in"] + output / 1e6 * price["out"]
+            + cache_read / 1e6 * price["cache_read"]
+            + cache_write / 1e6 * price["cache_write"])
+    item_id = item.get("id") or provider.get("messageId") or ""
+    return {
+        "date": dt.date().isoformat(),
+        "hour": dt.hour,
+        "ts": dt.timestamp(),
+        "ts_key": str(timestamp_value),
+        "item_id": str(item_id),
+        "in": input_tokens,
+        "out": output,
+        "cr": cache_read,
+        "cw": cache_write,
+        "reason": 0,
+        "cost": cost,
+        "model": str(model),
+    }
+
+
+def _iter_workbuddy_records(file_cache):
+    items = []
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        for record in entry.get("records", []):
+            if isinstance(record, dict):
+                items.append((record.get("ts", 0), path, entry, record))
+    items.sort(key=lambda x: (x[0], x[1]))
+
+    seen = set()
+    for _, path, entry, record in items:
+        key = record.get("dedup") or f"{path}:{record.get('line', 0)}:{record.get('ts_key', '')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        yield path, entry, record
+
+
+def scan_workbuddy(bounds, cache):
+    fc = cache.setdefault("workbuddy", {})
+    B = _empty_token_ranges()
+    if not os.path.isdir(WORKBUDDY_DIR):
+        return {"ranges": B}
+
+    files = set(glob.glob(os.path.join(WORKBUDDY_DIR, "**", "*.jsonl"), recursive=True))
+    stale = set(fc.keys())
+    for path in sorted(files):
+        stale.discard(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime}:{st.st_size}"
+        if isinstance(fc.get(path), dict) and fc[path].get("sig") == sig:
+            continue
+
+        records = []
+        project = None
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line_no, line in enumerate(fh, 1):
+                    if '"usage"' not in line and '"cwd"' not in line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    project = item.get("cwd") or project
+                    session_id = item.get("sessionId") or session_id
+                    record = _workbuddy_usage_record(item)
+                    if record is None:
+                        continue
+                    record_session = str(item.get("sessionId") or session_id)
+                    if record["item_id"]:
+                        record["dedup"] = json.dumps(
+                            [record_session, record["item_id"], record["ts_key"]], separators=(",", ":"))
+                    else:
+                        record["dedup"] = f"{path}:{line_no}:{record['ts_key']}"
+                    record["session"] = record_session
+                    record["line"] = line_no
+                    records.append(record)
+        except OSError:
+            continue
+        fc[path] = {"sig": sig, "records": records, "proj": project, "sid": str(session_id)}
+
+    for path in stale:
+        fc.pop(path, None)
+
+    days = {}
+    sessions = {}
+    for _, _, record in _iter_workbuddy_records(fc):
+        day = days.setdefault(record["date"], _empty_token_day())
+        _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
+                         0, record["cost"], record["model"])
+        sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
+
+    for day_key, day in days.items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(sessions.get(day_key, set()))
+    return {"ranges": B}
+
+
 # ---------- OpenCode ----------
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
@@ -2067,6 +2295,7 @@ def compute():
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
+    wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     _save_scan_cache(cache)
 
@@ -2166,6 +2395,7 @@ def compute():
                 "models": _format_token_models(b["models"])}
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
+    wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
@@ -2213,13 +2443,54 @@ def compute():
         "pi": {
             "ranges": piranges,
         },
+        "workbuddy": {
+            "ranges": wbranges,
+        },
         "opencode": {
             "ranges": ocranges,
         },
     }
     if errors:
         result["_errors"] = errors
+    _recalc_costs(result)
     return result
+
+
+def _recalc_costs(result):
+    """用本地最新价格表重算所有模型成本,修正历史/同步数据中的价格偏差。"""
+    for tool_key in ("claude", "gemini", "pi", "workbuddy", "opencode", "hermes", "openclaw"):
+        tool = result.get(tool_key)
+        if not tool or "ranges" not in tool:
+            continue
+        ranges = tool["ranges"]
+        for rk in RANGE_KEYS:
+            r = ranges.get(rk)
+            if not r or "models" not in r:
+                continue
+            total_cost = 0.0
+            for m in r["models"]:
+                name = m.get("name", "")
+                p = _raw_price(name)
+                ti = m.get("in", 0)
+                to = m.get("out", 0)
+                if tool_key == "claude":
+                    cr = m.get("cr", 0)
+                    cw = m.get("cw", 0)
+                    pf = price_for(name)
+                    cost = ti / 1e6 * pf["in"] + to / 1e6 * pf["out"] + cr / 1e6 * pf["cache_read"] + cw / 1e6 * pf["write5m"]
+                elif tool_key == "gemini":
+                    cached = m.get("cached", 0)
+                    cost = ti / 1e6 * p["in"] + to / 1e6 * p["out"] + cached / 1e6 * p["cache_read"]
+                else:
+                    cr = m.get("cr", 0)
+                    cw = m.get("cw", 0)
+                    cost = ti / 1e6 * p["in"] + to / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
+                m["cost"] = round(cost, 6)
+                m["pin"] = p["in"]
+                m["pout"] = p["out"]
+                total_cost += cost
+            r["cost"] = round(total_cost, 6)
+
 
 _TOKEI_CONFIG = os.path.join(HOME, ".tokei", "config.json")
 
@@ -2353,6 +2624,16 @@ def main():
         print(f"今日 缓存写 {human(pt['cw']):>6} {F}")
         print(f"今日 ≈成本  ${pt['cost']:.2f} {F}")
         print("---")
+    # WorkBuddy 块
+    wt = d["workbuddy"]["ranges"]["today"]
+    if wt["sessions"] > 0:
+        print(f"WorkBuddy {HEAD}")
+        print(f"命中率   {wt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(wt['in']):>6} {F}")
+        print(f"今日 输出   {human(wt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(wt['cr']):>6} {F}")
+        print(f"今日 ≈成本  ${wt['cost']:.2f} {F}")
+        print("---")
     print("刷新 | refresh=true")
 
 
@@ -2438,6 +2719,23 @@ def _scan_local_models():
                             pass
             except OSError:
                 pass
+    for f in glob.glob(os.path.join(WORKBUDDY_DIR, "**", "*.jsonl"), recursive=True):
+        try:
+            with open(f, encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        provider = item.get("providerData") or (item.get("message") or {}).get("providerData") or {}
+                        model = (provider.get("requestModelName") or provider.get("requestModelId")
+                                 or provider.get("model"))
+                        if model:
+                            models.add(str(model))
+                    except Exception:
+                        pass
+        except OSError:
+            pass
     return models
 
 
@@ -2572,10 +2870,11 @@ def build_daily_costs(period="all", refresh=True):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "opencode": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "pi": 0.0, "workbuddy": 0.0, "opencode": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
+                       "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
                        "tokens": 0, "sessions": 0}
 
     for fp, entry in cache.get("claude", {}).items():
@@ -2641,6 +2940,22 @@ def build_daily_costs(period="all", refresh=True):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
+    for _, _, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
+        dk = record.get("date")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        d = days.setdefault(dk, _empty())
+        d["workbuddy"] += record.get("cost", 0)
+        d["w_in"] += record.get("in", 0); d["w_out"] += record.get("out", 0)
+        d["w_cr"] += record.get("cr", 0); d["w_cw"] += record.get("cw", 0)
+        d["tokens"] += token_total(record)
+        name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        m = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0,
+                                     "cw": 0, "reason": 0, "tool": "workbuddy"})
+        m["cost"] += record.get("cost", 0)
+        for key in TOKEN_FIELDS:
+            m[key] += record.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -2680,10 +2995,12 @@ def build_daily_costs(period="all", refresh=True):
                                       "reason": codex_reason, "tool": "codex"}
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2), "pi": round(v["pi"], 2),
-              "total": round(v["claude"] + v["codex"] + v["pi"] + v["opencode"], 2),
+              "workbuddy": round(v["workbuddy"], 2),
+              "total": round(v["claude"] + v["codex"] + v["pi"] + v["workbuddy"] + v["opencode"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
+              "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
               "tokens": v["tokens"]}
              for dk, v in sorted(days.items())]
 
@@ -2848,6 +3165,28 @@ def build_wrapped(period="all", refresh=True):
             for mn, mv in day.get("models", {}).items():
                 nm = f"{nice_model(mn)} (Pi)"
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
+
+    # --- WorkBuddy (逐次调用，output 已含 reasoning) ---
+    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
+        dk = record.get("date", "")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        tok = token_total(record)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        total_tokens += tok
+        total_cost += record.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        hour = record.get("hour")
+        if isinstance(hour, int) and 0 <= hour < 24:
+            hours[hour] += tok
+            all_day_hours.add(f"{dk}:{hour}")
+        project_path = entry.get("proj") or ""
+        project = os.path.basename(project_path.rstrip("/")) or "WorkBuddy"
+        pt = proj_tok.setdefault(project, [0, 0.0])
+        pt[0] += tok; pt[1] += record.get("cost", 0)
+        day_projs.setdefault(dk, set()).add(project)
+        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        model_tok[model_name] = model_tok.get(model_name, 0) + tok
 
     # --- QoderWork (in + out, no cost) ---
     for f, entry in cache.get("qoder", {}).items():
@@ -3067,6 +3406,26 @@ def projects():
             for mn, mv in day.get("models", {}).items():
                 nm = f"{nice_model(mn)} (Pi)"
                 p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+
+    # WorkBuddy sessions
+    workbuddy_sessions = {}
+    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("workbuddy")
+        p["tokens"] += token_total(record)
+        p["cost"] += record.get("cost", 0)
+        dk = record.get("date", "")
+        if dk > p["last_active"]:
+            p["last_active"] = dk
+        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
+        workbuddy_sessions.setdefault(proj_path, set()).add(record.get("session") or entry.get("sid"))
+    for proj_path, session_ids in workbuddy_sessions.items():
+        proj_map[proj_path]["sessions"] += len(session_ids)
 
     # Grok sessions (cwd encoded in directory name)
     from urllib.parse import unquote

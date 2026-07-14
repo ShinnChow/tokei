@@ -15,7 +15,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.12"
+    static let releaseTag = "v1.0.13"
     @Published var state: State = .idle
 
     private let apiURLs = [
