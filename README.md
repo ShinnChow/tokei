@@ -156,10 +156,12 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 ### v1.0.13
 - feat: WorkBuddy 本地 JSONL 用量采集（Token、缓存、模型、成本、项目）
 - feat: WorkBuddy 数据接入卡片、Dashboard、回顾、项目足迹和多设备同步
+- feat: 各工具 token 按小时追踪（hours/day_hours），扩展作息分析维度
 - feat: 菜单栏新增 6 种可即时切换并持久保存的图标样式（含自绘星轨）
 - feat: 菜单栏新增双额度、单额度和仅图标模式，兼顾信息量与占用宽度
 - feat: 自绘 Tokei 菜单栏标记和额度刻度环，移除重复时钟与通用符号
 - fix: WorkBuddy 推理 Token 保持包含在输出中，避免总量重复累计
+- fix: 恢复合并中误删的 _recalc_costs（本地价格表重算，防 GLM 等价格回退）
 
 ### v1.0.12
 - feat: 开机自启动（设置页「登录时启动」开关）
