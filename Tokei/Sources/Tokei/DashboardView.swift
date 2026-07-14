@@ -5,6 +5,7 @@ struct DailyCost: Codable, Identifiable {
     var claude: Double
     var codex: Double
     var pi: Double = 0
+    var workbuddy: Double?
     var total: Double
     var c_in: Int = 0
     var c_out: Int = 0
@@ -19,6 +20,10 @@ struct DailyCost: Codable, Identifiable {
     var p_cr: Int = 0
     var p_cw: Int = 0
     var p_reason: Int = 0
+    var w_in: Int?
+    var w_out: Int?
+    var w_cr: Int?
+    var w_cw: Int?
     var tokens: Int = 0
     var id: String { date }
 }
@@ -126,6 +131,7 @@ struct DashboardView: View {
         case "hermes": return Theme.hermes
         case "openclaw": return Theme.openclaw
         case "pi": return Theme.pi
+        case "workbuddy": return Theme.workbuddy
         case "opencode": return Theme.opencode
         default: return Theme.claude
         }
@@ -204,7 +210,8 @@ struct DashboardView: View {
                 }
                 .buttonStyle(.plain)
             }
-            HStack(spacing: 16) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 12)],
+                      alignment: .leading, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 4) {
                         Circle().fill(Theme.claude).frame(width: 6, height: 6)
@@ -233,6 +240,16 @@ struct DashboardView: View {
                     Text("\(Fmt.human(d.p_in + d.p_out + d.p_cr + d.p_cw + d.p_reason)) tok")
                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
                     Text(String(format: "$%.2f", d.pi))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Theme.workbuddy).frame(width: 6, height: 6)
+                        Text("WorkBuddy").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.workbuddy)
+                    }
+                    Text("\(Fmt.human((d.w_in ?? 0) + (d.w_out ?? 0) + (d.w_cr ?? 0) + (d.w_cw ?? 0))) tok")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
+                    Text(String(format: "$%.2f", d.workbuddy ?? 0))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
                 }
             }
@@ -625,6 +642,7 @@ struct DashboardView: View {
                   claude: lhs.claude + rhs.claude,
                   codex: lhs.codex + rhs.codex,
                   pi: lhs.pi + rhs.pi,
+                  workbuddy: (lhs.workbuddy ?? 0) + (rhs.workbuddy ?? 0),
                   total: lhs.total + rhs.total,
                   c_in: lhs.c_in + rhs.c_in,
                   c_out: lhs.c_out + rhs.c_out,
@@ -639,6 +657,10 @@ struct DashboardView: View {
                   p_cr: lhs.p_cr + rhs.p_cr,
                   p_cw: lhs.p_cw + rhs.p_cw,
                   p_reason: lhs.p_reason + rhs.p_reason,
+                  w_in: (lhs.w_in ?? 0) + (rhs.w_in ?? 0),
+                  w_out: (lhs.w_out ?? 0) + (rhs.w_out ?? 0),
+                  w_cr: (lhs.w_cr ?? 0) + (rhs.w_cr ?? 0),
+                  w_cw: (lhs.w_cw ?? 0) + (rhs.w_cw ?? 0),
                   tokens: lhs.tokens + rhs.tokens)
     }
 
@@ -747,6 +769,7 @@ struct DashboardView: View {
         appendTokenModels(usage.hermes.ranges.get(key).models, tool: "hermes", suffix: "Hermes", to: &out)
         appendTokenModels(usage.openclaw.ranges.get(key).models, tool: "openclaw", suffix: "OpenClaw", to: &out)
         appendTokenModels(usage.pi.ranges.get(key).models, tool: "pi", suffix: "Pi", to: &out)
+        appendTokenModels(usage.workbuddy.ranges.get(key).models, tool: "workbuddy", suffix: "WorkBuddy", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
 
         return out.sorted {
@@ -796,6 +819,7 @@ struct DashboardView: View {
             + hermesTotal(usage.hermes.ranges.get(key))
             + openClawTotal(usage.openclaw.ranges.get(key))
             + tokenUsageTotal(usage.pi.ranges.get(key))
+            + tokenUsageTotal(usage.workbuddy.ranges.get(key))
             + tokenUsageTotal(usage.opencode.ranges.get(key))
     }
 
@@ -806,6 +830,7 @@ struct DashboardView: View {
             + usage.hermes.ranges.get(key).cost
             + usage.openclaw.ranges.get(key).cost
             + usage.pi.ranges.get(key).cost
+            + usage.workbuddy.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost
     }
 

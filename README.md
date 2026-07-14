@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程工具** 上的用量、成本和性能——全部基于本地日志，零网络流量。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **10 款 AI 编程工具** 上的用量、成本和性能——全部基于本地日志，零网络流量。
 
 ### 支持的工具
 
@@ -32,6 +32,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程
 | **Hermes** | Token、成本、缓存命中率、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
+| **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qoder** | Token、调用次数、配额 |
 
@@ -39,6 +40,8 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程
 
 ### 实时监控
 - 30 秒自动刷新，菜单栏直接显示配额/用量
+- 菜单栏支持品牌、单色、刻度、圆点、数字、星轨 6 种样式
+- 双额度、单额度、仅图标 3 档信息量，最窄只占一个状态栏槽位
 - 按工具展示卡片，一眼掌握所有 AI 工具状态
 
 ### 成本估算
@@ -57,7 +60,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **9 款 AI 编程
 - 随时切换，对比不同时段用量趋势
 
 ### 项目追踪
-- 按项目维度查看 Claude Code / Pi / Grok 用量
+- 按项目维度查看 Claude Code / Pi / WorkBuddy / Grok 用量
 - 了解每个项目消耗了多少 Token 和成本
 
 ### 多设备同步
@@ -125,6 +128,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + SQLite |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
+| WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 
@@ -132,7 +136,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
 |------|:-----:|:---------:|
-| 支持工具 | 9 | 40+ |
+| 支持工具 | 10 | 40+ |
 | Token 级用量分析 | ✅ | — |
 | 成本估算（317 模型） | ✅ | 部分 |
 | 数据面板（图表 + 热力图） | ✅ | — |
@@ -148,6 +152,14 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 > CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
 
 ## 更新日志
+
+### v1.0.13
+- feat: WorkBuddy 本地 JSONL 用量采集（Token、缓存、模型、成本、项目）
+- feat: WorkBuddy 数据接入卡片、Dashboard、回顾、项目足迹和多设备同步
+- feat: 菜单栏新增 6 种可即时切换并持久保存的图标样式（含自绘星轨）
+- feat: 菜单栏新增双额度、单额度和仅图标模式，兼顾信息量与占用宽度
+- feat: 自绘 Tokei 菜单栏标记和额度刻度环，移除重复时钟与通用符号
+- fix: WorkBuddy 推理 Token 保持包含在输出中，避免总量重复累计
 
 ### v1.0.12
 - feat: 开机自启动（设置页「登录时启动」开关）
@@ -233,11 +245,11 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **9 AI coding tools** in real-time — all from local log files, with zero network traffic.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **10 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
-**Features:** Real-time monitoring (30s refresh) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
+**Features:** Real-time monitoring (30s refresh, five menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Hermes, OpenClaw, Pi Coding Agent CLI, OpenCode, Qoder
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qoder
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

@@ -137,72 +137,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateStatusTitle() {
         guard let b = statusItem?.button else { return }
-        let s = NSMutableAttributedString()
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-
-        // 一格 = 时钟图标 + 当前额度剩余%,按家族品牌色着色(橙=Claude 青=Codex)。
-        func seg(_ value: String, _ color: NSColor) {
-            if s.length > 0 {
-                s.append(NSAttributedString(string: "  ", attributes: [.font: font]))
-            }
-            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
-            let img = NSImage(systemSymbolName: "clock.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
-            img?.isTemplate = false
-            let att = NSTextAttachment(); att.image = img
-            s.append(NSAttributedString(attachment: att))
-            s.append(NSAttributedString(string: " " + value,
-                attributes: [.font: font, .baselineOffset: 1, .foregroundColor: color]))
-        }
-
-        if store.keepAwake.active {
-            let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-                .applying(NSImage.SymbolConfiguration(paletteColors: [Self.claudeColor]))
-            let img = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(cfg)
-            img?.isTemplate = false
-            let att = NSTextAttachment(); att.image = img
-            s.append(NSAttributedString(attachment: att))
-        }
+        let style = MenuBarStyle.current
+        let density = MenuBarDensity.current
+        var metrics: [MenuBarMetric] = []
+        var fallbackIcon = false
 
         if let u = store.usage {
             let ud = UserDefaults.standard
             if ud.object(forKey: "showClaude") as? Bool ?? true,
-               let q5 = u.claude.q5 { seg(String(format: "%.0f", 100 - q5), Self.claudeColor) }
+               let q5 = u.claude.q5 {
+                let remaining = 100 - q5
+                metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),
+                                     remaining: remaining))
+            }
             if ud.object(forKey: "showCodex") as? Bool ?? true,
                let quota = u.codex.p5 ?? u.codex.pw {
-                seg(String(format: "%.0f", 100 - quota), Self.codexColor)
+                let remaining = 100 - quota
+                metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
+                                     remaining: remaining))
             }
-            if s.length == 0 {
+            if metrics.isEmpty {
                 let showC = ud.object(forKey: "showClaude") as? Bool ?? true
                 let showX = ud.object(forKey: "showCodex") as? Bool ?? true
                 let showP = ud.object(forKey: "showPi") as? Bool ?? true
+                let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
                 let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                 let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
                 var total = 0
                 if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                 if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached + r.reason) }
                 if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                 if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                 if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                 if total > 0 {
-                    seg(Fmt.human(total), .secondaryLabelColor)
+                    metrics.append(.init(kind: .total, value: Fmt.human(total)))
                 } else {
-                    let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-                        .applying(NSImage.SymbolConfiguration(paletteColors: [Self.claudeColor]))
-                    let img = NSImage(systemSymbolName: "timer", accessibilityDescription: nil)?
-                        .withSymbolConfiguration(cfg)
-                    img?.isTemplate = false
-                    let att = NSTextAttachment(); att.image = img
-                    s.append(NSAttributedString(attachment: att))
+                    fallbackIcon = true
                 }
             }
         } else {
-            seg("…", .secondaryLabelColor)                        // 加载中
+            metrics.append(.init(kind: .total, value: "…"))
         }
-        b.attributedTitle = s
-        b.image = nil
+        let presentation = MenuBarTitleRenderer.render(
+            style: style,
+            density: density,
+            keepAwake: store.keepAwake.active,
+            metrics: metrics,
+            fallbackIcon: fallbackIcon
+        )
+        b.image = presentation.image
+        b.imageScaling = .scaleNone
+        b.imagePosition = presentation.image == nil
+            ? .noImage
+            : (presentation.title.length == 0 ? .imageOnly : .imageLeading)
+        b.attributedTitle = presentation.title
+        b.contentTintColor = nil
+        var summaryParts = metrics.map { metric in
+            let name: String
+            switch metric.kind {
+            case .claude: name = "Claude"
+            case .codex: name = "Codex"
+            case .total: name = "今日"
+            }
+            if metric.remaining != nil {
+                return "\(name) 剩余 \(metric.value)%"
+            }
+            return "\(name) \(metric.value)"
+        }
+        if store.keepAwake.active {
+            summaryParts.insert("保持唤醒已开启", at: 0)
+        }
+        let summary = summaryParts.joined(separator: " · ")
+        let accessibility = summary.isEmpty ? "Tokei" : "Tokei · \(summary)"
+        b.toolTip = accessibility
+        b.setAccessibilityLabel(accessibility)
     }
 
     func autoFetchPricing() {

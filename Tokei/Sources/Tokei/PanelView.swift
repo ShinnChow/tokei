@@ -8,6 +8,7 @@ struct PanelView: View {
     @State private var claudeModelsOpen = false
     @State private var geminiModelsOpen = false
     @State private var piModelsOpen = false
+    @State private var workBuddyModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
@@ -30,10 +31,12 @@ struct PanelView: View {
     @AppStorage("showHermes") private var showHermes = true
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
+    @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showOpenCode") private var showOpenCode = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showOpenClaw, showPi, showOpenCode].filter { $0 }.count
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes,
+         showOpenClaw, showPi, showWorkBuddy, showOpenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -210,7 +213,8 @@ struct PanelView: View {
         let gr = u.gemini.ranges.get(sel), kr = u.grok.ranges.get(sel)
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
-        let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel), or = u.opencode.ranges.get(sel)
+        let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
+        let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude, active: cr.sessions > 0,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
@@ -230,6 +234,8 @@ struct PanelView: View {
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
+            ToolCardItem(id: "workbuddy", name: "WorkBuddy", visible: showWorkBuddy, active: wr.sessions > 0,
+                         tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
         ]
@@ -1076,6 +1082,8 @@ struct PanelView: View {
     @AppStorage("syncInterval") private var syncInterval = 5
     @AppStorage("sitReminderOn") private var sitReminderOn = false
     @AppStorage("sitReminderInterval") private var sitReminderInterval = 90
+    @AppStorage(MenuBarStyle.defaultsKey) private var menuBarStyle = MenuBarStyle.system.rawValue
+    @AppStorage(MenuBarDensity.defaultsKey) private var menuBarDensity = MenuBarDensity.full.rawValue
 
     var settingsContent: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1090,6 +1098,7 @@ struct PanelView: View {
                 .frame(maxWidth: .infinity, alignment: .top)
 
                 VStack(alignment: .leading, spacing: 11) {
+                    settingsMenuBarSection
                     settingsSystemSection
                     settingsReminderSection
                     settingsSyncSection
@@ -1129,6 +1138,49 @@ struct PanelView: View {
                     DispatchQueue.main.async { cachedRemoteUrl = url }
                 }
             }
+        }
+    }
+
+    var settingsMenuBarSection: some View {
+        settingsSection("menubar.rectangle", "菜单栏") {
+            settingsValueRow("样式") {
+                Picker("菜单栏样式", selection: $menuBarStyle) {
+                    ForEach(MenuBarStyle.allCases) { style in
+                        Text(style.label).tag(style.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(width: 210)
+            }
+
+            settingsValueRow("信息") {
+                Picker("菜单栏信息量", selection: $menuBarDensity) {
+                    ForEach(MenuBarDensity.allCases) { density in
+                        Text(density.label).tag(density.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .frame(width: 210)
+            }
+
+            HStack {
+                Spacer()
+                MenuBarStylePreview(
+                    style: MenuBarStyle(rawValue: menuBarStyle) ?? .system,
+                    density: MenuBarDensity(rawValue: menuBarDensity) ?? .full
+                )
+                Spacer()
+            }
+        }
+        .onChange(of: menuBarStyle) { _ in
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        }
+        .onChange(of: menuBarDensity) { _ in
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
         }
     }
 
@@ -1174,6 +1226,7 @@ struct PanelView: View {
                 settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
+                settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
             }
         }
@@ -1707,7 +1760,8 @@ struct PanelView: View {
 
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes", "openclaw", "pi", "opencode"]
+            let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
+                         "openclaw", "pi", "workbuddy", "opencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")
