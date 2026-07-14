@@ -19,6 +19,7 @@ import glob
 import json
 import re
 from datetime import datetime, timedelta, date
+from pathlib import Path
 
 HOME = os.path.expanduser("~")
 CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
@@ -30,7 +31,10 @@ WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
                             "SharedClientCache", "cache", "db", "local.db")
 HERMES_DB = os.path.join(HOME, ".hermes", "state.db")
-OPENCODE_DIR = os.path.join(HOME, ".local", "share", "opencode", "storage", "message")
+OPENCODE_DATA_DIR = os.path.expanduser(os.environ.get(
+    "OPENCODE_DATA_DIR", os.path.join(HOME, ".local", "share", "opencode")))
+OPENCODE_DIR = os.path.join(OPENCODE_DATA_DIR, "storage", "message")
+OPENCODE_DB = os.path.join(OPENCODE_DATA_DIR, "opencode.db")
 OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
@@ -396,6 +400,33 @@ def _empty_qwencode():
 
 def token_total(day):
     return sum(day.get(k, 0) for k in TOKEN_FIELDS)
+
+
+def _sqlite_ro_uri(path):
+    return Path(path).resolve().as_uri() + "?mode=ro"
+
+
+def _sqlite_signature(path):
+    parts = []
+    for candidate in (path, path + "-wal", path + "-shm"):
+        try:
+            stat = os.stat(candidate)
+        except OSError:
+            continue
+        parts.append(f"{candidate}:{stat.st_mtime_ns}:{stat.st_size}")
+    return "|".join(parts) or None
+
+
+def _iter_cached_token_days(tool_cache):
+    for entry in tool_cache.values():
+        if not isinstance(entry, dict):
+            continue
+        for day_key, day in entry.get("days", {}).items():
+            if isinstance(day, dict):
+                yield day_key, day
+        day = entry.get("day")
+        if isinstance(day, dict) and day.get("date"):
+            yield day["date"], day
 
 
 def _add_model_usage(models, model, inp=0, out=0, cr=0, cw=0, reason=0, cost=0.0):
@@ -2221,22 +2252,132 @@ def scan_workbuddy(bounds, cache):
 
 
 # ---------- OpenCode ----------
+# SQLite: ~/.local/share/opencode/opencode.db；旧版 JSON 作为补充来源。
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
+def _opencode_db_paths():
+    if os.path.isfile(OPENCODE_DB):
+        return [os.path.realpath(OPENCODE_DB)]
+    parent = os.path.dirname(OPENCODE_DB)
+    paths = []
+    for path in sorted(glob.glob(os.path.join(parent, "opencode-*.db"))):
+        name = os.path.basename(path)
+        channel = name[len("opencode-"):-len(".db")]
+        if channel and all(ch.isalnum() or ch in "_-" for ch in channel):
+            real = os.path.realpath(path)
+            if real not in paths:
+                paths.append(real)
+    return paths[:1]
+
+
+def _opencode_message_day(message, session_id="", created_ms=0):
+    if message.get("role") != "assistant":
+        return None
+    timestamp = (message.get("time") or {}).get("created") or created_ms
+    if not timestamp:
+        return None
+    tokens = message.get("tokens") or {}
+    cache = tokens.get("cache") or {}
+    model = message.get("modelID", "")
+    created = datetime.fromtimestamp(int(timestamp) / 1000).astimezone()
+    day = {
+        "date": created.strftime("%Y-%m-%d"),
+        "in": int(tokens.get("input", 0) or 0),
+        "out": int(tokens.get("output", 0) or 0),
+        "reason": int(tokens.get("reasoning", 0) or 0),
+        "cr": int(cache.get("read", 0) or 0),
+        "cw": int(cache.get("write", 0) or 0),
+        "cost": float(message.get("cost", 0) or 0),
+        "session": message.get("sessionID") or session_id,
+        "models": {},
+        "hours": [0] * 24,
+    }
+    day["hours"][created.hour] = token_total(day)
+    _add_model_usage(day["models"], model, day["in"], day["out"], day["cr"],
+                     day["cw"], day["reason"], day["cost"])
+    return day
+
+
+def _scan_opencode_database(path):
+    import sqlite3
+
+    days = {}
+    message_ids = set()
+    sessions = {}
+    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        rows = connection.execute("SELECT id, session_id, time_created, data FROM message")
+        for message_id, session_id, created_ms, raw in rows:
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            day = _opencode_message_day(message, session_id or "", created_ms or 0)
+            if not day:
+                continue
+            if message_id:
+                message_ids.add(str(message_id))
+            day_key = day.pop("date")
+            target = days.setdefault(day_key, _empty_token_day())
+            _add_token_usage(target, day["in"], day["out"], day["cr"], day["cw"],
+                             day["reason"], day["cost"])
+            for model, usage in day["models"].items():
+                _add_model_usage(target["models"], model, usage["in"], usage["out"],
+                                 usage["cr"], usage["cw"], usage["reason"], usage["cost"])
+            for hour, amount in enumerate(day["hours"]):
+                target["hours"][hour] += amount
+            if day.get("session"):
+                sessions.setdefault(day_key, set()).add(day["session"])
+    finally:
+        connection.close()
+    for day_key, ids in sessions.items():
+        days[day_key]["sessions"] = sorted(ids)
+    return days, sorted(message_ids)
+
+
 def scan_opencode(bounds, cache):
     fc = cache.setdefault("opencode", {})
     changed = False
     B = _empty_token_ranges()
-    if not os.path.isdir(OPENCODE_DIR):
+    db_paths = _opencode_db_paths()
+    has_json = os.path.isdir(OPENCODE_DIR)
+    if not db_paths and not has_json:
         if fc:
             fc.clear()
             cache["_dirty"] = True
         return {"ranges": B}
 
     stale = set(fc.keys())
+    db_message_ids = set()
 
-    for sess_dir in glob.glob(os.path.join(OPENCODE_DIR, "ses_*")):
+    for db_path in db_paths:
+        cache_key = "db:" + db_path
+        stale.discard(cache_key)
+        signature = _sqlite_signature(db_path)
+        entry = fc.get(cache_key)
+        if not entry or entry.get("sig") != signature:
+            try:
+                days, message_ids = _scan_opencode_database(db_path)
+            except Exception:
+                continue
+            entry = {"sig": signature, "days": days, "message_ids": message_ids, "source": "sqlite"}
+            fc[cache_key] = entry
+            changed = True
+        db_message_ids.update(entry.get("message_ids", []))
+        for day_key, day in entry.get("days", {}).items():
+            try:
+                day_date = date.fromisoformat(day_key)
+            except ValueError:
+                continue
+            for range_key in classify_date(day_date, bounds):
+                _merge_token_day(B[range_key], day)
+                B[range_key]["sessions"].update(day.get("sessions", []))
+
+    for sess_dir in glob.glob(os.path.join(OPENCODE_DIR, "ses_*")) if has_json else []:
         for f in glob.glob(os.path.join(sess_dir, "msg_*.json")):
+            if os.path.splitext(os.path.basename(f))[0] in db_message_ids:
+                continue
             stale.discard(f)
             try:
                 st = os.stat(f)
@@ -2248,37 +2389,15 @@ def scan_opencode(bounds, cache):
                 day_data = entry.get("day")
             else:
                 try:
-                    d = json.load(open(f, encoding="utf-8"))
+                    with open(f, encoding="utf-8") as handle:
+                        d = json.load(handle)
                 except Exception:
                     continue
-                if d.get("role") != "assistant":
-                    fc[f] = {"sig": sig, "day": None}
-                    changed = True
+                message_id = str(d.get("id") or os.path.splitext(os.path.basename(f))[0])
+                if message_id in db_message_ids:
+                    stale.add(f)
                     continue
-                t = (d.get("time") or {}).get("created", 0)
-                if not t:
-                    fc[f] = {"sig": sig, "day": None}
-                    changed = True
-                    continue
-                tok = d.get("tokens") or {}
-                ca = tok.get("cache") or {}
-                model = d.get("modelID", "")
-                created = datetime.fromtimestamp(t / 1000).astimezone()
-                day_data = {
-                    "date": created.strftime("%Y-%m-%d"),
-                    "in": tok.get("input", 0) or 0,
-                    "out": tok.get("output", 0) or 0,
-                    "reason": tok.get("reasoning", 0) or 0,
-                    "cr": ca.get("read", 0) or 0,
-                    "cw": ca.get("write", 0) or 0,
-                    "cost": d.get("cost", 0) or 0,
-                    "session": d.get("sessionID", ""),
-                    "models": {},
-                    "hours": [0] * 24,
-                }
-                day_data["hours"][created.hour] = token_total(day_data)
-                _add_model_usage(day_data["models"], model, day_data["in"], day_data["out"],
-                                 day_data["cr"], day_data["cw"], day_data["reason"], day_data["cost"])
+                day_data = _opencode_message_day(d)
                 fc[f] = {"sig": sig, "day": day_data}
                 changed = True
 
@@ -3322,13 +3441,7 @@ def build_daily_costs(period="all", refresh=True):
                 for key in TOKEN_FIELDS:
                     m[key] += mv.get(key, 0)
 
-    for fp, entry in cache.get("opencode", {}).items():
-        day_data = entry.get("day")
-        if not day_data:
-            continue
-        dk = day_data.get("date")
-        if not dk:
-            continue
+    for dk, day_data in _iter_cached_token_days(cache.get("opencode", {})):
         if cutoff and dk < cutoff:
             continue
         d = days.setdefault(dk, _empty())
@@ -3560,17 +3673,21 @@ def build_wrapped(period="all", refresh=True):
             weekday[date.fromisoformat(dk).weekday()] += tok
 
     # --- OpenCode (in + out + cr + cw + reason) ---
-    for f, entry in cache.get("opencode", {}).items():
-        if not isinstance(entry, dict):
+    for dk, day in _iter_cached_token_days(cache.get("opencode", {})):
+        if cutoff and dk < cutoff:
             continue
-        for dk, day in entry.get("days", {}).items():
-            if cutoff and dk < cutoff:
-                continue
-            tok = token_total(day)
-            day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
-            weekday[date.fromisoformat(dk).weekday()] += tok
+        tok = token_total(day)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        total_tokens += tok
+        total_cost += day.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        for hour, amount in enumerate(day.get("hours", [])):
+            hours[hour] += amount
+            if amount:
+                all_day_hours.add(f"{dk}:{hour}")
+        for model, usage in day.get("models", {}).items():
+            name = f"{nice_model(model)} (OpenCode)"
+            model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
     # --- Qwen Code (in + out + cr + reason) ---
     for entry in cache.get("qwencode", {}).get("entries", []):
