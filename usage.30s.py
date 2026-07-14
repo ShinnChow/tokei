@@ -9,7 +9,7 @@
 # 仅 --update-prices 显式联网更新价格表:
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (token_count 事件,含额度)
-#   Pi:          ~/.pi/agent/sessions/**/*.jsonl (assistant 行 message.usage)
+#   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 
@@ -35,6 +35,8 @@ OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+OMP_SESSION_DIR = os.path.expanduser(os.environ.get(
+    "OMP_CODING_AGENT_SESSION_DIR", os.path.join(HOME, ".omp", "agent", "sessions")))
 QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("QWEN_HOME", os.path.join(HOME, ".qwen"))))
 
@@ -1867,13 +1869,18 @@ def scan_openclaw(bounds, cache):
 
 
 # ---------- Pi Coding Agent CLI ----------
-# JSONL 文件: ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl
-# assistant message 里保存 usage{input,output,cacheRead,cacheWrite,cost}。
+# JSONL 文件: ~/.pi/agent/sessions/<encoded-cwd>/*.jsonl 或 ~/.omp/agent/sessions/<encoded-cwd>/*.jsonl
+# assistant message 里保存 usage{input,output,cacheRead,cacheWrite,reasoningTokens,cost}。
 def _pi_session_dirs():
-    dirs = [PI_SESSION_DIR, os.path.join(PI_AGENT_DIR, "sessions"), os.path.join(HOME, ".pi", "agent", "sessions")]
+    dirs = [
+        PI_SESSION_DIR,
+        os.path.join(PI_AGENT_DIR, "sessions"),
+        os.path.join(HOME, ".pi", "agent", "sessions"),
+        OMP_SESSION_DIR,
+    ]
     out = []
     for d in dirs:
-        d = os.path.abspath(os.path.expanduser(d))
+        d = os.path.realpath(os.path.abspath(os.path.expanduser(d)))
         if d not in out:
             out.append(d)
     return out
@@ -1887,6 +1894,13 @@ def _pi_model_id(msg):
     return model or provider or "unknown"
 
 
+def _pi_usage_int(usage, *fields):
+    for field in fields:
+        if field in usage and usage[field] is not None:
+            return int(usage[field] or 0)
+    return 0
+
+
 def _pi_usage_cost(u, model):
     cost_obj = u.get("cost") or {}
     total = float(cost_obj.get("total", 0) or 0)
@@ -1896,10 +1910,10 @@ def _pi_usage_cost(u, model):
     if parts > 0:
         return parts
     p = _raw_price(model)
-    inp = u.get("input", 0) or 0
-    out = u.get("output", 0) or 0
-    cr = u.get("cacheRead", u.get("cache_read", 0)) or 0
-    cw = u.get("cacheWrite", u.get("cache_write", 0)) or 0
+    inp = _pi_usage_int(u, "input")
+    out = _pi_usage_int(u, "output")
+    cr = _pi_usage_int(u, "cacheRead", "cache_read")
+    cw = _pi_usage_int(u, "cacheWrite", "cache_write")
     return inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
 
 
@@ -1956,11 +1970,11 @@ def scan_pi(bounds, cache):
                         dt = parse_ts(o.get("timestamp") or msg.get("timestamp") or "")
                         if dt is None:
                             continue
-                        inp = int(u.get("input", 0) or 0)
-                        out = int(u.get("output", 0) or 0)
-                        cr = int(u.get("cacheRead", u.get("cache_read", 0)) or 0)
-                        cw = int(u.get("cacheWrite", u.get("cache_write", 0)) or 0)
-                        reason = int(u.get("reasoning", u.get("reason", 0)) or 0)
+                        inp = _pi_usage_int(u, "input")
+                        out = _pi_usage_int(u, "output")
+                        cr = _pi_usage_int(u, "cacheRead", "cache_read")
+                        cw = _pi_usage_int(u, "cacheWrite", "cache_write")
+                        reason = _pi_usage_int(u, "reasoning", "reason", "reasoningTokens")
                         model = _pi_model_id(msg)
                         cost = _pi_usage_cost(u, model)
                         if inp + out + cr + cw + reason == 0 and cost <= 0:
