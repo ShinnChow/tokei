@@ -265,7 +265,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 11
+_SCAN_CACHE_VERSION = 12
 
 
 def _load_scan_cache():
@@ -274,8 +274,8 @@ def _load_scan_cache():
             c = json.load(f)
         if c.get("v") != _SCAN_CACHE_VERSION:
             return {"v": _SCAN_CACHE_VERSION, "_dirty": True}
+        c["_keys"] = {k for k in c if not k.startswith("_")}
         c["_dirty"] = False
-        c["_keys"] = set(c.keys())
         return c
     except Exception:
         return {"v": _SCAN_CACHE_VERSION, "_dirty": True}
@@ -283,7 +283,8 @@ def _load_scan_cache():
 
 def _save_scan_cache(cache):
     prev_keys = cache.pop("_keys", set())
-    dirty = cache.pop("_dirty", False) or set(cache.keys()) != prev_keys
+    current_keys = {k for k in cache if not k.startswith("_")}
+    dirty = cache.pop("_dirty", False) or current_keys != prev_keys
     if not dirty:
         return
     cache["v"] = _SCAN_CACHE_VERSION
@@ -355,7 +356,7 @@ def _empty_token_bucket():
 
 def _empty_token_day():
     return {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
-            "cost": 0.0, "models": {}}
+            "cost": 0.0, "models": {}, "hours": [0] * 24}
 
 
 def _empty_token_ranges():
@@ -421,10 +422,14 @@ def _safe_scan(name, fn, fallback, errors):
 # ---------- Claude Code ----------
 def scan_claude(bounds, cache):
     fc = cache.setdefault("claude", {})
+    changed = False
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
     cur_file, cur_mtime = None, -1.0
     if not os.path.isdir(CLAUDE_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return {"ranges": B, "cur": {"in": 0, "out": 0, "cr": 0, "cw": 0, "name": "-"}}
 
     today_d = bounds["today"].date()
@@ -452,6 +457,7 @@ def scan_claude(bounds, cache):
         if not entry or entry.get("sig") != sig:
             days = {}
             hours = [0] * 24
+            day_hours = {}
             dh = set()
             proj = None
             seen_mids = set()
@@ -479,16 +485,25 @@ def scan_claude(bounds, cache):
                         mm["in"] += u["in"]; mm["out"] += u["out"]
                         mm["cr"] += u["cr"]; mm["cw"] += u["cw"]; mm["cost"] += u["cost"]
                         # Wrapped 用:小时分布 / 项目 / 会话跨度
-                        hours[dt.hour] += u["in"] + u["out"] + u["cr"] + u["cw"]
+                        event_tokens = u["in"] + u["out"] + u["cr"] + u["cw"]
+                        hours[dt.hour] += event_tokens
+                        per_day = day_hours.setdefault(dk, [0] * 24)
+                        per_day[dt.hour] += event_tokens
                         dh.add(f"{dk}:{dt.hour}")
                         if proj is None and u.get("cwd"):
                             proj = u["cwd"]
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "days": days, "hours": hours, "dh": sorted(dh), "proj": proj}
+            fc[f] = {"sig": sig, "days": days, "hours": hours,
+                     "day_hours": day_hours, "dh": sorted(dh), "proj": proj}
+            changed = True
 
     for p in stale:
         fc.pop(p, None)
+        changed = True
+
+    if changed:
+        cache["_dirty"] = True
 
     # Assembly: per-day → range buckets
     for f, entry in fc.items():
@@ -698,12 +713,17 @@ def _codex_deduped_days(file_cache):
         li, lc, lo, lr, cost = event[6:11]
         days = days_by_file.setdefault(file_path, {})
         day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
-                                   "reason": 0, "cost": 0.0})
+                                   "reason": 0, "cost": 0.0, "hours": [0] * 24})
         day["in"] += li
         day["cached"] += lc
         day["out"] += lo
         day["reason"] += lr
         day["cost"] += cost
+        try:
+            hour = datetime.fromisoformat(event[0]).astimezone().hour
+            day["hours"][hour] += li + lo
+        except (TypeError, ValueError):
+            pass
     return days_by_file
 
 
@@ -761,6 +781,9 @@ def scan_codex(bounds, cache):
          for k in RANGE_KEYS}
     cx_base = _raw_price("openai/gpt-5.5")
     if not os.path.isdir(CODEX_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return {"ranges": B, "cur_total": None, "limits": None, "plan": None}
 
     today_d = bounds["today"].date()
@@ -944,55 +967,103 @@ def _codex_quota_values(limits, now_epoch=None):
 # 日志:~/.gemini/tmp/<projectHash>/chats/session-*.json
 # assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
 # (total=input+output+thoughts,cached⊂input)。增量快照共用 sessionId,按 lastUpdated 去重。
-def scan_gemini(bounds):
+def scan_gemini(bounds, cache):
+    fc = cache.setdefault("gemini", {})
     if not os.path.isdir(GEMINI_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return _empty_gemini()
-    best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
-    for f in glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json")):
+
+    import hashlib
+    files = []
+    digest = hashlib.sha256()
+    for f in sorted(glob.glob(os.path.join(GEMINI_DIR, "*", "chats", "session-*.json"))):
         try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                d = json.load(fh)
-        except Exception:
+            st = os.stat(f)
+        except OSError:
             continue
-        sid = d.get("sessionId") or f
-        lu = d.get("lastUpdated") or ""
-        if sid not in best or lu > best[sid][0]:
-            best[sid] = (lu, d)
+        files.append(f)
+        digest.update(f.encode("utf-8", errors="ignore"))
+        digest.update(f"\0{st.st_mtime_ns}\0{st.st_size}\0".encode())
+    sig = digest.hexdigest()
+
+    if fc.get("sig") != sig:
+        best = {}  # sessionId -> (lastUpdated, data),同 id 取最新快照
+        for f in files:
+            try:
+                with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                    data = json.load(fh)
+            except Exception:
+                continue
+            sid = data.get("sessionId") or f
+            updated = data.get("lastUpdated") or ""
+            if sid not in best or updated > best[sid][0]:
+                best[sid] = (updated, data)
+
+        days = {}
+        for sid, (_, data) in best.items():
+            for message in data.get("messages", []):
+                if message.get("type") != "gemini":
+                    continue
+                tokens = message.get("tokens")
+                if not tokens:
+                    continue
+                dt = parse_ts(message.get("timestamp", ""))
+                if dt is None:
+                    continue
+                dt = dt.astimezone()
+                model = message.get("model")
+                inp = tokens.get("input", 0) or 0
+                out = tokens.get("output", 0) or 0
+                cached = tokens.get("cached", 0) or 0
+                thoughts = tokens.get("thoughts", 0) or 0
+                price = gemini_price(model)
+                cost = (max(inp - cached, 0) / 1e6 * price["in"]
+                        + cached / 1e6 * price["cache_read"]
+                        + (out + thoughts) / 1e6 * price["out"])
+                dk = dt.date().isoformat()
+                day = days.setdefault(
+                    dk, {"in": 0, "out": 0, "cached": 0, "thoughts": 0,
+                         "cost": 0.0, "models": {}, "sessions": set(),
+                         "hours": [0] * 24})
+                day["in"] += inp; day["out"] += out
+                day["cached"] += cached; day["thoughts"] += thoughts
+                day["cost"] += cost; day["sessions"].add(sid)
+                day["hours"][dt.hour] += inp + out + thoughts
+                model_usage = day["models"].setdefault(
+                    model, {"in": 0, "out": 0, "cached": 0,
+                            "thoughts": 0, "cost": 0.0})
+                model_usage["in"] += inp; model_usage["out"] += out
+                model_usage["cached"] += cached
+                model_usage["thoughts"] += thoughts; model_usage["cost"] += cost
+        for day in days.values():
+            day["sessions"] = sorted(day["sessions"])
+        fc.clear()
+        fc.update({"sig": sig, "days": days})
+        cache["_dirty"] = True
 
     B = {k: {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0,
              "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
-    for sid, (lu, d) in best.items():
-        for m in d.get("messages", []):
-            if m.get("type") != "gemini":
-                continue
-            tk = m.get("tokens")
-            if not tk:
-                continue
-            dt = parse_ts(m.get("timestamp", ""))
-            if dt is None:
-                continue
-            ks = classify(dt.astimezone(), bounds)
-            if not ks:
-                continue
-            model = m.get("model")
-            inp = tk.get("input", 0) or 0
-            out = tk.get("output", 0) or 0
-            cached = tk.get("cached", 0) or 0
-            th = tk.get("thoughts", 0) or 0
-            p = gemini_price(model)
-            cost = (max(inp - cached, 0) / 1e6 * p["in"]
-                    + cached / 1e6 * p["cache_read"]
-                    + (out + th) / 1e6 * p["out"])
-            for k in ks:
-                b = B[k]
-                b["sessions"].add(sid)
-                b["in"] += inp; b["out"] += out
-                b["cached"] += cached; b["thoughts"] += th; b["cost"] += cost
-                mm = b["models"].setdefault(
-                    model, {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0})
-                mm["in"] += inp; mm["out"] += out
-                mm["cached"] += cached; mm["thoughts"] += th; mm["cost"] += cost
+    for dk, day in fc.get("days", {}).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for key in classify_date(d, bounds):
+            bucket = B[key]
+            bucket["sessions"].update(day.get("sessions", []))
+            bucket["in"] += day.get("in", 0); bucket["out"] += day.get("out", 0)
+            bucket["cached"] += day.get("cached", 0)
+            bucket["thoughts"] += day.get("thoughts", 0); bucket["cost"] += day.get("cost", 0)
+            for model, usage in day.get("models", {}).items():
+                model_usage = bucket["models"].setdefault(
+                    model, {"in": 0, "out": 0, "cached": 0,
+                            "thoughts": 0, "cost": 0.0})
+                for field in ("in", "out", "cached", "thoughts"):
+                    model_usage[field] += usage.get(field, 0)
+                model_usage["cost"] += usage.get("cost", 0)
     return {"ranges": B}
 
 
@@ -1114,6 +1185,7 @@ _QODER_DB = os.path.join(HOME, "Library", "Application Support", "QoderWork", "d
 def scan_qoder(bounds, cache):
     import sqlite3 as _sqlite3
     fc = cache.setdefault("qoder", {})
+    changed = False
 
     # --- Part 1: DB (all queries cached together by sig) ---
     db_days = {}
@@ -1149,7 +1221,18 @@ def scan_qoder(bounds, cache):
                         db_days[dk] = {"calls": calls, "sessions": sessions,
                                        "in": int(ti or 0), "out": int(to_ or 0),
                                        "duration": int(dur or 0), "turns": int(turns or 0),
-                                       "ctx_ratio": 0.0}
+                                       "ctx_ratio": 0.0, "hours": [0] * 24}
+                for row in conn.execute("""
+                    SELECT date(created_at,'unixepoch','localtime') as day,
+                           CAST(strftime('%H',created_at,'unixepoch','localtime') AS INTEGER),
+                           COALESCE(SUM(json_extract(metadata,'$.inputTokens')),0) +
+                           COALESCE(SUM(json_extract(metadata,'$.outputTokens')),0)
+                    FROM messages WHERE metadata!='{}'
+                    GROUP BY day, strftime('%H',created_at,'unixepoch','localtime')
+                """):
+                    dk, hour, tokens = row
+                    if dk in db_days and hour is not None:
+                        db_days[dk]["hours"][int(hour)] += int(tokens or 0)
                 # sub_chats: ctx percentage per day
                 for row in conn.execute("""
                     SELECT date(created_at,'unixepoch','localtime') as day,
@@ -1179,13 +1262,17 @@ def scan_qoder(bounds, cache):
                 pass
             fc["db"] = {"sig": sig, "days": db_days,
                         "sub_chat_days": sub_chat_days, "model": model}
+            changed = True
         else:
             db_days = (entry or {}).get("days", {})
             sub_chat_days = (entry or {}).get("sub_chat_days", {})
             model = (entry or {}).get("model")
+    elif "db" in fc:
+        fc.pop("db", None)
+        changed = True
 
     # --- 汇总 DB 数据 ---
-    B = {k: {"sessions": 0, "calls": 0, "sub_agents": 0,
+    B = {k: {"in": 0, "out": 0, "sessions": 0, "calls": 0, "sub_agents": 0,
              "duration": 0, "turns": 0, "ctx_sum": 0.0, "ctx_count": 0}
          for k in RANGE_KEYS}
 
@@ -1206,6 +1293,7 @@ def scan_qoder(bounds, cache):
 
         for k in ks:
             b = B[k]
+            b["in"] += db_day.get("in", 0); b["out"] += db_day.get("out", 0)
             b["sessions"] += sessions; b["calls"] += calls
             b["sub_agents"] += sub_chat_days.get(dk, 0)
             b["duration"] += duration; b["turns"] += turns
@@ -1213,6 +1301,8 @@ def scan_qoder(bounds, cache):
                 b["ctx_sum"] += ctx_ratio * calls
                 b["ctx_count"] += calls
 
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B, "model": model}
 
 
@@ -1237,11 +1327,20 @@ def scan_qoder_ide(bounds, cache):
         with open(os.path.join(_USER_DIR, "config.json"), "r") as f:
             cfg = json.load(f)
         if not cfg.get("qoder_ide_enabled"):
+            if fc:
+                fc.clear()
+                cache["_dirty"] = True
             return empty
     except (OSError, json.JSONDecodeError, ValueError):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return empty
 
     if not os.path.isfile(QODER_IDE_DB):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return empty
 
     try:
@@ -1275,7 +1374,20 @@ def scan_qoder_ide(bounds, cache):
                     continue
                 days[dk] = {"in": int(ti), "out": int(to_), "cached": int(cached),
                             "session_ids": [], "sub_agent_ids": [],
-                            "calls": int(calls), "messages": int(msgs), "duration": 0}
+                            "calls": int(calls), "messages": int(msgs), "duration": 0,
+                            "hours": [0] * 24}
+            for row in conn.execute("""
+                SELECT date(gmt_create/1000, 'unixepoch', 'localtime') as day,
+                       CAST(strftime('%H', gmt_create/1000, 'unixepoch', 'localtime') AS INTEGER),
+                       COALESCE(SUM(json_extract(token_info, '$.prompt_tokens')), 0) +
+                       COALESCE(SUM(json_extract(token_info, '$.completion_tokens')), 0)
+                FROM chat_message
+                WHERE token_info IS NOT NULL AND token_info != ''
+                GROUP BY day, strftime('%H', gmt_create/1000, 'unixepoch', 'localtime')
+            """):
+                dk, hour, tokens = row
+                if dk in days and hour is not None:
+                    days[dk]["hours"][int(hour)] += int(tokens or 0)
             # collect session_ids per day, split by type (user vs sub-agent)
             sub_agent_sids = set()
             try:
@@ -1323,6 +1435,7 @@ def scan_qoder_ide(bounds, cache):
             pass
 
         fc["data"] = {"sig": sig, "days": days, "model": latest_model}
+        cache["_dirty"] = True
         entry = fc["data"]
 
     # 按时间范围聚合（sessions/sub_agents 用 set 去重，避免跨天会话被多算）
@@ -1377,6 +1490,7 @@ def _scan_hermes_db(db_path, _sq):
         conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
         for row in conn.execute("""
             SELECT date(started_at,'unixepoch','localtime') as day,
+                   CAST(strftime('%H',started_at,'unixepoch','localtime') AS INTEGER) as hour,
                    COUNT(*) as cnt, model,
                    COALESCE(SUM(input_tokens),0),
                    COALESCE(SUM(output_tokens),0),
@@ -1385,20 +1499,27 @@ def _scan_hermes_db(db_path, _sq):
                    COALESCE(SUM(reasoning_tokens),0),
                    COALESCE(SUM(COALESCE(actual_cost_usd,estimated_cost_usd)),0)
             FROM sessions WHERE started_at > 0
-            GROUP BY day, model
+            GROUP BY day, hour, model
         """):
-            dk, cnt, model, ti, to_, cr, cw, reason, cost = row
+            dk, hour, cnt, model, ti, to_, cr, cw, reason, cost = row
             if not dk:
                 continue
             day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                       "reason": 0, "cost": 0.0, "sessions": 0, "models": {}})
+                                       "reason": 0, "cost": 0.0, "sessions": 0,
+                                       "models": {}, "hours": [0] * 24})
             day["in"] += int(ti); day["out"] += int(to_)
             day["cr"] += int(cr); day["cw"] += int(cw)
             day["reason"] += int(reason); day["cost"] += float(cost)
             day["sessions"] += int(cnt)
+            if hour is not None:
+                day["hours"][int(hour)] += int(ti) + int(to_) + int(cr) + int(cw) + int(reason)
             if model:
-                mm = day["models"].setdefault(model, {"in": 0, "out": 0, "cost": 0.0})
-                mm["in"] += int(ti); mm["out"] += int(to_); mm["cost"] += float(cost)
+                mm = day["models"].setdefault(
+                    model, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                            "reason": 0, "cost": 0.0})
+                mm["in"] += int(ti); mm["out"] += int(to_)
+                mm["cr"] += int(cr); mm["cw"] += int(cw)
+                mm["reason"] += int(reason); mm["cost"] += float(cost)
         conn.close()
     except Exception:
         pass
@@ -1408,9 +1529,13 @@ def _scan_hermes_db(db_path, _sq):
 def scan_hermes(bounds, cache):
     import sqlite3 as _sq
     fc = cache.setdefault("hermes", {})
+    changed = False
 
     db_paths = _hermes_db_paths()
     if not db_paths:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return {"ranges": {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
                                 "sessions": 0, "models": {}} for k in RANGE_KEYS}}
 
@@ -1425,8 +1550,10 @@ def scan_hermes(bounds, cache):
         if not entry or entry.get("sig") != sig:
             days = _scan_hermes_db(db_path, _sq)
             fc[db_path] = {"sig": sig, "days": days}
+            changed = True
     for p in stale:
         fc.pop(p, None)
+        changed = True
 
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
              "sessions": 0, "models": {}} for k in RANGE_KEYS}
@@ -1443,8 +1570,14 @@ def scan_hermes(bounds, cache):
                 b["reason"] += day["reason"]; b["cost"] += day["cost"]
                 b["sessions"] += day["sessions"]
                 for mn, mv in day.get("models", {}).items():
-                    mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
-                    mm["in"] += mv["in"]; mm["out"] += mv["out"]; mm["cost"] += mv["cost"]
+                    mm = b["models"].setdefault(
+                        mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                             "reason": 0, "cost": 0.0})
+                    for key in TOKEN_FIELDS:
+                        mm[key] += mv.get(key, 0)
+                    mm["cost"] += mv.get("cost", 0)
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -1454,6 +1587,7 @@ def scan_hermes(bounds, cache):
 def scan_openclaw(bounds, cache):
     import sqlite3 as _sq
     fc = cache.setdefault("openclaw", {})
+    changed = False
 
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
@@ -1505,6 +1639,7 @@ def scan_openclaw(bounds, cache):
                 except Exception:
                     pass
                 fc["_db"] = {"sig": sig, "days": task_days}
+                changed = True
             for dk, day in fc.get("_db", {}).get("days", {}).items():
                 try:
                     d = date.fromisoformat(dk)
@@ -1514,6 +1649,9 @@ def scan_openclaw(bounds, cache):
                     b = B[k]
                     b["tasks"] += day["tasks"]; b["completed"] += day["completed"]
                     b["failed"] += day["failed"]
+    elif "_db" in fc:
+        fc.pop("_db", None)
+        changed = True
 
     # --- Part 2: Session JSONL token usage ---
     if os.path.isdir(OPENCLAW_AGENTS):
@@ -1568,18 +1706,25 @@ def scan_openclaw(bounds, cache):
                                 cost = 0.0
                             dk = dt.date().isoformat()
                             day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                                       "cost": 0.0, "models": {}})
+                                                       "cost": 0.0, "models": {},
+                                                       "hours": [0] * 24})
                             day["in"] += inp; day["out"] += out
                             day["cr"] += cr; day["cw"] += cw; day["cost"] += cost
+                            day["hours"][dt.hour] += inp + out + cr + cw
                             mn = cid or model or "unknown"
-                            mm = day["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
-                            mm["in"] += inp; mm["out"] += out; mm["cost"] += cost
+                            mm = day["models"].setdefault(
+                                mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                     "reason": 0, "cost": 0.0})
+                            mm["in"] += inp; mm["out"] += out
+                            mm["cr"] += cr; mm["cw"] += cw; mm["cost"] += cost
                 except OSError:
                     continue
                 fc[f] = {"sig": sig, "days": days}
+                changed = True
 
         for p in stale:
             fc.pop(p, None)
+            changed = True
 
         for f, entry in fc.items():
             if f.startswith("_"):
@@ -1595,9 +1740,19 @@ def scan_openclaw(bounds, cache):
                     b["in"] += day["in"]; b["out"] += day["out"]
                     b["cr"] += day["cr"]; b["cw"] += day["cw"]; b["cost"] += day["cost"]
                     for mn, mv in day["models"].items():
-                        mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cost": 0.0})
-                        mm["in"] += mv["in"]; mm["out"] += mv["out"]; mm["cost"] += mv["cost"]
+                        mm = b["models"].setdefault(
+                            mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                 "reason": 0, "cost": 0.0})
+                        for key in TOKEN_FIELDS:
+                            mm[key] += mv.get(key, 0)
+                        mm["cost"] += mv.get("cost", 0)
+    else:
+        for p in [key for key in fc if not key.startswith("_")]:
+            fc.pop(p, None)
+            changed = True
 
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -1640,10 +1795,14 @@ def _pi_usage_cost(u, model):
 
 def scan_pi(bounds, cache):
     fc = cache.setdefault("pi", {})
+    changed = False
     B = _empty_token_ranges()
 
     roots = [d for d in _pi_session_dirs() if os.path.isdir(d)]
     if not roots:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return {"ranges": B}
 
     seen_files = set()
@@ -1699,12 +1858,15 @@ def scan_pi(bounds, cache):
                         dk = dt.astimezone().date().isoformat()
                         day = days.setdefault(dk, _empty_token_day())
                         _add_token_usage(day, inp, out, cr, cw, reason, cost, model)
+                        day["hours"][dt.astimezone().hour] += inp + out + cr + cw + reason
             except OSError:
                 continue
             fc[f] = {"sig": sig, "days": days, "proj": proj, "sid": sid}
+            changed = True
 
     for p in stale:
         fc.pop(p, None)
+        changed = True
 
     for f, entry in fc.items():
         for dk, day in entry.get("days", {}).items():
@@ -1714,6 +1876,8 @@ def scan_pi(bounds, cache):
                 continue
             for k in classify_date(d, bounds):
                 _merge_token_day(B[k], day, entry.get("sid") or f)
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -1722,8 +1886,12 @@ def scan_pi(bounds, cache):
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
 def scan_opencode(bounds, cache):
     fc = cache.setdefault("opencode", {})
+    changed = False
     B = _empty_token_ranges()
     if not os.path.isdir(OPENCODE_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
         return {"ranges": B}
 
     stale = set(fc.keys())
@@ -1746,16 +1914,19 @@ def scan_opencode(bounds, cache):
                     continue
                 if d.get("role") != "assistant":
                     fc[f] = {"sig": sig, "day": None}
+                    changed = True
                     continue
                 t = (d.get("time") or {}).get("created", 0)
                 if not t:
                     fc[f] = {"sig": sig, "day": None}
+                    changed = True
                     continue
                 tok = d.get("tokens") or {}
                 ca = tok.get("cache") or {}
                 model = d.get("modelID", "")
+                created = datetime.fromtimestamp(t / 1000).astimezone()
                 day_data = {
-                    "date": datetime.fromtimestamp(t / 1000).strftime("%Y-%m-%d"),
+                    "date": created.strftime("%Y-%m-%d"),
                     "in": tok.get("input", 0) or 0,
                     "out": tok.get("output", 0) or 0,
                     "reason": tok.get("reasoning", 0) or 0,
@@ -1764,10 +1935,13 @@ def scan_opencode(bounds, cache):
                     "cost": d.get("cost", 0) or 0,
                     "session": d.get("sessionID", ""),
                     "models": {},
+                    "hours": [0] * 24,
                 }
+                day_data["hours"][created.hour] = token_total(day_data)
                 _add_model_usage(day_data["models"], model, day_data["in"], day_data["out"],
                                  day_data["cr"], day_data["cw"], day_data["reason"], day_data["cost"])
                 fc[f] = {"sig": sig, "day": day_data}
+                changed = True
 
             if not day_data:
                 continue
@@ -1780,6 +1954,9 @@ def scan_opencode(bounds, cache):
 
     for p in stale:
         fc.pop(p, None)
+        changed = True
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -1883,7 +2060,7 @@ def compute():
     errors = {}
     cc = _safe_scan("claude", lambda: scan_claude(bounds, cache), _empty_claude, errors)
     cx = _safe_scan("codex", lambda: scan_codex(bounds, cache), _empty_codex, errors)
-    gm = _safe_scan("gemini", lambda: scan_gemini(bounds), _empty_gemini, errors)
+    gm = _safe_scan("gemini", lambda: scan_gemini(bounds, cache), _empty_gemini, errors)
     gk = _safe_scan("grok", lambda: scan_grok(bounds), _empty_grok, errors)
     qd = _safe_scan("qoderwork", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
     qi = _safe_scan("qoder_ide", lambda: scan_qoder_ide(bounds, cache), _empty_qoder_ide, errors)
@@ -1940,7 +2117,8 @@ def compute():
     def qoderwork_range(b):
         ctx_count = b.get("ctx_count", 0)
         ctx = (b.get("ctx_sum", 0.0) / ctx_count * 100) if ctx_count else 0.0
-        return {"sessions": b.get("sessions", 0), "calls": b.get("calls", 0),
+        return {"in": b.get("in", 0), "out": b.get("out", 0),
+                "sessions": b.get("sessions", 0), "calls": b.get("calls", 0),
                 "sub_agents": b.get("sub_agents", 0),
                 "turns": b.get("turns", 0),
                 "duration": b.get("duration", 0), "ctx": ctx}
@@ -2041,45 +2219,7 @@ def compute():
     }
     if errors:
         result["_errors"] = errors
-    _recalc_costs(result)
     return result
-
-
-def _recalc_costs(result):
-    """用本地最新价格表重算所有模型成本,修正历史/同步数据中的价格偏差。"""
-    for tool_key in ("claude", "gemini", "pi", "opencode", "hermes", "openclaw"):
-        tool = result.get(tool_key)
-        if not tool or "ranges" not in tool:
-            continue
-        ranges = tool["ranges"]
-        for rk in RANGE_KEYS:
-            r = ranges.get(rk)
-            if not r or "models" not in r:
-                continue
-            total_cost = 0.0
-            for m in r["models"]:
-                name = m.get("name", "")
-                p = _raw_price(name)
-                ti = m.get("in", 0)
-                to = m.get("out", 0)
-                if tool_key == "claude":
-                    cr = m.get("cr", 0)
-                    cw = m.get("cw", 0)
-                    pf = price_for(name)
-                    cost = ti / 1e6 * pf["in"] + to / 1e6 * pf["out"] + cr / 1e6 * pf["cache_read"] + cw / 1e6 * pf["write5m"]
-                elif tool_key == "gemini":
-                    cached = m.get("cached", 0)
-                    cost = ti / 1e6 * p["in"] + to / 1e6 * p["out"] + cached / 1e6 * p["cache_read"]
-                else:
-                    cr = m.get("cr", 0)
-                    cw = m.get("cw", 0)
-                    cost = ti / 1e6 * p["in"] + to / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
-                m["cost"] = round(cost, 6)
-                m["pin"] = p["in"]
-                m["pout"] = p["out"]
-                total_cost += cost
-            r["cost"] = round(total_cost, 6)
-
 
 _TOKEI_CONFIG = os.path.join(HOME, ".tokei", "config.json")
 
