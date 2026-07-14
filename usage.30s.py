@@ -1071,8 +1071,8 @@ _CODEX_MODEL_RECORD_HEADER = re.compile(
 _CODEX_MODEL_FIELD = re.compile(rb'"model"\s*:\s*"((?:\\.|[^"\\])*)"')
 
 
-def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=4 * 1024,
-                              model_limit=64 * 1024):
+def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
+                              model_limit=4 * 1024):
     """Yield model changes and token records without buffering unrelated large JSONL lines."""
     prefix = bytearray()
     candidate = None
@@ -1095,12 +1095,14 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=4 * 1024,
                 elif kind == "model":
                     take = min(len(piece), model_limit - len(prefix))
                     prefix.extend(piece[:take])
-                    match = _CODEX_MODEL_FIELD.search(prefix)
+                    match = _CODEX_MODEL_FIELD.search(prefix) if b'"model"' in prefix else None
                     if match:
+                        raw_model = match.group(1)
                         try:
-                            model = json.loads(b'"' + match.group(1) + b'"')
+                            model = (raw_model.decode("utf-8") if b"\\" not in raw_model
+                                     else json.loads(b'"' + raw_model + b'"'))
                         except Exception:
-                            model = match.group(1).decode("utf-8", errors="ignore")
+                            model = raw_model.decode("utf-8", errors="ignore")
                         if model:
                             yield "model", model
                         prefix = bytearray()
@@ -1111,23 +1113,26 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=4 * 1024,
                 elif kind is None and len(prefix) < header_limit:
                     take = min(len(piece), header_limit - len(prefix))
                     prefix.extend(piece[:take])
-                    if _CODEX_TOKEN_EVENT_HEADER.search(prefix):
+                    if b'"token_count"' in prefix and _CODEX_TOKEN_EVENT_HEADER.search(prefix):
                         candidate = prefix
                         prefix = bytearray()
                         kind = "token"
                         if take < len(piece):
                             candidate.extend(piece[take:])
-                    elif _CODEX_MODEL_RECORD_HEADER.search(prefix):
+                    elif ((b'"turn_context"' in prefix or b'"session_meta"' in prefix)
+                          and _CODEX_MODEL_RECORD_HEADER.search(prefix)):
                         kind = "model"
                         if take < len(piece):
                             extra = min(len(piece) - take, model_limit - len(prefix))
                             prefix.extend(piece[take:take + extra])
-                        match = _CODEX_MODEL_FIELD.search(prefix)
+                        match = _CODEX_MODEL_FIELD.search(prefix) if b'"model"' in prefix else None
                         if match:
+                            raw_model = match.group(1)
                             try:
-                                model = json.loads(b'"' + match.group(1) + b'"')
+                                model = (raw_model.decode("utf-8") if b"\\" not in raw_model
+                                         else json.loads(b'"' + raw_model + b'"'))
                             except Exception:
-                                model = match.group(1).decode("utf-8", errors="ignore")
+                                model = raw_model.decode("utf-8", errors="ignore")
                             if model:
                                 yield "model", model
                             prefix = bytearray()
