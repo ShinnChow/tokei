@@ -284,7 +284,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 14
+_SCAN_CACHE_VERSION = 15
 
 
 def _load_scan_cache():
@@ -474,6 +474,61 @@ def _safe_scan(name, fn, fallback, errors):
 
 
 # ---------- Claude Code ----------
+def _claude_event_total(event):
+    return sum(int(event.get(key, 0) or 0) for key in ("in", "out", "cr", "cw"))
+
+
+def _prefer_claude_event(candidate, existing):
+    candidate_sidechain = bool(candidate.get("sidechain"))
+    existing_sidechain = bool(existing.get("sidechain"))
+    if candidate_sidechain != existing_sidechain:
+        return existing_sidechain
+    candidate_total = _claude_event_total(candidate)
+    existing_total = _claude_event_total(existing)
+    if candidate_total != existing_total:
+        return candidate_total > existing_total
+    return float(candidate.get("cost", 0) or 0) > float(existing.get("cost", 0) or 0)
+
+
+def _dedupe_claude_events(file_events):
+    selected = []
+    exact = {}
+    by_message = {}
+
+    for source, event in file_events:
+        message_id = event.get("mid")
+        request_id = event.get("request_id")
+        index = None
+        exact_key = None
+        if message_id:
+            exact_key = ("message", message_id, request_id)
+            index = exact.get(exact_key)
+            if index is None:
+                for candidate_index in by_message.get(message_id, []):
+                    existing = selected[candidate_index][1]
+                    if event.get("sidechain") or existing.get("sidechain"):
+                        index = candidate_index
+                        break
+        elif event.get("event_id"):
+            exact_key = ("event", event["event_id"])
+            index = exact.get(exact_key)
+
+        if index is not None:
+            if _prefer_claude_event(event, selected[index][1]):
+                selected[index] = (source, event)
+                if exact_key is not None:
+                    exact[exact_key] = index
+            continue
+
+        index = len(selected)
+        selected.append((source, event))
+        if exact_key is not None:
+            exact[exact_key] = index
+        if message_id:
+            by_message.setdefault(message_id, []).append(index)
+    return selected
+
+
 def scan_claude(bounds, cache):
     fc = cache.setdefault("claude", {})
     changed = False
@@ -509,52 +564,83 @@ def scan_claude(bounds, cache):
         sig = f"{mtime}:{size}"
         entry = fc.get(f)
         if not entry or entry.get("sig") != sig:
-            days = {}
-            hours = [0] * 24
-            day_hours = {}
-            dh = set()
+            events = []
             proj = None
-            seen_mids = set()
             try:
                 with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                    for line in fh:
+                    for line_number, line in enumerate(fh, 1):
                         if '"usage"' not in line:
                             continue
                         u = _claude_usage(line, want_dt=True)
                         if not u:
                             continue
-                        mid = u.get("mid")
-                        if mid:
-                            if mid in seen_mids:
-                                continue
-                            seen_mids.add(mid)
-                        dt = u["dt"]
-                        dk = dt.date().isoformat()
-                        day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                                   "cost": 0.0, "models": {}})
-                        day["in"] += u["in"]; day["out"] += u["out"]
-                        day["cr"] += u["cr"]; day["cw"] += u["cw"]; day["cost"] += u["cost"]
-                        mm = day["models"].setdefault(
-                            u["model"], {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-                        mm["in"] += u["in"]; mm["out"] += u["out"]
-                        mm["cr"] += u["cr"]; mm["cw"] += u["cw"]; mm["cost"] += u["cost"]
-                        # Wrapped 用:小时分布 / 项目 / 会话跨度
-                        event_tokens = u["in"] + u["out"] + u["cr"] + u["cw"]
-                        hours[dt.hour] += event_tokens
-                        per_day = day_hours.setdefault(dk, [0] * 24)
-                        per_day[dt.hour] += event_tokens
-                        dh.add(f"{dk}:{dt.hour}")
+                        events.append({
+                            "in": u["in"], "out": u["out"], "cr": u["cr"], "cw": u["cw"],
+                            "cost": u["cost"], "model": u.get("model") or "unknown",
+                            "cwd": u.get("cwd"), "mid": u.get("mid"),
+                            "request_id": u.get("request_id"), "event_id": u.get("event_id"),
+                            "sidechain": bool(u.get("sidechain")), "timestamp": u["dt"].isoformat(),
+                            "line": line_number,
+                        })
                         if proj is None and u.get("cwd"):
                             proj = u["cwd"]
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "days": days, "hours": hours,
-                     "day_hours": day_hours, "dh": sorted(dh), "proj": proj}
+            events = [event for _, event in _dedupe_claude_events((f, item) for item in events)]
+            fc[f] = {"sig": sig, "events": events, "proj": proj}
             changed = True
 
     for p in stale:
         fc.pop(p, None)
         changed = True
+
+    all_events = []
+    for path, entry in fc.items():
+        for event in entry.get("events", []):
+            all_events.append((path, event))
+    selected_events = _dedupe_claude_events(all_events)
+
+    aggregates = {
+        path: {"days": {}, "hours": [0] * 24, "day_hours": {}, "dh": set(),
+               "proj": entry.get("proj")}
+        for path, entry in fc.items()
+    }
+    for path, event in selected_events:
+        dt = parse_ts(event.get("timestamp", ""))
+        if dt is None:
+            continue
+        dt = dt.astimezone()
+        day_key = dt.date().isoformat()
+        aggregate = aggregates[path]
+        if not aggregate["proj"] and event.get("cwd"):
+            aggregate["proj"] = event["cwd"]
+        day = aggregate["days"].setdefault(
+            day_key, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
+        day["in"] += event["in"]; day["out"] += event["out"]
+        day["cr"] += event["cr"]; day["cw"] += event["cw"]
+        day["cost"] += event["cost"]
+        model = event.get("model") or "unknown"
+        model_usage = day["models"].setdefault(
+            model, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+        model_usage["in"] += event["in"]; model_usage["out"] += event["out"]
+        model_usage["cr"] += event["cr"]; model_usage["cw"] += event["cw"]
+        model_usage["cost"] += event["cost"]
+        amount = _claude_event_total(event)
+        aggregate["hours"][dt.hour] += amount
+        aggregate["day_hours"].setdefault(day_key, [0] * 24)[dt.hour] += amount
+        aggregate["dh"].add(f"{day_key}:{dt.hour}")
+
+    for path, aggregate in aggregates.items():
+        entry = fc[path]
+        values = {
+            "days": aggregate["days"], "hours": aggregate["hours"],
+            "day_hours": aggregate["day_hours"], "dh": sorted(aggregate["dh"]),
+            "proj": aggregate["proj"],
+        }
+        for key, value in values.items():
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
 
     if changed:
         cache["_dirty"] = True
@@ -630,7 +716,9 @@ def _claude_usage(line, want_dt=False):
         write_cost = (w5 or 0) / 1e6 * p["write5m"] + (w1 or 0) / 1e6 * p["write1h"]
     cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + write_cost
     res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cost": cost,
-           "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id")}
+           "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id"),
+           "request_id": o.get("requestId") or o.get("request_id"),
+           "event_id": o.get("uuid"), "sidechain": o.get("isSidechain") is True}
     if want_dt:
         res["dt"] = dt
     return res
