@@ -2082,9 +2082,8 @@ def scan_hermes(bounds, cache):
     stale = set(fc.keys())
     for db_path in db_paths:
         stale.discard(db_path)
-        try:
-            sig = f"{os.path.getmtime(db_path)}:{os.path.getsize(db_path)}"
-        except OSError:
+        sig = _sqlite_signature(db_path)
+        if not sig:
             continue
         entry = fc.get(db_path)
         if not entry or entry.get("sig") != sig:
@@ -2153,10 +2152,7 @@ def scan_openclaw(bounds, cache):
 
     # --- Part 1: SQLite task counts ---
     if os.path.isfile(OPENCLAW_DB):
-        try:
-            sig = f"{os.path.getmtime(OPENCLAW_DB)}:{os.path.getsize(OPENCLAW_DB)}"
-        except OSError:
-            sig = None
+        sig = _sqlite_signature(OPENCLAW_DB)
         if sig:
             entry = fc.get("_db")
             if not entry or entry.get("sig") != sig:
@@ -3619,40 +3615,92 @@ def _load_tokei_config():
         return None
 
 
+def _sync_snapshot_filename(device_id):
+    if not isinstance(device_id, str):
+        return None
+    value = device_id.strip()
+    if (not value or value in (".", "..") or len(value) > 128
+            or any(ch in "/\\\0" or ord(ch) < 32 for ch in value)):
+        return None
+    return f"{value}.json"
+
+
+def _write_sync_snapshot(sync_dir, device_id, payload):
+    own_name = _sync_snapshot_filename(device_id)
+    if not own_name or not os.path.isdir(sync_dir):
+        return False
+
+    sync_root = os.path.realpath(sync_dir)
+    try:
+        for fn in os.listdir(sync_root):
+            if fn.casefold() == own_name.casefold():
+                own_name = fn
+                break
+    except OSError:
+        return False
+
+    destination = os.path.abspath(os.path.join(sync_root, own_name))
+    try:
+        if os.path.commonpath((sync_root, destination)) != sync_root:
+            return False
+    except ValueError:
+        return False
+
+    tmp = None
+    try:
+        fd, tmp = _tempfile.mkstemp(prefix=".tokei-sync-", suffix=".json", dir=sync_root)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, destination)
+        return True
+    except OSError:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return False
+
+
+def _write_configured_sync_snapshot(d):
+    cfg = _load_tokei_config()
+    if not cfg:
+        return False
+    sync_dir = os.path.expanduser(cfg.get("sync_dir", ""))
+    if not sync_dir:
+        sync_dir = os.path.join(HOME, ".tokei", "sync")
+    device_id = cfg.get("device_id", "")
+    if not _sync_snapshot_filename(device_id) or not os.path.isdir(sync_dir):
+        return False
+
+    import time
+    d["_device"] = device_id
+    d["_ts"] = int(time.time())
+    d["_range_bounds"] = range_boundaries()
+    d["_dashboard"] = {
+        "daily": build_daily_costs("all", refresh=False).get("daily", []),
+        "wrapped": {p: build_wrapped(p, refresh=False)
+                    for p in ["all", "1d", "7d", "30d", "365d"]},
+    }
+    return _write_sync_snapshot(sync_dir, device_id, d)
+
+
 def main_json():
     d = compute()
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
     print(json.dumps(d, ensure_ascii=False))
-    cfg = _load_tokei_config()
-    if cfg:
-        sync_dir = os.path.expanduser(cfg.get("sync_dir", ""))
-        if not sync_dir:
-            sync_dir = os.path.join(HOME, ".tokei", "sync")
-        device_id = cfg.get("device_id", "")
-        if device_id and os.path.isdir(sync_dir):
-            import time
-            d["_device"] = device_id
-            d["_ts"] = int(time.time())
-            d["_range_bounds"] = range_boundaries()
-            d["_dashboard"] = {
-                "daily": build_daily_costs("all", refresh=False).get("daily", []),
-                "wrapped": {p: build_wrapped(p, refresh=False)
-                            for p in ["all", "1d", "7d", "30d", "365d"]},
-            }
-            own_name = f"{device_id}.json"
-            try:
-                for fn in os.listdir(sync_dir):
-                    if fn.lower() == own_name.lower():
-                        own_name = fn
-                        break
-            except OSError:
-                pass
-            try:
-                with open(os.path.join(sync_dir, own_name), "w") as f:
-                    json.dump(d, f, ensure_ascii=False)
-            except OSError:
-                pass
+    if "--no-sync-snapshot" not in sys.argv:
+        _write_configured_sync_snapshot(d)
+
+
+def write_sync_snapshot():
+    d = compute()
+    meta = _load_json(PRICING_FILE, {}).get("_meta", {})
+    d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
+    return 0 if _write_configured_sync_snapshot(d) else 1
 
 
 def main():
@@ -3793,13 +3841,15 @@ def update_prices():
                          "updated_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z"),
                          "count": len(models)},
                "models": models}
+    prices_changed = _load_json(PRICING_FILE, {}).get("models") != models
     with open(PRICING_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1, sort_keys=True)
     print(f"已更新 {len(models)} 个模型 → {PRICING_FILE}")
-    try:
-        os.remove(_SCAN_CACHE_FILE)
-    except OSError:
-        pass
+    if prices_changed:
+        try:
+            os.remove(_SCAN_CACHE_FILE)
+        except OSError:
+            pass
     return 0
 
 
@@ -3966,10 +4016,11 @@ def update_unknown():
 
     with open(OVERRIDES_FILE, "w", encoding="utf-8") as f:
         json.dump(ovr, f, ensure_ascii=False, indent=2)
-    try:
-        os.remove(_SCAN_CACHE_FILE)
-    except OSError:
-        pass
+    if added:
+        try:
+            os.remove(_SCAN_CACHE_FILE)
+        except OSError:
+            pass
 
     result = {"status": "ok", "count": len(added), "added": added}
     print(json.dumps(result, ensure_ascii=False))
@@ -4770,6 +4821,8 @@ if __name__ == "__main__":
         sys.exit(update_unknown())
     if "--daily-costs" in sys.argv:
         daily_costs()
+    elif "--write-sync" in sys.argv:
+        sys.exit(write_sync_snapshot())
     elif "--projects" in sys.argv:
         projects()
     elif "--wrapped" in sys.argv:

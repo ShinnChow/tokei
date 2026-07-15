@@ -1,6 +1,7 @@
 .build/
 *.app/
 *.dmg
+Tokei/latest.json
 .DS_Store
 __pycache__/
 .wrangler/

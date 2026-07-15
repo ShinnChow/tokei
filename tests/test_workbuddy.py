@@ -119,11 +119,17 @@ class WorkBuddyScanTests(unittest.TestCase):
                 "year": local_day.replace(month=1, day=1),
             }
             old_dir = USAGE.WORKBUDDY_DIR
+            old_pricing_db = USAGE._PRICING_DB
+            old_override_models = USAGE._OV_MODELS
             USAGE.WORKBUDDY_DIR = tmp
+            USAGE._PRICING_DB = {}
+            USAGE._OV_MODELS = {}
             try:
                 result = USAGE.scan_workbuddy(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
             finally:
                 USAGE.WORKBUDDY_DIR = old_dir
+                USAGE._PRICING_DB = old_pricing_db
+                USAGE._OV_MODELS = old_override_models
 
         all_usage = result["ranges"]["all"]
         self.assertEqual(all_usage["in"], 120)

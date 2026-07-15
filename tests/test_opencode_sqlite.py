@@ -106,6 +106,46 @@ class OpenCodeSqliteTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(second, third)
 
+    def test_hermes_cache_is_invalidated_by_wal_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            db_path.write_bytes(b"db")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+
+            with mock.patch.object(USAGE, "_hermes_db_paths", return_value=[str(db_path)]), \
+                 mock.patch.object(USAGE, "_scan_hermes_db", return_value={}) as scan:
+                USAGE.scan_hermes(USAGE.range_bounds(), cache)
+                USAGE.scan_hermes(USAGE.range_bounds(), cache)
+                self.assertEqual(scan.call_count, 1)
+
+                Path(str(db_path) + "-wal").write_bytes(b"new-wal-data")
+                USAGE.scan_hermes(USAGE.range_bounds(), cache)
+                self.assertEqual(scan.call_count, 2)
+
+    def test_openclaw_task_cache_reads_new_wal_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "runs.sqlite"
+            connection = sqlite3.connect(db_path)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE task_runs (created_at INTEGER, status TEXT)")
+            created = int(datetime.now().astimezone().timestamp() * 1000)
+            connection.execute("INSERT INTO task_runs VALUES (?, ?)", (created, "completed"))
+            connection.commit()
+
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            with mock.patch.object(USAGE, "OPENCLAW_DB", str(db_path)), \
+                 mock.patch.object(USAGE, "OPENCLAW_AGENTS", str(Path(tmp) / "agents")):
+                first = USAGE.scan_openclaw(USAGE.range_bounds(), cache)
+                connection.execute("INSERT INTO task_runs VALUES (?, ?)", (created, "failed"))
+                connection.commit()
+                second = USAGE.scan_openclaw(USAGE.range_bounds(), cache)
+
+            connection.close()
+
+        self.assertEqual(first["ranges"]["all"]["tasks"], 1)
+        self.assertEqual(second["ranges"]["all"]["tasks"], 2)
+        self.assertEqual(second["ranges"]["all"]["failed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

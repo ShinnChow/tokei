@@ -115,8 +115,8 @@ final class DataLoader {
         }
     }
 
-    static func runScript(args: [String] = ["--json"]) -> Usage? {
-        let result = runScriptRaw(args: args, timeout: 45)
+    static func runScript(args: [String] = ["--json", "--no-sync-snapshot"]) -> Usage? {
+        let result = runScriptRaw(args: args, timeout: 90)
         guard !result.timedOut, result.exitCode == 0 else {
             fputs("Tokei script failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
             return nil
@@ -140,6 +140,17 @@ final class DataLoader {
         }
     }
 
+    static func writeSyncSnapshot(_ completion: @escaping (Bool) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            let result = runScriptRaw(args: ["--write-sync"], timeout: 120)
+            let ok = !result.timedOut && result.exitCode == 0
+            if !ok {
+                fputs("Tokei sync snapshot failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
+            }
+            DispatchQueue.main.async { completion(ok) }
+        }
+    }
+
     private static let pythonPath: String = {
         for p in ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"] {
             if FileManager.default.fileExists(atPath: p) { return p }
@@ -147,7 +158,7 @@ final class DataLoader {
         return "/usr/bin/env"
     }()
 
-    static func runScriptRaw(args: [String] = ["--json"], timeout: TimeInterval = 8) -> ScriptResult {
+    static func runScriptRaw(args: [String] = ["--json", "--no-sync-snapshot"], timeout: TimeInterval = 8) -> ScriptResult {
         let proc = Process()
         if pythonPath == "/usr/bin/env" {
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")

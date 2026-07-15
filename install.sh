@@ -5,7 +5,7 @@ set -e
 
 REPO=""
 NAME=""
-INTERVAL=5
+INTERVAL=30
 SCRIPT_URL=""
 
 while [[ $# -gt 0 ]]; do
@@ -17,11 +17,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || [ "$INTERVAL" -lt 1 ] || [ "$INTERVAL" -gt 59 ]; then
+    echo "同步间隔必须是 1 到 59 分钟" >&2
+    exit 1
+fi
+
 if [ -z "$REPO" ]; then
     echo "用法: install.sh --repo <git-repo-url> --name <device-name>"
     echo "  --repo      同步 Git 仓库地址(必填)"
     echo "  --name      设备名(默认: hostname)"
-    echo "  --interval  同步间隔分钟(默认: 5)"
+    echo "  --interval  同步间隔分钟(默认: 30)"
     exit 1
 fi
 
@@ -65,12 +70,18 @@ for fname in usage.30s.py pricing.json pricing_overrides.json; do
 done
 
 # 4. 写配置
-cat > "$TOKEI_DIR/config.json" <<EOF
-{
-  "sync_dir": "$SYNC_DIR",
-  "device_id": "$NAME"
-}
-EOF
+python3 - "$SYNC_DIR" "$NAME" "$INTERVAL" > "$TOKEI_DIR/config.json" <<'PY'
+import json
+import sys
+
+json.dump({
+    "sync_dir": sys.argv[1],
+    "device_id": sys.argv[2],
+    "auto_sync": True,
+    "sync_interval": int(sys.argv[3]),
+}, sys.stdout, ensure_ascii=False, indent=2)
+print()
+PY
 echo "[✓] 配置已写入 $TOKEI_DIR/config.json"
 
 # 5. 创建同步脚本

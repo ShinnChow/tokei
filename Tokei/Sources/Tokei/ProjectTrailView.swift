@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TokeiUpdateSecurity
 
 struct TrailProject: Codable, Identifiable {
     var path: String
@@ -260,28 +261,51 @@ struct ProjectTrailView: View {
     }
 
     func openInTerminal(_ path: String) {
-        let script = "tell application \"Terminal\" to do script \"cd \(path.replacingOccurrences(of: "\"", with: "\\\""))\""
-        if let s = NSAppleScript(source: script) { s.executeAndReturnError(nil) }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+        let command = "cd -- \(ShellEscaping.singleQuoted(path))"
+        runAppleScript(
+            """
+            on run argv
+                tell application "Terminal"
+                    do script (item 1 of argv)
+                    activate
+                end tell
+            end run
+            """,
+            argument: command
+        )
     }
 
     func openInGhostty(_ path: String) {
-        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        let escaped = ShellEscaping.singleQuoted(path)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["ghostty", "-e", "/bin/zsh", "-c", "cd '\(escaped)' && exec zsh"]
+        proc.arguments = ["ghostty", "-e", "/bin/zsh", "-c", "cd -- \(escaped) && exec zsh"]
         try? proc.run()
     }
 
     func openInITerm(_ path: String) {
-        let escaped = path.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = """
-        tell application "iTerm"
-            create window with default profile command "/bin/zsh -c \\"cd \\\"\(escaped)\\\"; exec zsh\\""
-            activate
-        end tell
-        """
-        if let s = NSAppleScript(source: script) { s.executeAndReturnError(nil) }
+        let shellCommand = "cd -- \(ShellEscaping.singleQuoted(path)) && exec /bin/zsh"
+        let launchCommand = "/bin/zsh -c \(ShellEscaping.singleQuoted(shellCommand))"
+        runAppleScript(
+            """
+            on run argv
+                tell application "iTerm"
+                    create window with default profile command (item 1 of argv)
+                    activate
+                end tell
+            end run
+            """,
+            argument: launchCommand
+        )
+    }
+
+    private func runAppleScript(_ source: String, argument: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", source, argument]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
     }
 
     func openInVSCode(_ path: String) {

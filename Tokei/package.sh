@@ -3,6 +3,12 @@
 set -e
 cd "$(dirname "$0")"
 
+VERSION="$(sed -nE 's/.*releaseTag = "v([^"]+)".*/\1/p' Sources/Tokei/Updater.swift | head -n 1)"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "无法从 Updater.swift 读取版本号" >&2
+    exit 1
+fi
+
 swift build -c release
 
 APP="Tokei.app"
@@ -24,7 +30,7 @@ cp "$PROJ_DIR/usage.30s.py" "$APP/Contents/Resources/"
 [ -f "Sources/Tokei/Resources/github-mark.png" ] && cp "Sources/Tokei/Resources/github-mark.png" "$APP/Contents/Resources/"
 
 # Info.plist
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -32,8 +38,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Tokei</string>
     <key>CFBundleDisplayName</key><string>Tokei</string>
     <key>CFBundleIdentifier</key><string>com.tokei.app</string>
-    <key>CFBundleVersion</key><string>1.0.13</string>
-    <key>CFBundleShortVersionString</key><string>1.0.13</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>Tokei</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -133,4 +139,7 @@ APPLE
     hdiutil convert "$TMP_DMG" -format UDZO -o "$DMG" 2>/dev/null
     rm -f "$TMP_DMG"
     echo "DMG: $(pwd)/$DMG"
+
+    /bin/bash generate_update_metadata.sh "$VERSION" "$DMG" latest.json
+    echo "Update metadata: $(pwd)/latest.json"
 fi

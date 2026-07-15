@@ -20,6 +20,8 @@ final class Store: ObservableObject {
     @AppStorage("syncEnabled") var syncEnabled = false
 
     private var retryCount = 0
+    private var refreshInFlight = false
+    private var refreshPending = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -29,18 +31,31 @@ final class Store: ObservableObject {
     }
 
     func refresh() {
+        if refreshInFlight {
+            refreshPending = true
+            return
+        }
+        refreshInFlight = true
+        performRefresh()
+    }
+
+    private func performRefresh() {
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
+                let hadPendingRefresh = self.refreshPending
                 if self.usage == nil && self.retryCount < 3 {
                     self.retryCount += 1
                     self.lastUpdated = "加载中…(\(self.retryCount))"
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.refresh() }
+                    if !hadPendingRefresh {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.refresh() }
+                    }
                 } else {
                     self.loadError = "读取用量失败"
                     self.lastUpdated = "加载失败"
                 }
                 (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+                self.finishRefresh()
                 return
             }
             self.retryCount = 0
@@ -59,14 +74,32 @@ final class Store: ObservableObject {
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
             self.lastUpdated = "更新 " + f.string(from: Date())
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+            self.finishRefresh()
+        }
+    }
+
+    private func finishRefresh() {
+        if refreshPending {
+            refreshPending = false
+            performRefresh()
+        } else {
+            refreshInFlight = false
         }
     }
 
     func doSync() {
+        guard !syncing else { return }
         syncing = true
-        syncManager.gitSync { [weak self] ok in
-            self?.syncing = false
-            if ok { self?.refresh() }
+        DataLoader.writeSyncSnapshot { [weak self] snapshotReady in
+            guard let self = self else { return }
+            guard snapshotReady else {
+                self.syncing = false
+                return
+            }
+            self.syncManager.gitSync { [weak self] ok in
+                self?.syncing = false
+                if ok { self?.refresh() }
+            }
         }
     }
 
@@ -89,7 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var globalMouseMonitor: Any?
 
-    // 菜单栏家族品牌色(与面板 Theme.claude/codex 一致)。
+    // 菜单栏额度颜色(与面板 Theme.claude/codex 一致)。
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
 
@@ -110,6 +143,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 启动时先把 Qoder IDE 开关状态落盘到 config.json,
         // 确保随后的 refresh() 触发的 Python 扫描能读到正确的 qoder_ide_enabled。
         PanelView.syncQoderIdeConfigOnLaunch()
+        if var syncConfig = store.syncManager.config {
+            let interval = SyncManager.normalizedSyncInterval(syncConfig.sync_interval)
+            if syncConfig.sync_interval != interval {
+                syncConfig.sync_interval = interval
+                store.syncManager.saveConfig(syncConfig)
+            }
+            if syncConfig.auto_sync == true {
+                store.startAutoSync(minutes: interval)
+            }
+        }
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()

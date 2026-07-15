@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TokeiUpdateSecurity
 
 struct PanelView: View {
     @ObservedObject var store: Store
@@ -1024,7 +1025,7 @@ struct PanelView: View {
     @ViewBuilder
     private var updatePill: some View {
         switch updater.state {
-        case .available(let tag, _):
+        case .available(let tag, _, _):
             Button { updater.performUpdate() } label: {
                 ZStack {
                     Circle()
@@ -1099,7 +1100,7 @@ struct PanelView: View {
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @AppStorage("autoSync") private var autoSync = false
-    @AppStorage("syncInterval") private var syncInterval = 5
+    @AppStorage("syncInterval") private var syncInterval = SyncManager.defaultSyncInterval
     @AppStorage("sitReminderOn") private var sitReminderOn = false
     @AppStorage("sitReminderInterval") private var sitReminderInterval = 90
     @AppStorage(MenuBarStyle.defaultsKey) private var menuBarStyle = MenuBarStyle.system.rawValue
@@ -1147,7 +1148,7 @@ struct PanelView: View {
                     }
                 }
                 if let auto = cfg.auto_sync { autoSync = auto }
-                if let interval = cfg.sync_interval { syncInterval = interval }
+                syncInterval = SyncManager.normalizedSyncInterval(cfg.sync_interval)
                 if store.syncEnabled && autoSync {
                     store.startAutoSync(minutes: syncInterval)
                 }
@@ -1172,7 +1173,7 @@ struct PanelView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .controlSize(.small)
-                .frame(width: 210)
+                .frame(width: 280)
             }
 
             settingsValueRow("信息") {
@@ -1459,10 +1460,12 @@ struct PanelView: View {
                         }
                     if autoSync {
                         Picker("", selection: $syncInterval) {
-                            Text("1m").tag(1); Text("5m").tag(5); Text("15m").tag(15)
+                            ForEach(SyncManager.supportedSyncIntervals, id: \.self) { minutes in
+                                Text("\(minutes)m").tag(minutes)
+                            }
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 90)
+                        .frame(width: 112)
                         .controlSize(.mini)
                         .onChange(of: syncInterval) { v in
                             saveSync()
@@ -1702,8 +1705,10 @@ struct PanelView: View {
     }
 
     func saveSync() {
+        let interval = SyncManager.normalizedSyncInterval(syncInterval)
+        syncInterval = interval
         let cfg = SyncConfig(device_id: deviceName, sync_dir: syncDir,
-                             auto_sync: autoSync, sync_interval: syncInterval)
+                             auto_sync: autoSync, sync_interval: interval)
         store.syncManager.saveConfig(cfg)
     }
 
@@ -1833,14 +1838,15 @@ struct PanelView: View {
     }
 
     func linuxSetupCommand(remote: String) -> String {
-        """
+        let quotedRemote = ShellEscaping.singleQuoted(remote)
+        return """
         mkdir -p ~/.tokei
         if [ ! -d ~/.tokei/sync/.git ]; then
-          git clone \(remote) ~/.tokei/sync
+          git clone \(quotedRemote) ~/.tokei/sync
         fi
         curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
-        cat > ~/.tokei/config.json <<'JSON'
-        {"sync_dir":"~/.tokei/sync","device_id":"$(hostname -s)","auto_sync":true,"sync_interval":5}
+        cat > ~/.tokei/config.json <<JSON
+        {"sync_dir":"~/.tokei/sync","device_id":"$(hostname -s)","auto_sync":true,"sync_interval":30}
         JSON
         cat > ~/.tokei/tokei-sync.sh <<'SH'
         #!/bin/sh
@@ -1856,7 +1862,7 @@ struct PanelView: View {
         git push -q origin HEAD:main
         SH
         chmod +x ~/.tokei/tokei-sync.sh
-        (crontab -l 2>/dev/null | grep -v 'tokei-sync.sh'; echo '*/5 * * * * ~/.tokei/tokei-sync.sh') | crontab -
+        (crontab -l 2>/dev/null | grep -v 'tokei-sync.sh'; echo '*/30 * * * * ~/.tokei/tokei-sync.sh') | crontab -
         """
     }
 

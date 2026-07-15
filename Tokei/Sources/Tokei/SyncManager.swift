@@ -27,6 +27,8 @@ struct RangeBoundary: Codable, Equatable {
 }
 
 final class SyncManager {
+    static let supportedSyncIntervals = [30, 60, 120]
+    static let defaultSyncInterval = 30
     static let configPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".tokei/config.json")
     static let syncDir = FileManager.default.homeDirectoryForCurrentUser
@@ -35,6 +37,13 @@ final class SyncManager {
     var config: SyncConfig?
 
     init() { config = Self.loadConfig() }
+
+    static func normalizedSyncInterval(_ value: Int?) -> Int {
+        guard let value, supportedSyncIntervals.contains(value) else {
+            return defaultSyncInterval
+        }
+        return value
+    }
 
     static func resolvedSyncDir(_ cfg: SyncConfig) -> String {
         let raw = cfg.sync_dir.trimmingCharacters(in: .whitespacesAndNewlines)

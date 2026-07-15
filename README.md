@@ -42,7 +42,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 
 ### 实时监控
 - 30 秒自动刷新，菜单栏直接显示配额/用量
-- 菜单栏支持品牌、单色、刻度、圆点、数字、星轨 6 种样式
+- 菜单栏支持经典白、彩色、刻度、圆点、数字、星轨、椰影 7 种样式
 - 双额度、单额度、仅图标 3 档信息量，最窄只占一个状态栏槽位
 - 按工具展示卡片，一眼掌握所有 AI 工具状态
 
@@ -112,9 +112,9 @@ Tokei 支持通过私有 Git 仓库在多台机器间同步用量数据。
 ```bash
 git clone <你的私有仓库> ~/.tokei/sync
 curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
-echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/config.json
-# 每 5 分钟自动采集并同步
-(crontab -l 2>/dev/null; echo '*/5 * * * * cd ~/.tokei/sync && python3 ~/.tokei/usage.30s.py --json >/dev/null && git pull -q && git add -A && git diff --cached --quiet || git commit -qm sync && git push -q') | crontab -
+echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'","auto_sync":true,"sync_interval":30}' > ~/.tokei/config.json
+# 每 30 分钟自动采集并同步
+(crontab -l 2>/dev/null; echo '*/30 * * * * cd ~/.tokei/sync && python3 ~/.tokei/usage.30s.py --json >/dev/null && git pull -q && git add -A && git diff --cached --quiet || git commit -qm sync && git push -q') | crontab -
 ```
 
 ## 数据来源
@@ -253,7 +253,7 @@ echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'"}' > ~/.tokei/co
 
 Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **12 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
-**Features:** Real-time monitoring (30s refresh, five menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
+**Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
 **Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok CLI, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qwen Code, Qoder, QoderWork
 

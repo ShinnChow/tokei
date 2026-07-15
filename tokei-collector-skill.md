@@ -21,7 +21,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 ## 工作原理
 
 1. 克隆同步 Git 仓库到 `~/.tokei/sync/`
-2. 每 5 分钟执行 `usage.30s.py --json` 采集本机所有 AI 工具用量
+2. 每 30 分钟执行 `usage.30s.py --json` 采集本机所有 AI 工具用量
 3. 写入 `~/.tokei/sync/<device-name>.json`
 4. 自动 `git pull && git add && git commit && git push`
 5. 本地 Tokei 从同一仓库读取,自动聚合所有设备数据

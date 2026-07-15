@@ -78,7 +78,7 @@ cat > ~/.tokei/config.json <<EOF
   "device_id": "$DEVICE_NAME",
   "sync_dir": "~/.tokei/sync",
   "auto_sync": false,
-  "sync_interval": 5
+  "sync_interval": 30
 }
 EOF
 echo "✅ 本机配置完成: $DEVICE_NAME"
@@ -89,8 +89,8 @@ echo "✅ 本机配置完成: $DEVICE_NAME"
 Mac 端由 Tokei.app 负责采集，跳过此步。仅 Linux/远程服务器需要：
 
 ```bash
-(crontab -l 2>/dev/null; echo '*/5 * * * * cd ~/.tokei/sync && python3 ~/.tokei/usage.30s.py --json >/dev/null && git pull -q && git add -A && git diff --cached --quiet || git commit -qm sync && git push -q') | crontab -
-echo "✅ crontab 已配置，每 5 分钟自动采集并同步"
+(crontab -l 2>/dev/null; echo '*/30 * * * * cd ~/.tokei/sync && python3 ~/.tokei/usage.30s.py --json >/dev/null && git pull -q && git add -A && git diff --cached --quiet || git commit -qm sync && git push -q') | crontab -
+echo "✅ crontab 已配置，每 30 分钟自动采集并同步"
 ```
 
 ### 步骤 6: 验证
