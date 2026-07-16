@@ -577,6 +577,13 @@ enum MenuBarTitleRenderer {
     private static func appendArtwork(_ image: NSImage, to title: NSMutableAttributedString) {
         let attachment = NSTextAttachment()
         attachment.image = image
+        let baselineOffset = round(
+            (valueFont.ascender + valueFont.descender - image.size.height) / 2
+        )
+        attachment.bounds = NSRect(
+            x: 0, y: baselineOffset,
+            width: image.size.width, height: image.size.height
+        )
         title.append(NSAttributedString(attachment: attachment))
     }
 
