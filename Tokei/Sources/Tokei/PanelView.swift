@@ -49,6 +49,11 @@ struct PanelView: View {
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
     private var panelWidth: CGFloat { useWide ? 640 : Theme.panelWidth }
+    private var settingsPanelWidth: CGFloat { 640 }
+    private var settingsColumnWidth: CGFloat {
+        (settingsPanelWidth - Theme.outerPad * 2 - 11) / 2
+    }
+    private var settingsMenuPickerWidth: CGFloat { settingsColumnWidth - 40 }
 
     private var maxPanelHeight: CGFloat {
         (NSScreen.main?.visibleFrame.height ?? 900) - 40
@@ -64,7 +69,7 @@ struct PanelView: View {
     }
 
     var body: some View {
-        let w = mode == .settings ? max(panelWidth, 560) : (mode == .cards ? panelWidth : max(panelWidth, 420))
+        let w = mode == .settings ? settingsPanelWidth : (mode == .cards ? panelWidth : max(panelWidth, 420))
         if scrollable {
             ScrollView(.vertical, showsIndicators: false) { panelContent }
                 .frame(width: w)
@@ -1116,7 +1121,7 @@ struct PanelView: View {
                     settingsDiagnosticsSection
                     settingsPricingSection
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(width: settingsColumnWidth, alignment: .top)
 
                 VStack(alignment: .leading, spacing: 11) {
                     settingsMenuBarSection
@@ -1125,7 +1130,7 @@ struct PanelView: View {
                     settingsSyncSection
                     if !store.syncEnabled { settingsRemoteHintSection }
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
+                .frame(width: settingsColumnWidth, alignment: .top)
             }
 
         }
@@ -1164,7 +1169,7 @@ struct PanelView: View {
 
     var settingsMenuBarSection: some View {
         settingsSection("menubar.rectangle", "菜单栏") {
-            settingsValueRow("样式") {
+            settingsStackedValue("样式") {
                 Picker("菜单栏样式", selection: $menuBarStyle) {
                     ForEach(MenuBarStyle.allCases) { style in
                         Text(style.label).tag(style.rawValue)
@@ -1172,11 +1177,12 @@ struct PanelView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(width: 280)
+                .controlSize(.mini)
+                .font(.system(size: 9, weight: .medium))
+                .frame(width: settingsMenuPickerWidth)
             }
 
-            settingsValueRow("信息") {
+            settingsStackedValue("信息") {
                 Picker("菜单栏信息量", selection: $menuBarDensity) {
                     ForEach(MenuBarDensity.allCases) { density in
                         Text(density.label).tag(density.rawValue)
@@ -1184,8 +1190,8 @@ struct PanelView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(width: 210)
+                .controlSize(.mini)
+                .frame(width: settingsMenuPickerWidth)
             }
 
             HStack {
@@ -1474,6 +1480,19 @@ struct PanelView: View {
                     }
                 }
 
+                if !store.syncStatus.isEmpty {
+                    HStack(spacing: 4) {
+                        Spacer()
+                        Image(systemName: store.syncSucceeded == false
+                              ? "exclamationmark.circle.fill"
+                              : (store.syncSucceeded == true ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath"))
+                        Text(store.syncStatus)
+                    }
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(store.syncSucceeded == false ? Theme.claude : Theme.hermes)
+                    .help(store.syncDetail)
+                }
+
                 deviceStatusBlock
 
                 if store.syncEnabled {
@@ -1642,7 +1661,9 @@ struct PanelView: View {
                     .foregroundStyle(Theme.tSecondary)
             }
             VStack(spacing: 6) { content() }
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -1690,6 +1711,18 @@ struct PanelView: View {
             Spacer()
             value()
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+    }
+
+    func settingsStackedValue<C: View>(_ title: String, @ViewBuilder value: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.tTertiary)
+            value()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
     }
@@ -1901,22 +1934,27 @@ struct PanelView: View {
     }
 
     func settingsRow(_ name: String, tint: Color, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Circle().fill(tint.gradient).frame(width: 6, height: 6)
                 .shadow(color: tint.opacity(0.4), radius: 2)
             Text(name)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.tPrimary)
-            Spacer()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .allowsTightening(true)
+                .layoutPriority(1)
+            Spacer(minLength: 4)
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
+                .fixedSize()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .frame(height: 34)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
         )
     }

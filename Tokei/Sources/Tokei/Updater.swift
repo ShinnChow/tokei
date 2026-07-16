@@ -25,6 +25,9 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
     ]
     private var downloadTask: URLSessionDownloadTask?
     private var expectedSHA256: String?
+    private var checkedReleases: [UpdateRelease] = []
+    private var sawValidMetadata = false
+    private var sawNewerIncompleteRelease = false
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForResource = 300
@@ -33,34 +36,30 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
     static let shared = Updater()
 
-    private static func isNewer(remote: String, local: String) -> Bool {
-        let parse: (String) -> [Int] = { v in
-            v.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
-                .split(separator: ".").compactMap { Int($0) }
-        }
-        let r = parse(remote), l = parse(local)
-        for i in 0..<max(r.count, l.count) {
-            let rv = i < r.count ? r[i] : 0
-            let lv = i < l.count ? l[i] : 0
-            if rv > lv { return true }
-            if rv < lv { return false }
-        }
-        return false
-    }
-
     func checkForUpdate() {
         guard state == .idle || state == .upToDate || {
             if case .failed = state { return true }; return false
         }() else { return }
         state = .checking
+        checkedReleases = []
+        sawValidMetadata = false
+        sawNewerIncompleteRelease = false
         tryCheck(index: 0)
     }
 
     private func tryCheck(index: Int) {
         guard index < apiURLs.count else {
-            state = .failed("网络不可用")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                if case .failed = self?.state { self?.state = .idle }
+            if let release = UpdateSecurity.newestRelease(
+                in: checkedReleases,
+                newerThan: Self.releaseTag
+            ) {
+                state = .available(release.tag, release.downloadURL, release.sha256)
+            } else if sawNewerIncompleteRelease {
+                setTransientState(.failed("更新信息不完整"), delay: 5)
+            } else if sawValidMetadata {
+                setTransientState(.upToDate, delay: 3)
+            } else {
+                setTransientState(.failed("网络不可用"), delay: 5)
             }
             return
         }
@@ -84,20 +83,25 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
                     self.tryCheck(index: index + 1)
                     return
                 }
-                if Self.isNewer(remote: tag, local: Self.releaseTag) {
-                    guard let release = UpdateSecurity.validatedRelease(from: json) else {
-                        self.tryCheck(index: index + 1)
-                        return
-                    }
-                    self.state = .available(release.tag, release.downloadURL, release.sha256)
-                } else {
-                    self.state = .upToDate
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                        if self?.state == .upToDate { self?.state = .idle }
+                self.sawValidMetadata = true
+                if UpdateSecurity.isNewerVersion(tag, than: Self.releaseTag) {
+                    if let release = UpdateSecurity.validatedRelease(from: json) {
+                        self.checkedReleases.append(release)
+                    } else {
+                        self.sawNewerIncompleteRelease = true
                     }
                 }
+                self.tryCheck(index: index + 1)
             }
         }.resume()
+    }
+
+    private func setTransientState(_ nextState: State, delay: TimeInterval) {
+        state = nextState
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            if self.state == nextState { self.state = .idle }
+        }
     }
 
     func performUpdate() {

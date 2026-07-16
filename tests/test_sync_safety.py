@@ -15,6 +15,17 @@ except ImportError:
 
 
 class SyncSnapshotSafetyTests(unittest.TestCase):
+    def test_app_auto_sync_runs_after_launch_and_reports_git_result(self):
+        root = Path(__file__).resolve().parents[1]
+        main = (root / "Tokei/Sources/Tokei/main.swift").read_text()
+        sync = (root / "Tokei/Sources/Tokei/SyncManager.swift").read_text()
+
+        self.assertIn("autoSyncStartupWorkItem", main)
+        self.assertIn("DispatchQueue.main.asyncAfter(deadline: .now() + 5", main)
+        self.assertIn('@Published var syncStatus = ""', main)
+        self.assertIn("completion: @escaping (GitSyncResult) -> Void", sync)
+        self.assertNotIn("git push origin HEAD:main 2>/dev/null", sync)
+
     def test_replaces_destination_symlink_without_touching_its_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

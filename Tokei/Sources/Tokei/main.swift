@@ -10,11 +10,15 @@ final class Store: ObservableObject {
     @Published var loadError: String?
     @Published var peers: [PeerDevice] = []
     @Published var syncing = false
+    @Published var syncStatus = ""
+    @Published var syncSucceeded: Bool?
+    @Published var syncDetail = ""
 
     let syncManager = SyncManager()
     let keepAwake = KeepAwake()
     let sitReminder = SitReminder()
     var autoSyncTimer: Timer?
+    private var autoSyncStartupWorkItem: DispatchWorkItem?
 
     @AppStorage("showAllDevices") var showAllDevices = true
     @AppStorage("syncEnabled") var syncEnabled = false
@@ -22,6 +26,7 @@ final class Store: ObservableObject {
     private var retryCount = 0
     private var refreshInFlight = false
     private var refreshPending = false
+    private var dashboardPrewarmStarted = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -74,6 +79,10 @@ final class Store: ObservableObject {
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
             self.lastUpdated = "更新 " + f.string(from: Date())
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+            if !self.refreshPending && !self.dashboardPrewarmStarted {
+                self.dashboardPrewarmStarted = true
+                DashboardRepository.shared.load(.all, force: true)
+            }
             self.finishRefresh()
         }
     }
@@ -90,15 +99,31 @@ final class Store: ObservableObject {
     func doSync() {
         guard !syncing else { return }
         syncing = true
+        syncStatus = "正在同步"
+        syncSucceeded = nil
+        syncDetail = ""
         DataLoader.writeSyncSnapshot { [weak self] snapshotReady in
             guard let self = self else { return }
             guard snapshotReady else {
                 self.syncing = false
+                self.syncStatus = "同步失败"
+                self.syncSucceeded = false
+                self.syncDetail = "生成本机数据快照失败"
                 return
             }
-            self.syncManager.gitSync { [weak self] ok in
-                self?.syncing = false
-                if ok { self?.refresh() }
+            self.syncManager.gitSync { [weak self] result in
+                guard let self else { return }
+                self.syncing = false
+                self.syncSucceeded = result.succeeded
+                self.syncDetail = result.output
+                if result.succeeded {
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "HH:mm"
+                    self.syncStatus = "已同步 " + formatter.string(from: Date())
+                    self.refresh()
+                } else {
+                    self.syncStatus = "同步失败"
+                }
             }
         }
     }
@@ -107,9 +132,17 @@ final class Store: ObservableObject {
         stopAutoSync()
         autoSyncTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60),
                                              repeats: true) { [weak self] _ in self?.doSync() }
+        let startupWorkItem = DispatchWorkItem { [weak self] in
+            self?.autoSyncStartupWorkItem = nil
+            self?.doSync()
+        }
+        autoSyncStartupWorkItem = startupWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: startupWorkItem)
     }
 
     func stopAutoSync() {
+        autoSyncStartupWorkItem?.cancel()
+        autoSyncStartupWorkItem = nil
         autoSyncTimer?.invalidate()
         autoSyncTimer = nil
     }
@@ -264,6 +297,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func autoFetchPricing() {
+        let pricingURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tokei/pricing.json")
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: pricingURL.path),
+           let modifiedAt = attributes[.modificationDate] as? Date,
+           Date().timeIntervalSince(modifiedAt) < 24 * 3600 {
+            return
+        }
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -356,6 +396,10 @@ enum Icon {
         }
         exit(0)
     }
+}
+
+if LoginItemCommandLine.runIfRequested() {
+    exit(0)
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--make-icon") {

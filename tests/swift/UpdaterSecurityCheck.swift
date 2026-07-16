@@ -17,6 +17,7 @@ private enum UpdaterSecurityCheck {
 
         try testUpdateWorkspaceAndInstaller()
         try testShellEscaping()
+        try testVersionSelection(digest: digest)
 
         try expect(UpdateSecurity.isAllowedMetadataURL(
             try url("https://api.github.com/repos/cclank/tokei/releases/latest")
@@ -109,8 +110,7 @@ private enum UpdaterSecurityCheck {
 
         let sourceRoot = testRoot.appendingPathComponent("dmg-source", isDirectory: true)
         let sourceApp = sourceRoot.appendingPathComponent("Tokei.app", isDirectory: true)
-        try fileManager.createDirectory(at: sourceApp, withIntermediateDirectories: true)
-        try Data("new".utf8).write(to: sourceApp.appendingPathComponent("version.txt"))
+        try createSignedApp(at: sourceApp, version: "new")
 
         let installedApp = testRoot.appendingPathComponent("Installed Tokei.app", isDirectory: true)
         try fileManager.createDirectory(at: installedApp, withIntermediateDirectories: true)
@@ -136,7 +136,7 @@ private enum UpdaterSecurityCheck {
         )
         try expect(installStatus == 0, "installer should replace a valid app")
         let installedVersion = try String(
-            contentsOf: installedApp.appendingPathComponent("version.txt"),
+            contentsOf: installedApp.appendingPathComponent("Contents/Resources/version.txt"),
             encoding: .utf8
         )
         try expect(installedVersion == "new", "installer should copy the new app")
@@ -144,6 +144,119 @@ private enum UpdaterSecurityCheck {
                    "installer should remove its workspace")
         try expect(!fileManager.fileExists(atPath: backupURL.path),
                    "installer should remove its backup after success")
+
+        let invalidWorkspace = try UpdateInstaller.createWorkspace(in: testRoot)
+        let invalidRoot = testRoot.appendingPathComponent("invalid-dmg-source", isDirectory: true)
+        let invalidApp = invalidRoot.appendingPathComponent("Tokei.app", isDirectory: true)
+        try createSignedApp(at: invalidApp, version: "tampered")
+        try Data("modified after signing".utf8).write(
+            to: invalidApp.appendingPathComponent("Contents/Resources/version.txt")
+        )
+        let invalidDMGStatus = try run(
+            "/usr/bin/hdiutil",
+            ["create", "-volname", "TokeiInvalidTest", "-srcfolder", invalidRoot.path,
+             "-ov", "-format", "UDZO", invalidWorkspace.dmgURL.path]
+        )
+        try expect(invalidDMGStatus == 0, "tampered test DMG should be created")
+        try UpdateInstaller.script.write(
+            to: invalidWorkspace.scriptURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let invalidStatus = try run(
+            "/bin/bash",
+            [invalidWorkspace.scriptURL.path, invalidWorkspace.dmgURL.path,
+             invalidWorkspace.mountURL.path, installedApp.path, invalidWorkspace.rootURL.path,
+             invalidWorkspace.backupURL(for: installedApp).path]
+        )
+        try expect(invalidStatus != 0, "installer should reject a tampered app")
+        let preservedVersion = try String(
+            contentsOf: installedApp.appendingPathComponent("Contents/Resources/version.txt"),
+            encoding: .utf8
+        )
+        try expect(preservedVersion == "new", "rejected update should preserve the installed app")
+    }
+
+    private static func createSignedApp(at appURL: URL, version: String) throws {
+        let fileManager = FileManager.default
+        let macOSURL = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let resourcesURL = appURL.appendingPathComponent("Contents/Resources", isDirectory: true)
+        try fileManager.createDirectory(at: macOSURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: resourcesURL, withIntermediateDirectories: true)
+        let executableURL = macOSURL.appendingPathComponent("Tokei")
+        let sourceURL = appURL.deletingLastPathComponent().appendingPathComponent(
+            "tokei-test-main-\(UUID().uuidString).c"
+        )
+        defer { try? fileManager.removeItem(at: sourceURL) }
+        try Data("#include <unistd.h>\nint main(void) { sleep(2); return 0; }\n".utf8)
+            .write(to: sourceURL)
+        let compileStatus = try run(
+            "/usr/bin/xcrun",
+            ["clang", sourceURL.path, "-o", executableURL.path]
+        )
+        try expect(compileStatus == 0, "test app executable should compile")
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+        try Data(version.utf8).write(to: resourcesURL.appendingPathComponent("version.txt"))
+
+        let plist: [String: Any] = [
+            "CFBundleName": "Tokei",
+            "CFBundleIdentifier": "com.tokei.app",
+            "CFBundleExecutable": "Tokei",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": "1.0.0",
+            "LSUIElement": true,
+        ]
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: plist,
+            format: .xml,
+            options: 0
+        )
+        try plistData.write(to: appURL.appendingPathComponent("Contents/Info.plist"))
+        let signProcess = Process()
+        signProcess.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        signProcess.arguments = ["--force", "--deep", "--sign", "-", appURL.path]
+        let signError = Pipe()
+        signProcess.standardOutput = FileHandle.nullDevice
+        signProcess.standardError = signError
+        try signProcess.run()
+        signProcess.waitUntilExit()
+        let errorText = String(
+            data: signError.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        try expect(signProcess.terminationStatus == 0,
+                   "test app should be ad-hoc signed: \(errorText)")
+    }
+
+    private static func testVersionSelection(digest: String) throws {
+        try expect(UpdateSecurity.isNewerVersion("v1.0.15", than: "v1.0.14"),
+                   "new patch version should be newer")
+        try expect(UpdateSecurity.isNewerVersion("v1.1", than: "v1.0.99"),
+                   "new minor version should be newer")
+        try expect(!UpdateSecurity.isNewerVersion("v1.0.14", than: "v1.0.14"),
+                   "equal versions should not be newer")
+        try expect(!UpdateSecurity.isNewerVersion("not-a-version", than: "v1.0.14"),
+                   "malformed versions should be rejected")
+
+        let older = UpdateRelease(
+            tag: "v1.0.15",
+            downloadURL: try url("https://github.com/cclank/tokei/releases/download/v1.0.15/Tokei.dmg"),
+            sha256: digest
+        )
+        let newer = UpdateRelease(
+            tag: "v1.1.0",
+            downloadURL: try url("https://dl.lanshuagent.com/tokei/Tokei-v1.1.0.dmg"),
+            sha256: digest
+        )
+        try expect(
+            UpdateSecurity.newestRelease(in: [older, newer], newerThan: "v1.0.14") == newer,
+            "newest valid release should win across metadata sources"
+        )
+        try expect(
+            UpdateSecurity.newestRelease(in: [older], newerThan: "v2.0.0") == nil,
+            "older releases should be ignored"
+        )
     }
 
     private static func testShellEscaping() throws {

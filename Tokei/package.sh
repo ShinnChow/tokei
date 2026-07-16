@@ -50,7 +50,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP" 2>/dev/null || true
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
 xattr -cr "$APP" 2>/dev/null || true
 echo "Built: $(pwd)/$APP"
 

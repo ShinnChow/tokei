@@ -74,6 +74,36 @@ class CodexDedupedDaysTests(unittest.TestCase):
         self.assertEqual(days["a"]["2026-07-10"]["in"], 100)
         self.assertEqual(days["b"]["2026-07-10"]["in"], 100)
 
+    def test_long_replay_without_parent_metadata_uses_indexed_prefix(self):
+        parent_first = event(
+            "2026-07-10T00:00:00+00:00", "2026-07-10",
+            (100, 80, 5, 2), (100, 80, 5, 2), 1.0,
+        )
+        parent_second = event(
+            "2026-07-10T00:01:00+00:00", "2026-07-10",
+            (150, 120, 8, 3), (50, 40, 3, 1), 0.5,
+        )
+        child_first = event(
+            "2026-07-10T01:00:00+00:00", "2026-07-10",
+            (100, 80, 5, 2), (100, 80, 5, 2), 1.0,
+        )
+        child_second = event(
+            "2026-07-10T01:01:00+00:00", "2026-07-10",
+            (150, 120, 8, 3), (50, 40, 3, 1), 0.5,
+        )
+        child_increment = event(
+            "2026-07-10T01:02:00+00:00", "2026-07-10",
+            (175, 140, 10, 4), (25, 20, 2, 1), 0.25,
+        )
+
+        days = USAGE._codex_deduped_days({
+            "parent": {"events": [parent_first, parent_second]},
+            "child": {"events": [child_first, child_second, child_increment]},
+        })
+
+        self.assertEqual(days["parent"]["2026-07-10"]["in"], 150)
+        self.assertEqual(days["child"]["2026-07-10"]["in"], 25)
+
     def test_events_without_cumulative_total_are_kept(self):
         first = event(
             "2026-07-10T00:00:00+00:00",
@@ -206,6 +236,54 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
+    def test_scan_parses_only_appended_codex_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-growing.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("growing"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.4"),
+                self.token_count("2024-01-08T00:01:00Z", (100, 80, 5, 2), (100, 80, 5, 2)),
+            ]) + "\n", encoding="utf-8")
+            day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+            bounds = {
+                "today": day, "yesterday": day - timedelta(days=1), "week": day,
+                "last_week": day - timedelta(days=7), "last_week_end": day,
+                "month": day.replace(day=1), "year": day.replace(month=1, day=1),
+            }
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            old_dir = USAGE.CODEX_DIR
+            USAGE.CODEX_DIR = tmp
+            try:
+                with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                    USAGE.scan_codex(bounds, cache)
+                first_size = cache["codex"][str(path)]["parsed_size"]
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(self.token_count(
+                        "2024-01-08T00:02:00Z", (100, 80, 5, 2), (100, 80, 5, 2)) + "\n")
+                    handle.write(self.token_count(
+                        "2024-01-08T00:03:00Z", (150, 120, 8, 3), (50, 40, 3, 1)) + "\n")
+                original_iterator = USAGE._iter_codex_usage_records
+                with mock.patch.object(
+                    USAGE, "_codex_session_meta",
+                    side_effect=AssertionError("append scan should reuse session metadata"),
+                ), mock.patch.object(
+                    USAGE, "_iter_codex_usage_records", wraps=original_iterator,
+                ) as iterator, mock.patch.object(
+                    USAGE, "fetch_codex_live_limits", return_value=None,
+                ):
+                    result = USAGE.scan_codex(bounds, cache)
+            finally:
+                USAGE.CODEX_DIR = old_dir
+
+        self.assertGreater(iterator.call_args.kwargs["start_offset"], 0)
+        self.assertEqual(iterator.call_args.kwargs["start_offset"], first_size)
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["cached"], 120)
+        self.assertEqual(usage["out"], 8)
+        self.assertEqual(len(cache["codex"][str(path)]["events"]), 2)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 30)
 
     def test_scan_keeps_child_increment_and_drops_replayed_history(self):
         with tempfile.TemporaryDirectory() as tmp:

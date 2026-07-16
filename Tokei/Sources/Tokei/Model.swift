@@ -247,12 +247,42 @@ struct GrokStat: Codable {
 }
 
 struct QoderRange: Codable {
+    var `in`: Int = 0
+    var out: Int = 0
     var sessions: Int = 0
     var calls: Int = 0
     var sub_agents: Int = 0
     var turns: Int = 0
     var duration: Int = 0
     var ctx: Double = 0
+
+    enum CodingKeys: String, CodingKey {
+        case `in`, out, sessions, calls, sub_agents, turns, duration, ctx
+    }
+
+    init(`in` input: Int = 0, out: Int = 0, sessions: Int = 0, calls: Int = 0,
+         sub_agents: Int = 0, turns: Int = 0, duration: Int = 0, ctx: Double = 0) {
+        self.in = input
+        self.out = out
+        self.sessions = sessions
+        self.calls = calls
+        self.sub_agents = sub_agents
+        self.turns = turns
+        self.duration = duration
+        self.ctx = ctx
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.in = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
+        self.out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
+        self.sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        self.calls = try c.decodeIfPresent(Int.self, forKey: .calls) ?? 0
+        self.sub_agents = try c.decodeIfPresent(Int.self, forKey: .sub_agents) ?? 0
+        self.turns = try c.decodeIfPresent(Int.self, forKey: .turns) ?? 0
+        self.duration = try c.decodeIfPresent(Int.self, forKey: .duration) ?? 0
+        self.ctx = try c.decodeIfPresent(Double.self, forKey: .ctx) ?? 0
+    }
 }
 
 struct QoderRanges: Codable {

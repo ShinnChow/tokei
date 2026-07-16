@@ -7,6 +7,11 @@ struct SyncConfig: Codable {
     var sync_interval: Int?     // minutes
 }
 
+struct GitSyncResult {
+    var succeeded: Bool
+    var output: String
+}
+
 struct PeerDevice: Identifiable {
     var id: String { deviceId }
     var deviceId: String
@@ -263,6 +268,7 @@ final class SyncManager {
         for pair in pairs {
             var d = dst.get(pair.dst), s = src.get(pair.src)
             let originalSessions = d.sessions
+            d.in += s.in; d.out += s.out
             d.sessions += s.sessions
             d.calls += s.calls; d.sub_agents += s.sub_agents
             d.turns += s.turns; d.duration += s.duration
@@ -402,34 +408,52 @@ final class SyncManager {
 
     // MARK: - Git sync
 
-    func gitSync(completion: @escaping (Bool) -> Void) {
-        guard let cfg = config else { completion(false); return }
+    func gitSync(completion: @escaping (GitSyncResult) -> Void) {
+        guard let cfg = config else {
+            completion(GitSyncResult(succeeded: false, output: "同步配置不可用"))
+            return
+        }
         let dir = Self.resolvedSyncDir(cfg)
         let escapedDir = dir.replacingOccurrences(of: "'", with: "'\\''")
         let escapedDevice = cfg.device_id.replacingOccurrences(of: "'", with: "'\\''")
         DispatchQueue.global(qos: .utility).async {
             let script = """
             cd '\(escapedDir)' || exit 1
-            git fetch origin main 2>/dev/null || exit 1
-            device_file=$(find . -maxdepth 1 -type f -iname '\(escapedDevice).json' -print -quit)
+            /usr/bin/git fetch origin main || exit 1
+            device_file=$(/usr/bin/find . -maxdepth 1 -type f -iname '\(escapedDevice).json' -print -quit)
             if [ -z "$device_file" ]; then
               device_file='./\(escapedDevice).json'
             fi
-            git add -- "$device_file" || exit 1
-            if ! git diff --cached --quiet; then
-              git commit -m 'tokei sync \(escapedDevice)' || exit 1
+            /usr/bin/git add -- "$device_file" || exit 1
+            if ! /usr/bin/git diff --cached --quiet; then
+              /usr/bin/git commit -m 'tokei sync \(escapedDevice)' || exit 1
             fi
-            git rebase origin/main 2>/dev/null || exit 1
-            git push origin HEAD:main 2>/dev/null
+            /usr/bin/git rebase origin/main || exit 1
+            /usr/bin/git push origin HEAD:main
             """
             let proc = Process()
+            let outputPipe = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
             proc.arguments = ["-c", script]
-            proc.standardOutput = Pipe()
-            proc.standardError = Pipe()
-            try? proc.run()
+            proc.standardOutput = outputPipe
+            proc.standardError = outputPipe
+            do {
+                try proc.run()
+            } catch {
+                DispatchQueue.main.async {
+                    completion(GitSyncResult(succeeded: false, output: error.localizedDescription))
+                }
+                return
+            }
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
             proc.waitUntilExit()
-            DispatchQueue.main.async { completion(proc.terminationStatus == 0) }
+            let output = String(data: outputData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let result = GitSyncResult(
+                succeeded: proc.terminationStatus == 0,
+                output: output.isEmpty ? "GitHub 已是最新" : output
+            )
+            DispatchQueue.main.async { completion(result) }
         }
     }
 }

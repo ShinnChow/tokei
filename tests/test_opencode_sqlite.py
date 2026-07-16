@@ -106,6 +106,20 @@ class OpenCodeSqliteTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertNotEqual(second, third)
 
+    def test_signature_ignores_shm_metadata_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "usage.db"
+            path.write_bytes(b"db")
+            first = USAGE._sqlite_signature(str(path))
+            shm = Path(str(path) + "-shm")
+            shm.write_bytes(b"shm-1")
+            second = USAGE._sqlite_signature(str(path))
+            shm.write_bytes(b"shm-2-longer")
+            third = USAGE._sqlite_signature(str(path))
+
+        self.assertEqual(first, second)
+        self.assertEqual(second, third)
+
     def test_hermes_cache_is_invalidated_by_wal_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.db"

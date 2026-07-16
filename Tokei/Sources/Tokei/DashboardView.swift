@@ -69,8 +69,61 @@ struct DashboardData: Codable {
     var models: [ModelCost]
 }
 
+struct DashboardPayload: Codable {
+    var daily: [DailyCost]
+    var models: [ModelCost]
+    var wrapped: WrappedData
+}
+
+final class DashboardRepository: ObservableObject {
+    static let shared = DashboardRepository()
+
+    @Published private(set) var payloads: [String: DashboardPayload] = [:]
+    private var loadedAt: [String: Date] = [:]
+    private var inFlight: Set<String> = []
+    private var forcedReloadPending: Set<String> = []
+    private let freshness: TimeInterval = 30
+
+    func payload(for period: WrappedPeriod) -> DashboardPayload? {
+        payloads[period.rawValue]
+    }
+
+    func load(_ period: WrappedPeriod, force: Bool = false) {
+        let key = period.rawValue
+        if !force, let loaded = loadedAt[key], Date().timeIntervalSince(loaded) < freshness {
+            return
+        }
+        guard inFlight.insert(key).inserted else {
+            if force { forcedReloadPending.insert(key) }
+            return
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            let result = DataLoader.runScriptRaw(
+                args: ["--dashboard", "--period", key],
+                timeout: 30
+            )
+            let payload = result.exitCode == 0 && !result.timedOut
+                ? try? JSONDecoder().decode(DashboardPayload.self, from: Data(result.stdout.utf8))
+                : nil
+            DispatchQueue.main.async {
+                self.inFlight.remove(key)
+                let shouldReload = self.forcedReloadPending.remove(key) != nil
+                if let payload {
+                    self.loadedAt[key] = Date()
+                    self.payloads[key] = payload
+                } else {
+                    fputs("Tokei dashboard failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n", stderr)
+                }
+                if shouldReload { self.load(period, force: true) }
+            }
+        }
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var store: Store
+    @ObservedObject private var dashboardRepository = DashboardRepository.shared
     @State private var daily: [DailyCost] = []
     @State private var models: [ModelCost] = []
     @State private var wrapped: WrappedData? = nil
@@ -106,6 +159,10 @@ struct DashboardView: View {
         .onChange(of: store.showAllDevices) { _ in applyCachedScope(animated: true) }
         .onChange(of: store.syncEnabled) { _ in applyCachedScope(animated: true) }
         .onReceive(store.$usage) { _ in applyCachedScope(animated: false) }
+        .onReceive(dashboardRepository.$payloads) { payloads in
+            guard let payload = payloads[wrappedPeriod.rawValue] else { return }
+            apply(payload, animated: false)
+        }
     }
 
     // MARK: - Summary
@@ -445,39 +502,27 @@ struct DashboardView: View {
     }
 
     func loadData(showLoading: Bool = false) {
-        if showLoading || (daily.isEmpty && models.isEmpty && wrapped == nil) {
+        if let cached = dashboardRepository.payload(for: wrappedPeriod) {
+            apply(cached, animated: false)
+        } else if showLoading || (daily.isEmpty && models.isEmpty && wrapped == nil) {
             loading = true
         }
-        let period = wrappedPeriod
-        DispatchQueue.global(qos: .utility).async {
-            let dd = try? JSONDecoder().decode(DashboardData.self, from: Self.runScript(["--daily-costs"]))
-            let wd = try? JSONDecoder().decode(WrappedData.self, from: Self.runScript(["--wrapped", "--period", period.rawValue]))
-            let nextDaily = dd?.daily ?? []
-            let nextModels = dd?.models ?? []
-            DispatchQueue.main.async {
-                baseDaily = nextDaily
-                baseModels = nextModels
-                baseWrapped = wd
-                applyCachedScope(animated: false)
-                loading = false
-            }
-        }
+        dashboardRepository.load(wrappedPeriod)
     }
 
     func loadWrapped(_ period: WrappedPeriod) {
-        DispatchQueue.global(qos: .utility).async {
-            let periodArgs = ["--period", period.rawValue]
-            let wd = try? JSONDecoder().decode(WrappedData.self, from: Self.runScript(["--wrapped"] + periodArgs))
-            let dd = try? JSONDecoder().decode(DashboardData.self, from: Self.runScript(["--daily-costs"] + periodArgs))
-            DispatchQueue.main.async {
-                if let dd {
-                    baseDaily = dd.daily
-                    baseModels = dd.models
-                }
-                baseWrapped = wd
-                applyCachedScope(animated: true)
-            }
+        if let cached = dashboardRepository.payload(for: period) {
+            apply(cached, animated: true)
         }
+        dashboardRepository.load(period)
+    }
+
+    func apply(_ payload: DashboardPayload, animated: Bool) {
+        baseDaily = payload.daily
+        baseModels = payload.models
+        baseWrapped = payload.wrapped
+        applyCachedScope(animated: animated)
+        loading = false
     }
 
     func applyCachedScope(animated: Bool) {
@@ -791,6 +836,14 @@ struct DashboardView: View {
             out.append(modelCost(name: usage.grok.model ?? "Grok CLI", cost: 0, tool: "grok", tokens: grokTokens))
         }
 
+        let qoderwork = usage.qoderwork.ranges.get(key)
+        let qoderworkTokens = qoderwork.in + qoderwork.out
+        if qoderworkTokens > 0 {
+            let model = usage.qoderwork.model ?? "QoderWork"
+            out.append(modelCost(name: "\(model) (QoderWork)", cost: 0, tool: "qoderwork",
+                                 input: qoderwork.in, out: qoderwork.out, tokens: qoderworkTokens))
+        }
+
         let qoder = usage.qoder.ranges.get(key)
         let qoderTokens = qoder.in + qoder.cached + qoder.out
         if qoderTokens > 0 {
@@ -845,11 +898,13 @@ struct DashboardView: View {
         let codex = usage.codex.ranges.get(key)
         let gemini = usage.gemini.ranges.get(key)
         let grok = usage.grok.ranges.get(key)
+        let qoderwork = usage.qoderwork.ranges.get(key)
         let qoder = usage.qoder.ranges.get(key)
         return claude.in + claude.out + claude.cr + claude.cw
             + codex.in + codex.cached + codex.out
             + gemini.in + gemini.cached + gemini.out + gemini.thoughts
             + (grok.ctx_used ?? grok.tokens)
+            + qoderwork.in + qoderwork.out
             + qoder.in + qoder.cached + qoder.out
             + hermesTotal(usage.hermes.ranges.get(key))
             + tokenUsageTotal(usage.zcode.ranges.get(key))
@@ -892,15 +947,8 @@ struct DashboardView: View {
     }
 
     static func runScript(_ args: [String]) -> Data {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        proc.arguments = ["python3", DataLoader.scriptPath] + args
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        try? proc.run()
-        let raw = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        return raw
+        let result = DataLoader.runScriptRaw(args: args, timeout: 90)
+        return Data(result.stdout.utf8)
     }
+
 }

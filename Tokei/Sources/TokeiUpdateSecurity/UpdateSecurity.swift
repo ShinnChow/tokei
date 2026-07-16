@@ -82,10 +82,26 @@ public enum UpdateInstaller {
         fi
     }
 
+    validate_app() {
+        local candidate="$1"
+        local plist="$candidate/Contents/Info.plist"
+        local executable
+        local bundle_id
+
+        [ -f "$plist" ] || return 1
+        bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null) || return 1
+        [ "$bundle_id" = "com.tokei.app" ] || return 1
+        executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist" 2>/dev/null) || return 1
+        [ "$executable" = "Tokei" ] || return 1
+        [ -f "$candidate/Contents/MacOS/$executable" ] || return 1
+        [ -x "$candidate/Contents/MacOS/$executable" ] || return 1
+        /usr/bin/codesign --verify --deep --strict "$candidate" >/dev/null 2>&1 || return 1
+    }
+
     fail() {
         restore
         cleanup
-        /usr/bin/open "$APP_PATH" >/dev/null 2>&1 || true
+        /usr/bin/open -n "$APP_PATH" >/dev/null 2>&1 || true
         exit 1
     }
 
@@ -97,18 +113,21 @@ public enum UpdateInstaller {
     /bin/mkdir -p "$MOUNT_DIR" || fail
     /usr/bin/hdiutil attach "$DMG_PATH" -nobrowse -quiet -readonly -mountpoint "$MOUNT_DIR" || fail
     MOUNTED=1
-    [ -d "$MOUNT_DIR/Tokei.app" ] || fail
+    validate_app "$MOUNT_DIR/Tokei.app" || fail
     [ ! -e "$BACKUP_PATH" ] || /bin/rm -rf "$BACKUP_PATH" || fail
     /bin/mv "$APP_PATH" "$BACKUP_PATH" || fail
     OLD_MOVED=1
     /bin/cp -R "$MOUNT_DIR/Tokei.app" "$APP_PATH" || fail
     /usr/bin/xattr -cr "$APP_PATH" >/dev/null 2>&1 || true
+    validate_app "$APP_PATH" || fail
+    if ! /usr/bin/hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1; then
+        /bin/sleep 1
+        /usr/bin/hdiutil detach "$MOUNT_DIR" -quiet -force >/dev/null 2>&1 || fail
+    fi
+    MOUNTED=0
+    /usr/bin/open -n "$APP_PATH" >/dev/null 2>&1 || fail
     /bin/rm -rf "$BACKUP_PATH" || fail
     OLD_MOVED=0
-    if /usr/bin/hdiutil detach "$MOUNT_DIR" -quiet >/dev/null 2>&1; then
-        MOUNTED=0
-    fi
-    /usr/bin/open "$APP_PATH" >/dev/null 2>&1 || true
     cleanup
     exit 0
     """
@@ -137,6 +156,30 @@ public enum UpdateSecurity {
         guard let raw = (json["tag_name"] ?? json["version"]) as? String else { return nil }
         let tag = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return tag.isEmpty ? nil : tag
+    }
+
+    public static func isNewerVersion(_ remote: String, than local: String) -> Bool {
+        guard let remoteParts = versionParts(remote),
+              let localParts = versionParts(local) else {
+            return false
+        }
+        for index in 0..<max(remoteParts.count, localParts.count) {
+            let remotePart = index < remoteParts.count ? remoteParts[index] : 0
+            let localPart = index < localParts.count ? localParts[index] : 0
+            if remotePart != localPart { return remotePart > localPart }
+        }
+        return false
+    }
+
+    public static func newestRelease(
+        in releases: [UpdateRelease],
+        newerThan localVersion: String
+    ) -> UpdateRelease? {
+        releases.reduce(nil) { current, candidate in
+            guard isNewerVersion(candidate.tag, than: localVersion) else { return current }
+            guard let current else { return candidate }
+            return isNewerVersion(candidate.tag, than: current.tag) ? candidate : current
+        }
     }
 
     public static func validatedRelease(from json: [String: Any]) -> UpdateRelease? {
@@ -213,6 +256,15 @@ public enum UpdateSecurity {
             return false
         }
         return url.pathExtension.lowercased() == "dmg"
+    }
+
+    private static func versionParts(_ raw: String) -> [Int]? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.lowercased().hasPrefix("v") { value.removeFirst() }
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard !components.isEmpty else { return nil }
+        let numbers = components.compactMap { Int($0) }
+        return numbers.count == components.count ? numbers : nil
     }
 
     private static func isAllowedHTTPSURL(_ url: URL, hosts: Set<String>) -> Bool {

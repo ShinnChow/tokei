@@ -41,7 +41,10 @@ class PricingCacheTests(unittest.TestCase):
             pricing = Path(tmp) / "pricing.json"
             scan_cache = Path(tmp) / "scan-cache.json"
             pricing.write_text(json.dumps({"models": existing_models}), encoding="utf-8")
-            scan_cache.write_text('{"v":16,"sentinel":true}', encoding="utf-8")
+            scan_cache.write_text(json.dumps({
+                "v": USAGE._SCAN_CACHE_VERSION,
+                "sentinel": True,
+            }), encoding="utf-8")
 
             with mock.patch("urllib.request.urlopen", return_value=self.response()), \
                  mock.patch.object(USAGE, "PRICING_FILE", str(pricing)), \
@@ -60,7 +63,7 @@ class PricingCacheTests(unittest.TestCase):
             pricing.write_text(json.dumps({"models": {
                 "test/model": {"in": 1.0, "out": 2.0, "cache_read": 0.5, "cache_write": 0.8},
             }}), encoding="utf-8")
-            scan_cache.write_text('{"v":16}', encoding="utf-8")
+            scan_cache.write_text(json.dumps({"v": USAGE._SCAN_CACHE_VERSION}), encoding="utf-8")
 
             with mock.patch("urllib.request.urlopen", return_value=self.response("0.000003")), \
                  mock.patch.object(USAGE, "PRICING_FILE", str(pricing)), \
