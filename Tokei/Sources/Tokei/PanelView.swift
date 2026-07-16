@@ -60,6 +60,11 @@ struct PanelView: View {
         (NSScreen.main?.visibleFrame.height ?? 900) - 40
     }
 
+    private var projectPanelHeight: CGFloat {
+        let visibleRows = min(trailProjects?.count ?? 5, 7)
+        return min(maxPanelHeight, min(720, max(360, 150 + CGFloat(visibleRows) * 84)))
+    }
+
     private var debugSummary: String {
         guard !debugOutput.isEmpty else { return "" }
         let lines = debugOutput.components(separatedBy: .newlines)
@@ -72,12 +77,20 @@ struct PanelView: View {
     var body: some View {
         let w = mode == .settings ? settingsPanelWidth : (mode == .cards ? panelWidth : max(panelWidth, 420))
         if scrollable {
-            ScrollView(.vertical, showsIndicators: false) { panelContent }
-                .frame(width: w)
-                .frame(maxHeight: maxPanelHeight)
-                .background(Theme.bg)
-                .background(VisualEffect())
-                .environment(\.colorScheme, .dark)
+            if mode == .projects {
+                projectPanelContent
+                    .frame(width: w, height: projectPanelHeight)
+                    .background(Theme.bg)
+                    .background(VisualEffect())
+                    .environment(\.colorScheme, .dark)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) { panelContent }
+                    .frame(width: w)
+                    .frame(maxHeight: maxPanelHeight)
+                    .background(Theme.bg)
+                    .background(VisualEffect())
+                    .environment(\.colorScheme, .dark)
+            }
         } else {
             panelContent
                 .frame(width: w, alignment: .top)
@@ -85,6 +98,18 @@ struct PanelView: View {
                 .background(VisualEffect())
                 .environment(\.colorScheme, .dark)
         }
+    }
+
+    private var projectPanelContent: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            header
+            ScrollView(.vertical, showsIndicators: true) {
+                ProjectTrailView(cached: $trailProjects)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            footer
+        }
+        .padding(Theme.outerPad)
     }
 
     private var panelContent: some View {
@@ -251,7 +276,8 @@ struct PanelView: View {
                          tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen))),
             ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
                          tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen))),
-            ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw, active: lr.tasks > 0 || lr.in + lr.out > 0,
+            ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw,
+                         active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
@@ -270,13 +296,19 @@ struct PanelView: View {
             EqualHeightGrid() {
                 ForEach(cards) { item in
                     Card(tint: item.tint) { item.content }
+                        .id(cardContentIdentity(for: item))
                 }
             }
         } else {
             ForEach(cards) { item in
                 Card(tint: item.tint) { item.content }
+                    .id(cardContentIdentity(for: item))
             }
         }
+    }
+
+    private func cardContentIdentity(for item: ToolCardItem) -> String {
+        "\(item.id):\(sel.rawValue):\(store.syncEnabled):\(store.showAllDevices)"
     }
 
     // MARK: - Claude 卡片
@@ -564,7 +596,7 @@ struct PanelView: View {
     func openclawBlock(_ r: OpenClawRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions)
-            if r.in + r.out > 0 {
+            if r.in + r.out + r.cr + r.cw > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.openclaw)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {

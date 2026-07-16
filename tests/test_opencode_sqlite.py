@@ -148,6 +148,7 @@ class OpenCodeSqliteTests(unittest.TestCase):
 
             cache = {"v": USAGE._SCAN_CACHE_VERSION}
             with mock.patch.object(USAGE, "OPENCLAW_DB", str(db_path)), \
+                 mock.patch.object(USAGE, "OPENCLAW_STATE_DB", str(Path(tmp) / "missing.sqlite")), \
                  mock.patch.object(USAGE, "OPENCLAW_AGENTS", str(Path(tmp) / "agents")):
                 first = USAGE.scan_openclaw(USAGE.range_bounds(), cache)
                 connection.execute("INSERT INTO task_runs VALUES (?, ?)", (created, "failed"))

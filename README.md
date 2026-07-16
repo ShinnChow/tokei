@@ -155,7 +155,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Gemini CLI | `~/.gemini/gemini-cli/conversations/*.json` |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl` + `sessions/*/*/{summary,signals}.json` |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
-| OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + SQLite |
+| OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | OpenCode | `~/.opencode/sessions/*.json` |

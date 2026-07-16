@@ -108,6 +108,7 @@ ZCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get(
 MIMOCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get("TOKEI_MIMOCODE_DB", ""))) \
     if os.environ.get("TOKEI_MIMOCODE_DB") else ""
 OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
+OPENCLAW_STATE_DB = os.path.join(HOME, ".openclaw", "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
@@ -1848,7 +1849,7 @@ def _grok_usage_record(obj):
         reasoning = max(int(ctx.get("reasoning_tokens") or 0), 0)
         loop_index = int(ctx.get("loop_index") or 0)
         attempts = int(ctx.get("attempts") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     cached = min(cached, prompt)
     reasoning = min(reasoning, completion)
@@ -1860,6 +1861,8 @@ def _grok_usage_record(obj):
 
 def _load_grok_usage_records(cache):
     old = cache.get("grok_usage", {})
+    if not isinstance(old, dict):
+        old = {}
     try:
         stat = os.stat(GROK_LOG)
     except OSError:
@@ -1881,7 +1884,11 @@ def _load_grok_usage_records(cache):
                 and old.get("parsed_guard") == _codex_offset_guard(GROK_LOG, old_offset)):
             append_from = old_offset
 
-    records = list(old.get("records") or []) if append_from is not None else []
+    cached_records = old.get("records") or []
+    if not isinstance(cached_records, list):
+        cached_records = []
+    records = [record for record in cached_records if isinstance(record, dict)] \
+        if append_from is not None else []
     seen = {record.get("id") for record in records if record.get("id")}
     parse_start = append_from or 0
     try:
@@ -2457,8 +2464,60 @@ def scan_hermes(bounds, cache):
 
 
 # ---------- OpenClaw ----------
-# SQLite: ~/.openclaw/tasks/runs.sqlite — 任务计数
+# SQLite: ~/.openclaw/state/openclaw.sqlite（新版）或 ~/.openclaw/tasks/runs.sqlite（旧版）
 # Session JSONL: ~/.openclaw/agents/*/sessions/*.jsonl — token 用量
+def _openclaw_db_paths():
+    return [path for path in _path_candidates(
+        "TOKEI_OPENCLAW_DB", OPENCLAW_STATE_DB, OPENCLAW_DB) if os.path.isfile(path)]
+
+
+def _openclaw_connect(db_path, sqlite_module):
+    conn = sqlite_module.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1)
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
+def _openclaw_task_db_path(sqlite_module):
+    for path in _openclaw_db_paths():
+        conn = None
+        try:
+            conn = _openclaw_connect(path, sqlite_module)
+            found = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_runs'"
+            ).fetchone()
+            columns = ({row[1] for row in conn.execute("PRAGMA table_info(task_runs)")}
+                       if found else set())
+            if {"status", "created_at"}.issubset(columns):
+                return path
+        except Exception:
+            continue
+        finally:
+            if conn is not None:
+                conn.close()
+    return None
+
+
+def _scan_openclaw_db(db_path, sqlite_module):
+    conn = _openclaw_connect(db_path, sqlite_module)
+    try:
+        task_days = {}
+        for row in conn.execute("""
+            SELECT date(created_at/1000,'unixepoch','localtime') as day,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN lower(status) IN ('completed','succeeded','success') THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN lower(status) IN ('failed','error') THEN 1 ELSE 0 END)
+            FROM task_runs WHERE created_at > 0
+            GROUP BY day
+        """):
+            dk, total, completed, failed = row
+            if dk:
+                task_days[dk] = {"tasks": int(total or 0), "completed": int(completed or 0),
+                                 "failed": int(failed or 0)}
+        return task_days
+    finally:
+        conn.close()
+
+
 def scan_openclaw(bounds, cache):
     import sqlite3 as _sq
     fc = cache.setdefault("openclaw", {})
@@ -2487,40 +2546,30 @@ def scan_openclaw(bounds, cache):
              "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
 
     # --- Part 1: SQLite task counts ---
-    if os.path.isfile(OPENCLAW_DB):
-        sig = _sqlite_signature(OPENCLAW_DB)
-        if sig:
-            entry = fc.get("_db")
-            if not entry or entry.get("sig") != sig:
-                task_days = {}
-                try:
-                    conn = _sq.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True)
-                    for row in conn.execute("""
-                        SELECT date(created_at/1000,'unixepoch','localtime') as day,
-                               COUNT(*) as total,
-                               SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),
-                               SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
-                        FROM task_runs WHERE created_at > 0
-                        GROUP BY day
-                    """):
-                        dk, total, completed, failed = row
-                        if dk:
-                            task_days[dk] = {"tasks": int(total or 0), "completed": int(completed or 0),
-                                             "failed": int(failed or 0)}
-                    conn.close()
-                except Exception:
-                    pass
-                fc["_db"] = {"sig": sig, "days": task_days}
+    db_path = _openclaw_task_db_path(_sq)
+    if db_path:
+        sig = _sqlite_signature(db_path)
+        entry = fc.get("_db")
+        if sig and (not entry or entry.get("path") != db_path or entry.get("sig") != sig):
+            try:
+                task_days = _scan_openclaw_db(db_path, _sq)
+            except Exception:
+                task_days = entry.get("days", {}) if entry and entry.get("path") == db_path else {}
+            else:
+                fc["_db"] = {"path": db_path, "sig": sig, "days": task_days}
                 changed = True
-            for dk, day in fc.get("_db", {}).get("days", {}).items():
-                try:
-                    d = date.fromisoformat(dk)
-                except ValueError:
-                    continue
-                for k in _day_keys(d):
-                    b = B[k]
-                    b["tasks"] += day["tasks"]; b["completed"] += day["completed"]
-                    b["failed"] += day["failed"]
+        active_entry = fc.get("_db", {})
+        if active_entry.get("path") != db_path:
+            active_entry = {}
+        for dk, day in active_entry.get("days", {}).items():
+            try:
+                d = date.fromisoformat(dk)
+            except ValueError:
+                continue
+            for k in _day_keys(d):
+                b = B[k]
+                b["tasks"] += day["tasks"]; b["completed"] += day["completed"]
+                b["failed"] += day["failed"]
     elif "_db" in fc:
         fc.pop("_db", None)
         changed = True
