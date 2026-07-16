@@ -202,6 +202,16 @@ struct GeminiStat: Codable {
 
 struct GrokRange: Codable {
     var tokens: Int
+    var hit: Double = 0
+    var `in`: Int = 0
+    var out: Int = 0
+    var cr: Int = 0
+    var reason: Int = 0
+    var cost: Double = 0
+    var models: [TokenModelStat] = []
+    var usage_available: Bool = false
+    var usage_calls: Int = 0
+    var usage_sessions: Int = 0
     var sessions: Int = 0
     var turns: Int?
     var tools: Int?
@@ -213,6 +223,32 @@ struct GrokRange: Codable {
     var cancellations: Int?
     var ttft: Int?
     var response: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
+        hit = try c.decodeIfPresent(Double.self, forKey: .hit) ?? 0
+        `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
+        out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
+        cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
+        reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
+        cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
+        usage_available = try c.decodeIfPresent(Bool.self, forKey: .usage_available) ?? false
+        usage_calls = try c.decodeIfPresent(Int.self, forKey: .usage_calls) ?? 0
+        usage_sessions = try c.decodeIfPresent(Int.self, forKey: .usage_sessions) ?? 0
+        sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
+        turns = try c.decodeIfPresent(Int.self, forKey: .turns)
+        tools = try c.decodeIfPresent(Int.self, forKey: .tools)
+        duration = try c.decodeIfPresent(Int.self, forKey: .duration)
+        ctx_used = try c.decodeIfPresent(Int.self, forKey: .ctx_used)
+        ctx_window = try c.decodeIfPresent(Int.self, forKey: .ctx_window)
+        ctx = try c.decodeIfPresent(Double.self, forKey: .ctx)
+        errors = try c.decodeIfPresent(Int.self, forKey: .errors)
+        cancellations = try c.decodeIfPresent(Int.self, forKey: .cancellations)
+        ttft = try c.decodeIfPresent(Int.self, forKey: .ttft)
+        response = try c.decodeIfPresent(Int.self, forKey: .response)
+    }
 }
 
 struct GrokRanges: Codable {

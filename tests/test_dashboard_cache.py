@@ -44,8 +44,12 @@ class DashboardCacheTests(unittest.TestCase):
             "v": USAGE._SCAN_CACHE_VERSION,
             "_dirty": False,
             USAGE._GROK_DAYS_CACHE_KEY: {
-                today: {"tokens": 321, "hours": [321] + [0] * 23,
-                        "models": {"grok-4": 321}, "sessions": ["session-1"]},
+                today: {"in": 21, "out": 20, "cr": 270, "cw": 0, "reason": 10,
+                        "tokens": 321, "hours": [321] + [0] * 23,
+                        "models": {"grok-4": {
+                            "in": 21, "out": 20, "cr": 270, "cw": 0,
+                            "reason": 10, "cost": 0}},
+                        "sessions": ["session-1"]},
             },
         }
         wrapped = USAGE.build_wrapped("all", refresh=False, _cache=cache)
@@ -74,7 +78,8 @@ class DashboardCacheTests(unittest.TestCase):
             (session_dir / "updates.jsonl").write_text("", encoding="utf-8")
             cache = {"v": USAGE._SCAN_CACHE_VERSION}
 
-            with mock.patch.object(USAGE, "GROK_DIR", tmp):
+            with mock.patch.object(USAGE, "GROK_DIR", tmp), \
+                 mock.patch.object(USAGE, "GROK_LOG", str(Path(tmp) / "missing.jsonl")):
                 first = USAGE.scan_grok(USAGE.range_bounds(), cache)
                 cache["_dirty"] = False
                 with mock.patch.object(
@@ -114,8 +119,12 @@ class DashboardCacheTests(unittest.TestCase):
             "_dirty": False,
             USAGE._GEMINI_DAYS_CACHE_KEY: {today: gemini},
             USAGE._GROK_DAYS_CACHE_KEY: {today: {
+                "in": 10, "out": 10, "cr": 20, "cw": 0, "reason": 10,
                 "tokens": 50, "hours": [0, 0, 0, 50] + [0] * 20,
-                "models": {"grok-4": 50}, "sessions": ["session-1"]}},
+                "models": {"grok-4": {
+                    "in": 10, "out": 10, "cr": 20, "cw": 0,
+                    "reason": 10, "cost": 0}},
+                "sessions": ["session-1"]}},
             "hermes": {"db": {"days": {today: hermes}}},
             "openclaw": {"session": {"days": {today: openclaw}}},
             "qoder": {"db": {"model": "performance", "days": {today: qoderwork}}},
