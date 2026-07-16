@@ -158,6 +158,40 @@ final class DataLoader {
         return "/usr/bin/env"
     }()
 
+    private static let syncSnapshotPython = """
+    import importlib.util
+    import sys
+
+    script_path, device_id, sync_dir = sys.argv[1:4]
+    spec = importlib.util.spec_from_file_location("tokei_usage_sync", script_path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(1)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module._load_tokei_config = lambda: {
+        "device_id": device_id,
+        "sync_dir": sync_dir,
+    }
+    raise SystemExit(module.write_sync_snapshot())
+    """
+
+    static func syncSnapshotCommand(deviceID: String, syncDir: String) -> SyncCommand {
+        if pythonPath == "/usr/bin/env" {
+            return SyncCommand(
+                executable: "/usr/bin/env",
+                arguments: ["python3", "-c", syncSnapshotPython, scriptPath, deviceID, syncDir],
+                supervisorExecutable: "/usr/bin/env",
+                supervisorArguments: ["python3"]
+            )
+        }
+        return SyncCommand(
+            executable: pythonPath,
+            arguments: ["-c", syncSnapshotPython, scriptPath, deviceID, syncDir],
+            supervisorExecutable: pythonPath
+        )
+    }
+
     static func runScriptRaw(args: [String] = ["--json", "--no-sync-snapshot"], timeout: TimeInterval = 8) -> ScriptResult {
         let proc = Process()
         if pythonPath == "/usr/bin/env" {

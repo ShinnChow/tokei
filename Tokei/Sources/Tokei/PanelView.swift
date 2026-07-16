@@ -1160,6 +1160,7 @@ struct PanelView: View {
     @State private var cachedRemoteUrl = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
+    @State private var configuredDeviceID: String?
     @AppStorage("autoSync") private var autoSync = false
     @AppStorage("syncInterval") private var syncInterval = SyncManager.defaultSyncInterval
     @AppStorage("sitReminderOn") private var sitReminderOn = false
@@ -1193,16 +1194,19 @@ struct PanelView: View {
         .onAppear {
             loginItem.refresh()
             if let cfg = SyncManager.loadConfig() {
+                if let persistedID = Self.validSyncDeviceID(cfg.device_id) {
+                    configuredDeviceID = persistedID
+                    deviceName = persistedID
+                    store.syncManager.config = cfg
+                }
                 if syncDir.isEmpty && !cfg.sync_dir.isEmpty {
                     let expanded = (cfg.sync_dir as NSString).expandingTildeInPath
                     if FileManager.default.fileExists(atPath: expanded) {
                         syncDir = expanded
                     }
                 }
-                if deviceName.isEmpty && !cfg.device_id.isEmpty {
-                    deviceName = cfg.device_id
-                }
-                if !store.syncEnabled && !cfg.sync_dir.isEmpty {
+                if UserDefaults.standard.object(forKey: "syncEnabled") == nil,
+                   !cfg.sync_dir.isEmpty {
                     let expanded = (cfg.sync_dir as NSString).expandingTildeInPath
                     if FileManager.default.fileExists(atPath: expanded) {
                         store.syncEnabled = true
@@ -1322,17 +1326,7 @@ struct PanelView: View {
     }
 
     private static func setQoderIdeEnabled(_ enabled: Bool) {
-        let configURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".tokei/config.json")
-        var dict: [String: Any] = [:]
-        if let data = try? Data(contentsOf: configURL),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            dict = obj
-        }
-        dict["qoder_ide_enabled"] = enabled
-        if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: configURL)
-        }
+        SyncManager.setQoderIdeEnabled(enabled)
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -1473,12 +1467,15 @@ struct PanelView: View {
             settingsToggleRow("启用", isOn: $store.syncEnabled)
                 .onChange(of: store.syncEnabled) { on in
                     if on {
-                        setupSync()
-                        store.refresh()
-                        if autoSync {
-                            store.startAutoSync(minutes: syncInterval)
+                        if setupSync() {
+                            store.refresh()
+                            if autoSync {
+                                store.startAutoSync(minutes: syncInterval)
+                            }
                         }
                     } else {
+                        autoSync = false
+                        if configuredDeviceID != nil { saveSync() }
                         store.stopAutoSync()
                         store.applyDisplayMode()
                     }
@@ -1491,7 +1488,20 @@ struct PanelView: View {
                         .textFieldStyle(.plain)
                         .frame(width: 110)
                         .multilineTextAlignment(.trailing)
-                        .onChange(of: deviceName) { _ in saveSync() }
+                        .disabled(store.syncing || configuredDeviceID != nil)
+                        .onChange(of: deviceName) { value in
+                            if let configuredDeviceID, value != configuredDeviceID {
+                                deviceName = configuredDeviceID
+                            }
+                        }
+                        .onSubmit {
+                            if saveSync() {
+                                store.refresh()
+                                if autoSync {
+                                    store.startAutoSync(minutes: syncInterval)
+                                }
+                            }
+                        }
                 }
 
                 settingsValueRow("目录") {
@@ -1503,11 +1513,12 @@ struct PanelView: View {
                         .font(.system(size: 10))
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.claude)
+                        .disabled(store.syncing)
                 }
 
                 HStack(spacing: 8) {
                     settingsActionButton(icon: "arrow.triangle.2.circlepath", title: store.syncing ? "同步中" : "同步") {
-                        store.doSync()
+                        if saveSync() { store.doSync() }
                     }
                     .disabled(store.syncing || syncDir.isEmpty)
 
@@ -1515,6 +1526,7 @@ struct PanelView: View {
                     Text("自动").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
                     Toggle("", isOn: $autoSync)
                         .toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                        .disabled(store.syncing)
                         .onChange(of: autoSync) { on in
                             saveSync()
                             if on { store.startAutoSync(minutes: syncInterval) }
@@ -1529,6 +1541,7 @@ struct PanelView: View {
                         .pickerStyle(.segmented)
                         .frame(width: 112)
                         .controlSize(.mini)
+                        .disabled(store.syncing)
                         .onChange(of: syncInterval) { v in
                             saveSync()
                             if autoSync { store.startAutoSync(minutes: v) }
@@ -1547,6 +1560,17 @@ struct PanelView: View {
                     .font(.system(size: 8.5, weight: .medium))
                     .foregroundStyle(store.syncSucceeded == false ? Theme.claude : Theme.hermes)
                     .help(store.syncDetail)
+                }
+
+                if !store.peerLoadIssues.isEmpty {
+                    HStack(spacing: 4) {
+                        Spacer()
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text("有 \(store.peerLoadIssues.count) 个设备快照读取异常")
+                    }
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(Theme.claude)
+                    .help(store.peerLoadIssues.map(\.summary).joined(separator: "\n"))
                 }
 
                 deviceStatusBlock
@@ -1783,22 +1807,78 @@ struct PanelView: View {
         .padding(.vertical, 5)
     }
 
-    func setupSync() {
+    static func validSyncDeviceID(_ value: String) -> String? {
+        let normalized = SyncManager.normalizedDeviceID(value)
+        guard !normalized.isEmpty,
+              normalized != ".",
+              normalized != "..",
+              normalized.count <= 128,
+              !normalized.unicodeScalars.contains(where: {
+                  $0.value < 32 || $0.value == 47 || $0.value == 92 || $0.value == 0
+              }) else {
+            return nil
+        }
+        return normalized
+    }
+
+    @discardableResult
+    func setupSync() -> Bool {
+        if let cfg = SyncManager.loadConfig(),
+           let persistedID = Self.validSyncDeviceID(cfg.device_id) {
+            configuredDeviceID = persistedID
+            deviceName = persistedID
+            store.syncManager.config = cfg
+            return saveSync()
+        }
         if deviceName.isEmpty {
             var buf = [CChar](repeating: 0, count: 256)
             gethostname(&buf, buf.count)
             let raw = String(cString: buf)
             deviceName = raw.components(separatedBy: ".").first ?? "mac"
         }
-        saveSync()
+        return false
     }
 
-    func saveSync() {
+    @discardableResult
+    func saveSync() -> Bool {
+        let priorLockedID = configuredDeviceID
+        let persistedID = SyncManager.loadConfig().flatMap {
+            Self.validSyncDeviceID($0.device_id)
+        }
+        if let persistedID {
+            configuredDeviceID = persistedID
+            deviceName = persistedID
+        }
+        guard let effectiveDeviceID = persistedID
+                ?? priorLockedID
+                ?? Self.validSyncDeviceID(deviceName) else {
+            if let priorLockedID { deviceName = priorLockedID }
+            store.syncSucceeded = false
+            store.syncStatus = "设备名不合法"
+            store.syncDetail = "设备名不能为空，且不能包含斜杠或控制字符"
+            return false
+        }
         let interval = SyncManager.normalizedSyncInterval(syncInterval)
         syncInterval = interval
-        let cfg = SyncConfig(device_id: deviceName, sync_dir: syncDir,
+        let cfg = SyncConfig(device_id: effectiveDeviceID, sync_dir: syncDir,
                              auto_sync: autoSync, sync_interval: interval)
-        store.syncManager.saveConfig(cfg)
+        if store.syncManager.saveConfig(cfg) {
+            configuredDeviceID = effectiveDeviceID
+            deviceName = effectiveDeviceID
+            return true
+        } else {
+            let fallbackID = SyncManager.loadConfig().flatMap {
+                Self.validSyncDeviceID($0.device_id)
+            } ?? persistedID ?? priorLockedID
+            if let fallbackID {
+                configuredDeviceID = fallbackID
+                deviceName = fallbackID
+            }
+            store.syncSucceeded = false
+            store.syncStatus = "同步配置保存失败"
+            store.syncDetail = SyncManager.configPath.path
+            return false
+        }
     }
 
     func runPriceUpdate(_ flag: String, _ msg: String) {
@@ -1929,9 +2009,19 @@ struct PanelView: View {
     func linuxSetupCommand(remote: String) -> String {
         let quotedRemote = ShellEscaping.singleQuoted(remote)
         return """
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+          GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+          GIT_PREFIX GIT_EXEC_PATH GIT_SHALLOW_FILE GIT_GRAFT_FILE \
+          GIT_QUARANTINE_PATH GIT_CEILING_DIRECTORIES \
+          GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_COUNT \
+          GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL \
+          GIT_CONFIG_NOSYSTEM GIT_ASKPASS SSH_ASKPASS
+        export GIT_NO_REPLACE_OBJECTS=1
         mkdir -p ~/.tokei
         if [ ! -d ~/.tokei/sync/.git ]; then
-          git clone \(quotedRemote) ~/.tokei/sync
+          /usr/bin/git -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+            -c core.fsmonitor=false \
+            clone \(quotedRemote) ~/.tokei/sync
         fi
         curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
         cat > ~/.tokei/config.json <<JSON
@@ -1939,16 +2029,500 @@ struct PanelView: View {
         JSON
         cat > ~/.tokei/tokei-sync.sh <<'SH'
         #!/bin/sh
-        set -e
-        cd "$HOME/.tokei/sync"
-        python3 "$HOME/.tokei/usage.30s.py" --json >/dev/null
-        git fetch -q origin main
-        device_file=$(find . -maxdepth 1 -type f -iname "$(hostname -s).json" -print -quit)
-        [ -n "$device_file" ] || device_file="./$(hostname -s).json"
-        git add -- "$device_file"
-        git diff --cached --quiet || git commit -qm "sync $(hostname -s)"
-        git rebase -q origin/main
-        git push -q origin HEAD:main
+        set -u
+
+        unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+          GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+          GIT_PREFIX GIT_EXEC_PATH GIT_SHALLOW_FILE GIT_GRAFT_FILE \
+          GIT_QUARANTINE_PATH GIT_CEILING_DIRECTORIES \
+          GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_COUNT \
+          GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL \
+          GIT_CONFIG_NOSYSTEM GIT_ASKPASS SSH_ASKPASS
+        export GIT_NO_REPLACE_OBJECTS=1
+
+        fail() {
+          code="$1"
+          shift
+          printf 'Tokei sync error: %s\n' "$*" >&2
+          exit "$code"
+        }
+
+        sync_git() {
+          /usr/bin/git -c core.hooksPath=/dev/null -c commit.gpgSign=false \
+            -c core.fsmonitor=false -c rebase.updateRefs=false \
+            -c rebase.autoStash=false -c push.gpgSign=false \
+            -c push.followTags=false -c remote.origin.mirror=false "$@"
+        }
+
+        # fcntl 锁由父 Python 进程持有，覆盖预检、快照、提交、rebase 和 push。
+        if [ "${1:-}" != "__tokei_locked__" ]; then
+          exec python3 - "$0" <<'PY'
+        import errno
+        import fcntl
+        import json
+        import os
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        script = os.path.realpath(sys.argv[1])
+        config_path = os.path.expanduser("~/.tokei/config.json")
+        try:
+            blocked_environment = {
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_COMMON_DIR",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_NAMESPACE",
+                "GIT_PREFIX",
+                "GIT_EXEC_PATH",
+                "GIT_SHALLOW_FILE",
+                "GIT_GRAFT_FILE",
+                "GIT_QUARANTINE_PATH",
+                "GIT_CEILING_DIRECTORIES",
+                "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+                "GIT_ASKPASS",
+                "SSH_ASKPASS",
+                "ENV",
+                "BASH_ENV",
+            }
+            child_env = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in blocked_environment and not key.startswith("GIT_CONFIG")
+            }
+            child_env["GIT_NO_REPLACE_OBJECTS"] = "1"
+            child_env["GIT_SSH_VARIANT"] = "ssh"
+            child_env["GIT_ASKPASS"] = "/usr/bin/false"
+            child_env["SSH_ASKPASS"] = "/usr/bin/false"
+            child_env["GCM_INTERACTIVE"] = "Never"
+            child_env["GIT_TERMINAL_PROMPT"] = "0"
+            child_env["SSH_ASKPASS_REQUIRE"] = "never"
+            with open(config_path, encoding="utf-8") as handle:
+                config = json.load(handle)
+            device_id = config.get("device_id", "")
+            if not isinstance(device_id, str):
+                raise ValueError("device_id must be a string")
+            device_id = device_id.strip()
+            if (not device_id or device_id in (".", "..") or len(device_id) > 128
+                    or any(ord(ch) < 32 or ord(ch) in (47, 92) for ch in device_id)):
+                raise ValueError("invalid device_id")
+            sync_dir = config.get("sync_dir", "") or "~/.tokei/sync"
+            if not isinstance(sync_dir, str):
+                raise ValueError("sync_dir must be a string")
+            repo = os.path.realpath(os.path.expanduser(sync_dir))
+            git_dir = subprocess.check_output(
+                ["/usr/bin/git", "-c", "core.hooksPath=/dev/null",
+                 "-c", "commit.gpgSign=false", "-c", "core.fsmonitor=false",
+                 "-C", repo, "rev-parse", "--absolute-git-dir"],
+                universal_newlines=True,
+                stderr=subprocess.DEVNULL,
+                env=child_env,
+            ).strip()
+            lock_path = os.path.join(git_dir, "tokei-sync.lock")
+            lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            lock_fd = os.open(lock_path, lock_flags, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    print("Tokei sync error: 另一同步任务正在运行", file=sys.stderr)
+                    sys.exit(75)
+                raise
+            os.set_inheritable(lock_fd, True)
+            process = None
+
+            def process_group_exists():
+                if process is None:
+                    return False
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                return True
+
+            def stop_process_group():
+                if process is None:
+                    return
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    process.poll()
+                    if not process_group_exists():
+                        break
+                    time.sleep(0.05)
+                if process_group_exists():
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    process.poll()
+                    if not process_group_exists():
+                        break
+                    time.sleep(0.05)
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+
+            def handle_signal(signum, _frame):
+                print("Tokei sync error: supervisor received signal {}".format(signum),
+                      file=sys.stderr)
+                stop_process_group()
+                sys.exit(124)
+
+            signal.signal(signal.SIGTERM, handle_signal)
+            signal.signal(signal.SIGINT, handle_signal)
+            process = subprocess.Popen(
+                ["/bin/sh", script, "__tokei_locked__", str(lock_fd),
+                 repo, lock_path, device_id],
+                pass_fds=(lock_fd,),
+                start_new_session=True,
+                env=child_env,
+            )
+            try:
+                return_code = process.wait(timeout=240)
+            except subprocess.TimeoutExpired:
+                print("Tokei sync error: 同步事务超过 240 秒，已终止进程组",
+                      file=sys.stderr)
+                stop_process_group()
+                sys.exit(124)
+            sys.exit(return_code)
+        except (OSError, ValueError, json.JSONDecodeError,
+                subprocess.CalledProcessError) as error:
+            print("Tokei sync error: 同步配置或仓库不可用: {}".format(error),
+                  file=sys.stderr)
+            sys.exit(20)
+        PY
+        fi
+
+        [ "$#" -eq 5 ] || fail 75 "同步锁参数不完整"
+        lock_fd="$2"
+        repo="$3"
+        lock_path="$4"
+        device_id="$5"
+
+        # 拒绝绕过锁直接进入事务，并确认继承的描述符指向当前仓库锁文件。
+        python3 - "$lock_fd" "$lock_path" <<'PY' \
+          || fail 75 "无法确认同步锁"
+        import fcntl
+        import os
+        import sys
+
+        try:
+            descriptor = int(sys.argv[1])
+            expected = os.stat(sys.argv[2])
+            actual = os.fstat(descriptor)
+            if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino):
+                raise OSError("lock descriptor mismatch")
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, ValueError):
+            sys.exit(1)
+        PY
+
+        export GIT_TERMINAL_PROMPT=0
+        export GIT_EDITOR=true
+        export GIT_SEQUENCE_EDITOR=true
+        export GIT_SSH_COMMAND='/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=15 -o ConnectionAttempts=2 -o ServerAliveInterval=15 -o ServerAliveCountMax=2'
+        export GIT_SSH_VARIANT=ssh
+        export GIT_ASKPASS=/usr/bin/false
+        export SSH_ASKPASS=/usr/bin/false
+        export GCM_INTERACTIVE=Never
+        export SSH_ASKPASS_REQUIRE=never
+        cd "$repo" || fail 20 "无法进入同步目录"
+
+        git_dir=$(sync_git rev-parse --absolute-git-dir 2>/dev/null) \
+          || fail 20 "同步目录不是有效的 Git 仓库"
+        declared_root=$(sync_git rev-parse --show-toplevel 2>/dev/null) \
+          || fail 20 "无法读取同步仓库工作树"
+        declared_root=$(cd -- "$declared_root" 2>/dev/null && /bin/pwd -P) \
+          || fail 20 "无法解析同步仓库工作树"
+        current_root=$(/bin/pwd -P)
+        [ "$declared_root" = "$current_root" ] \
+          || fail 20 "同步仓库 core.worktree 指向其他目录，已停止"
+        [ "$git_dir/tokei-sync.lock" = "$lock_path" ] \
+          || fail 75 "同步仓库与锁文件不匹配"
+        marker="$git_dir/tokei-sync-rebase"
+        rebase_merge="$git_dir/rebase-merge"
+        rebase_apply="$git_dir/rebase-apply"
+        device_pathspec=":(icase,literal)$device_id.json"
+        exclude_pathspec=":(exclude,icase,literal)$device_id.json"
+        peer_json_pathspec=":(top,glob)*.json"
+
+        validate_marker() {
+          [ -f "$marker" ] || return 1
+          [ "$(sed -n '1p' "$marker" 2>/dev/null)" = "tokei-sync-rebase-v2" ] \
+            || return 1
+          [ "$(sed -n '2p' "$marker" 2>/dev/null)" = "refs/heads/main" ] \
+            || return 1
+          [ "$(sed -n '4p' "$marker" 2>/dev/null)" = "origin/main" ] \
+            || return 1
+          marker_onto=$(sed -n '5p' "$marker" 2>/dev/null)
+          [ -n "$marker_onto" ] || return 1
+          resolved_onto=$(sync_git rev-parse --verify "$marker_onto^{commit}" 2>/dev/null) \
+            || return 1
+          [ "$resolved_onto" = "$marker_onto" ] || return 1
+        }
+
+        if [ -d "$rebase_merge" ] || [ -d "$rebase_apply" ]; then
+          if [ -d "$rebase_merge" ] && [ ! -d "$rebase_apply" ] \
+            && validate_marker; then
+            expected_head=$(sed -n '3p' "$marker")
+            expected_onto=$(sed -n '5p' "$marker")
+            actual_head=$(cat "$rebase_merge/orig-head" 2>/dev/null || true)
+            actual_branch=$(cat "$rebase_merge/head-name" 2>/dev/null || true)
+            actual_onto=$(cat "$rebase_merge/onto" 2>/dev/null || true)
+            if [ "$actual_head" = "$expected_head" ] \
+              && [ "$actual_branch" = "refs/heads/main" ] \
+              && [ "$actual_onto" = "$expected_onto" ]; then
+              fail 21 "检测到 Tokei 上次遗留的 rebase，现场已保留，请人工确认"
+            fi
+          fi
+          fail 21 "检测到未完成或无法确认归属的 rebase，现场已保留"
+        elif [ -f "$marker" ]; then
+          validate_marker || fail 21 "发现格式异常的 Tokei rebase 标记，现场已保留"
+          fail 21 "发现 Tokei 遗留的 rebase 标记，现场已保留，请人工确认"
+        fi
+
+        for operation in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_START; do
+          operation_path=$(sync_git rev-parse --git-path "$operation")
+          [ ! -e "$operation_path" ] \
+            || fail 21 "检测到未完成的 $operation，已停止且未改动仓库"
+        done
+        sequencer_path=$(sync_git rev-parse --git-path sequencer)
+        [ ! -d "$sequencer_path" ] \
+          || fail 21 "检测到未完成的 Git sequencer 操作，已停止且未改动仓库"
+        unmerged_state=$(sync_git ls-files -u) || fail 21 "无法检查索引冲突状态"
+        [ -z "$unmerged_state" ] \
+          || fail 21 "索引包含未解决冲突，已停止且未改动仓库"
+
+        branch=$(sync_git symbolic-ref --quiet --short HEAD 2>/dev/null) \
+          || fail 22 "同步仓库处于 detached HEAD，已停止"
+        [ "$branch" = "main" ] \
+          || fail 22 "同步仓库必须位于 main 分支，当前为 $branch"
+
+        sync_git remote get-url origin >/dev/null 2>&1 \
+          || fail 20 "同步仓库缺少 origin 远端"
+        sync_git fetch origin main || fail 25 "拉取 origin/main 失败"
+        sync_git show-ref --verify --quiet refs/remotes/origin/main \
+          || fail 25 "origin/main 不存在"
+        tracked_peer_files=$(sync_git ls-files --cached -- \
+          "$peer_json_pathspec" "$exclude_pathspec") \
+          || fail 23 "无法枚举其他设备快照"
+        if [ -n "$tracked_peer_files" ]; then
+          sync_git restore --source=HEAD --staged --worktree -- \
+            "$peer_json_pathspec" "$exclude_pathspec" \
+            || fail 23 "无法恢复其他设备快照"
+        fi
+        other_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
+          -- . "$exclude_pathspec") \
+          || fail 23 "无法检查同步仓库工作区状态"
+        [ -z "$other_changes" ] \
+          || fail 23 "同步仓库包含本机快照以外的未提交改动"
+
+        ensure_local_commits_only_device() {
+          audit_base=$(sync_git rev-parse --verify "$1^{commit}") \
+            || fail 23 "无法固定待审计基线"
+          audit_target=$(sync_git rev-parse --verify "$2^{commit}") \
+            || fail 23 "无法固定待审计提交"
+          audit_commits=$(sync_git rev-list --reverse "$audit_base..$audit_target") \
+            || fail 23 "无法列出本地待推送提交"
+          for audit_commit in $audit_commits; do
+            audit_parent_line=$(sync_git rev-list --parents -n 1 "$audit_commit") \
+              || fail 23 "无法读取待推送提交的父提交"
+            set -- $audit_parent_line
+            [ "$#" -eq 2 ] \
+              || fail 23 "本地待推送历史包含 merge 或 root 提交"
+            audit_parent="$2"
+
+            if sync_git diff-tree --quiet --no-renames "$audit_parent" "$audit_commit" --; then
+              fail 23 "本地待推送历史包含空提交"
+            else
+              audit_status="$?"
+              [ "$audit_status" -eq 1 ] \
+                || fail 23 "无法审计待推送提交内容"
+            fi
+
+            if sync_git diff-tree --quiet --no-renames "$audit_parent" "$audit_commit" \
+              -- "$device_pathspec"; then
+              fail 23 "待推送提交没有修改本机设备快照"
+            else
+              audit_status="$?"
+              [ "$audit_status" -eq 1 ] \
+                || fail 23 "无法审计本机设备快照提交"
+            fi
+
+            if sync_git diff-tree --quiet --no-renames "$audit_parent" "$audit_commit" \
+              -- . "$exclude_pathspec"; then
+              :
+            else
+              audit_status="$?"
+              [ "$audit_status" -ne 1 ] \
+                || fail 23 "待推送提交触碰了其他设备或非快照文件"
+              fail 23 "无法审计待推送提交的其他路径"
+            fi
+          done
+        }
+
+        pre_snapshot_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+          || fail 23 "无法固定快照前本地提交"
+        pre_snapshot_base=$(sync_git rev-parse --verify "origin/main^{commit}") \
+          || fail 23 "无法固定快照前远端提交"
+        ensure_local_commits_only_device "$pre_snapshot_base" "$pre_snapshot_head"
+        verified_pre_snapshot_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+          || fail 23 "无法复核快照前本地提交"
+        [ "$verified_pre_snapshot_head" = "$pre_snapshot_head" ] \
+          || fail 23 "快照前历史审计期间 HEAD 已被其他进程修改"
+        python3 - "$HOME/.tokei/usage.30s.py" "$repo" "$device_id" <<'PY' \
+          || fail 24 "生成本机数据快照失败"
+        import importlib.util
+        import sys
+
+        script_path, sync_dir, device_id = sys.argv[1:]
+        spec = importlib.util.spec_from_file_location("tokei_usage_sync", script_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("无法加载 usage 脚本")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        module._load_tokei_config = lambda: {
+            "sync_dir": sync_dir,
+            "device_id": device_id,
+        }
+        writer = getattr(module, "write_sync_snapshot", None)
+        if not callable(writer):
+            raise RuntimeError("usage 脚本缺少 write_sync_snapshot")
+        raise SystemExit(writer())
+        PY
+
+        matches=$(sync_git ls-files --cached --others --exclude-standard \
+          -- "$device_pathspec") \
+          || fail 24 "无法检查本机设备快照"
+        match_count=$(printf '%s\n' "$matches" \
+          | awk 'NF { count++ } END { print count + 0 }')
+        [ "$match_count" -eq 1 ] \
+          || fail 24 "本机设备快照缺失或存在大小写重名文件"
+
+        other_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
+          -- . "$exclude_pathspec") \
+          || fail 23 "无法检查生成快照后的工作区状态"
+        [ -z "$other_changes" ] \
+          || fail 23 "生成快照时检测到其他文件被修改"
+
+        sync_git add -- "$device_pathspec" || fail 26 "暂存本机快照失败"
+        if ! sync_git diff --cached --quiet -- "$device_pathspec"; then
+          sync_git commit --only -m "tokei sync $device_id" -- "$device_pathspec" \
+            || fail 26 "提交本机快照失败"
+        fi
+        post_commit_changes=$(sync_git status --porcelain=v1 --untracked-files=all) \
+          || fail 26 "无法检查提交后的工作区状态"
+        [ -z "$post_commit_changes" ] \
+          || fail 26 "提交后同步仓库仍有未提交改动"
+        post_commit_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+          || fail 23 "无法固定提交后的本地提交"
+        post_commit_base=$(sync_git rev-parse --verify "origin/main^{commit}") \
+          || fail 23 "无法固定提交后的审计基线"
+        ensure_local_commits_only_device "$post_commit_base" "$post_commit_head"
+        verified_post_commit_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+          || fail 23 "无法复核提交后的本地提交"
+        [ "$verified_post_commit_head" = "$post_commit_head" ] \
+          || fail 23 "提交后历史审计期间 HEAD 已被其他进程修改"
+
+        write_marker() {
+          marker_head="$1"
+          marker_onto="$2"
+          marker_tmp="$marker.tmp.$$"
+          umask 077
+          {
+            printf 'tokei-sync-rebase-v2\n'
+            printf 'refs/heads/main\n'
+            printf '%s\n' "$marker_head"
+            printf 'origin/main\n'
+            printf '%s\n' "$marker_onto"
+            printf 'pid=%s\n' "$$"
+            date -u '+started_at=%Y-%m-%dT%H:%M:%SZ'
+          } > "$marker_tmp" || fail 28 "无法写入 rebase 恢复标记"
+          mv -f "$marker_tmp" "$marker" || fail 28 "无法保存 rebase 恢复标记"
+        }
+
+        rebase_onto_origin() {
+          pre_rebase_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+            || fail 27 "无法读取 rebase 前提交"
+          pre_rebase_onto=$(sync_git rev-parse --verify "origin/main^{commit}") \
+            || fail 27 "无法读取 rebase 上游提交"
+          ensure_local_commits_only_device "$pre_rebase_onto" "$pre_rebase_head"
+          checked_rebase_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+            || fail 27 "无法复核 rebase 前提交"
+          [ "$checked_rebase_head" = "$pre_rebase_head" ] \
+            || fail 23 "rebase 前 HEAD 已被其他进程修改"
+          if sync_git merge-base --is-ancestor "$pre_rebase_onto" "$pre_rebase_head"; then
+            return 0
+          fi
+          write_marker "$pre_rebase_head" "$pre_rebase_onto"
+          if sync_git rebase --merge "$pre_rebase_onto"; then
+            rm -f "$marker"
+            return 0
+          fi
+          if [ -d "$rebase_merge" ] || [ -d "$rebase_apply" ]; then
+            fail 27 "rebase 未完成，现场与恢复标记已保留，请人工检查同步仓库"
+          fi
+          rm -f "$marker"
+          fail 27 "本机快照无法安全 rebase 到 origin/main"
+        }
+
+        attempt=1
+        while [ "$attempt" -le 3 ]; do
+          rebase_onto_origin
+          candidate_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+            || fail 23 "无法固定 push 候选提交"
+          audit_base=$(sync_git rev-parse --verify "origin/main^{commit}") \
+            || fail 23 "无法固定 push 审计基线"
+          ensure_local_commits_only_device "$audit_base" "$candidate_head"
+          push_changes=$(sync_git status --porcelain=v1 --untracked-files=all) \
+            || fail 23 "无法检查 push 前的工作区状态"
+          [ -z "$push_changes" ] \
+            || fail 23 "push 前同步仓库出现未提交改动"
+          push_head=$(sync_git rev-parse --verify "HEAD^{commit}") \
+            || fail 23 "无法复核 push 前 HEAD"
+          [ "$push_head" = "$candidate_head" ] \
+            || fail 23 "审计后 HEAD 已被其他进程修改"
+          if sync_git push origin "$candidate_head:refs/heads/main"; then
+            pushed_head=$(sync_git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+            [ "$pushed_head" = "$candidate_head" ] \
+              || fail 23 "push 期间 HEAD 已被其他进程修改"
+            printf '多设备同步完成\n'
+            exit 0
+          fi
+
+          sync_git fetch origin main || fail 25 "push 失败后重新拉取 origin/main 失败"
+          retry_head=$(sync_git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)
+          [ "$retry_head" = "$candidate_head" ] \
+            || fail 23 "push 重试前 HEAD 已被其他进程修改"
+          if sync_git merge-base --is-ancestor "$candidate_head" origin/main; then
+            printf '远端已包含本机同步提交\n'
+            exit 0
+          fi
+          if sync_git merge-base --is-ancestor origin/main "$candidate_head"; then
+            fail 29 "远端没有竞争更新，push 仍失败，请检查认证或分支权限"
+          fi
+          [ "$attempt" -lt 3 ] || fail 29 "远端持续更新，三次同步重试均失败"
+          /bin/sleep "$attempt"
+          attempt=$((attempt + 1))
+          printf '检测到其他设备同时更新，正在重试 %s/3\n' "$attempt"
+        done
+
+        fail 29 "push 失败"
         SH
         chmod +x ~/.tokei/tokei-sync.sh
         (crontab -l 2>/dev/null | grep -v 'tokei-sync.sh'; echo '*/30 * * * * ~/.tokei/tokei-sync.sh') | crontab -

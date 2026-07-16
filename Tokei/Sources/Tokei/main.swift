@@ -13,6 +13,7 @@ final class Store: ObservableObject {
     @Published var syncStatus = ""
     @Published var syncSucceeded: Bool?
     @Published var syncDetail = ""
+    @Published var peerLoadIssues: [PeerLoadIssue] = []
 
     let syncManager = SyncManager()
     let keepAwake = KeepAwake()
@@ -68,11 +69,19 @@ final class Store: ObservableObject {
             self.localUsage = local
             var allDevices = local
             if self.syncEnabled {
-                let p = self.syncManager.loadPeers()
+                let p: [PeerDevice]
+                if self.syncing {
+                    p = self.peers
+                } else {
+                    let report = self.syncManager.loadPeers()
+                    p = report.peers
+                    self.peerLoadIssues = report.issues
+                }
                 self.peers = p
                 if !p.isEmpty { allDevices = SyncManager.merge(local: local, peers: p) }
             } else {
                 self.peers = []
+                self.peerLoadIssues = []
             }
             self.allDevicesUsage = allDevices
             self.applyDisplayMode(updateStatusTitle: false)
@@ -97,39 +106,43 @@ final class Store: ObservableObject {
     }
 
     func doSync() {
-        guard !syncing else { return }
+        guard syncEnabled, !syncing else { return }
+        guard let cfg = syncManager.config else {
+            syncStatus = "同步配置不可用"
+            syncSucceeded = false
+            syncDetail = "请先完成多设备同步配置"
+            return
+        }
         syncing = true
         syncStatus = "正在同步"
         syncSucceeded = nil
         syncDetail = ""
-        DataLoader.writeSyncSnapshot { [weak self] snapshotReady in
-            guard let self = self else { return }
-            guard snapshotReady else {
-                self.syncing = false
-                self.syncStatus = "同步失败"
+        let deviceID = SyncManager.normalizedDeviceID(cfg.device_id)
+        let syncDir = SyncManager.resolvedSyncDir(cfg)
+        let snapshotCommand = DataLoader.syncSnapshotCommand(deviceID: deviceID, syncDir: syncDir)
+        syncManager.synchronize(snapshotCommand: snapshotCommand) { [weak self] result in
+            guard let self else { return }
+            self.syncing = false
+            self.syncDetail = result.output
+            if result.succeeded {
+                self.syncSucceeded = true
+                let formatter = DateFormatter()
+                formatter.dateFormat = "HH:mm"
+                self.syncStatus = "已同步 " + formatter.string(from: Date())
+                self.refresh()
+            } else if result.code == .busy {
+                self.syncSucceeded = nil
+                self.syncStatus = "同步任务已在运行"
+            } else {
                 self.syncSucceeded = false
-                self.syncDetail = "生成本机数据快照失败"
-                return
-            }
-            self.syncManager.gitSync { [weak self] result in
-                guard let self else { return }
-                self.syncing = false
-                self.syncSucceeded = result.succeeded
-                self.syncDetail = result.output
-                if result.succeeded {
-                    let formatter = DateFormatter()
-                    formatter.dateFormat = "HH:mm"
-                    self.syncStatus = "已同步 " + formatter.string(from: Date())
-                    self.refresh()
-                } else {
-                    self.syncStatus = "同步失败"
-                }
+                self.syncStatus = "同步失败"
             }
         }
     }
 
     func startAutoSync(minutes: Int) {
         stopAutoSync()
+        guard syncEnabled else { return }
         autoSyncTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60),
                                              repeats: true) { [weak self] _ in self?.doSync() }
         let startupWorkItem = DispatchWorkItem { [weak self] in
@@ -190,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 syncConfig.sync_interval = interval
                 store.syncManager.saveConfig(syncConfig)
             }
-            if syncConfig.auto_sync == true {
+            if store.syncEnabled && syncConfig.auto_sync == true {
                 store.startAutoSync(minutes: interval)
             }
         }
