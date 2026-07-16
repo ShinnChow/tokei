@@ -184,6 +184,26 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## 更新日志
 
+### v1.0.14
+
+本版本吸收了 **12 个社区 PR** 的贡献，并完成了一轮安全、同步与性能加固。
+
+- feat: 新增 Qwen Code、ZCode、MiMoCode、Oh My Pi 和 Grok Build 真实 Token 数据采集
+- feat: Codex 支持按真实模型统计，兼容新版 Gemini CLI、OpenCode SQLite、OpenClaw 任务数据库和 Windows 日志路径
+- fix: 修正 Codex 分叉会话重复累计、Claude Code 用量少算和 OpenClaw 任务状态识别异常
+- fix: 自动同步调整为每 30 分钟，增强多设备同时提交时的 Git 同步可靠性
+- security: 更新包增加域名白名单、SHA-256 校验、随机临时目录和安装失败回滚
+- perf: 优化刷新缓存、SQLite 数据读取、数据面板预热及菜单栏紧凑布局
+
+#### 社区贡献
+
+- [**易良**](https://github.com/yiliang114)：贡献 [Qwen Code 支持 #25](https://github.com/cclank/tokei/pull/25)
+- [**Orime**](https://github.com/orime)：修复 [Codex 分叉会话重复统计 #24](https://github.com/cclank/tokei/pull/24)
+- [**Vuri**](https://github.com/vurihuang)：补充 [Oh My Pi 数据采集 #21](https://github.com/cclank/tokei/pull/21)
+- [**刘巍峰**](https://github.com/liuweifeng)：贡献 [Codex 模型明细及 ZCode、MiMoCode #17](https://github.com/cclank/tokei/pull/17)、[Claude Code 去重修复 #18](https://github.com/cclank/tokei/pull/18)、[OpenCode SQLite 支持 #20](https://github.com/cclank/tokei/pull/20)、[多设备同步可靠性优化 #28](https://github.com/cclank/tokei/pull/28)、[Grok Build 真实 Token 采集 #29](https://github.com/cclank/tokei/pull/29)、[设置页与菜单栏布局优化 #30](https://github.com/cclank/tokei/pull/30)、[OpenClaw 统计及面板修复 #31](https://github.com/cclank/tokei/pull/31)
+- [**yanglinzhen**](https://github.com/yanglinzhen1022)：修复 [新版 Gemini CLI 统计 #14](https://github.com/cclank/tokei/pull/14)
+- [**阿**](https://github.com/proffitteoy)：贡献 [Windows 日志路径发现 #11](https://github.com/cclank/tokei/pull/11)
+
 ### v1.0.13
 - feat: WorkBuddy 本地 JSONL 用量采集（Token、缓存、模型、成本、项目）
 - feat: WorkBuddy 数据接入卡片、Dashboard、回顾、项目足迹和多设备同步
