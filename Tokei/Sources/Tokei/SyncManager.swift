@@ -424,12 +424,28 @@ final class SyncManager {
             if [ -z "$device_file" ]; then
               device_file='./\(escapedDevice).json'
             fi
+            for peer_file in ./*.json; do
+              [ "$peer_file" = "$device_file" ] && continue
+              /usr/bin/git restore --staged --worktree -- "$peer_file" 2>/dev/null || true
+            done
             /usr/bin/git add -- "$device_file" || exit 1
             if ! /usr/bin/git diff --cached --quiet; then
-              /usr/bin/git commit -m 'tokei sync \(escapedDevice)' || exit 1
+              /usr/bin/git commit -m 'chore(sync): update \(escapedDevice) usage' || exit 1
             fi
-            /usr/bin/git rebase origin/main || exit 1
-            /usr/bin/git push origin HEAD:main
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              /usr/bin/git fetch origin main || exit 1
+              if ! /usr/bin/git rebase origin/main; then
+                /usr/bin/git rebase --abort 2>/dev/null || true
+                exit 1
+              fi
+              if /usr/bin/git push origin HEAD:main; then
+                exit 0
+              fi
+              /bin/sleep "$attempt"
+              attempt=$((attempt + 1))
+            done
+            exit 1
             """
             let proc = Process()
             let outputPipe = Pipe()
