@@ -214,7 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()
         }
-        Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: Updater.automaticCheckInterval, repeats: true) { _ in
             Updater.shared.checkForUpdate()
         }
 
