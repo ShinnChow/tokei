@@ -205,6 +205,18 @@ class CodexScanDedupTests(unittest.TestCase):
             "payload": {"model": model, "cwd": "/tmp/project"},
         })
 
+    def bounds(self):
+        day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+        return {
+            "today": day,
+            "yesterday": day - timedelta(days=1),
+            "week": day,
+            "last_week": day - timedelta(days=7),
+            "last_week_end": day,
+            "month": day.replace(day=1),
+            "year": day.replace(month=1, day=1),
+        }
+
     def test_scan_attributes_each_increment_to_the_active_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-models.jsonl"
@@ -222,12 +234,15 @@ class CodexScanDedupTests(unittest.TestCase):
                 "month": day.replace(day=1), "year": day.replace(month=1, day=1),
             }
             old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
             USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
             try:
                 with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
                     result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
             finally:
                 USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
 
         models = result["ranges"]["all"]["models"]
         self.assertEqual(models["openai/gpt-5.4"]["in"], 20)
@@ -253,11 +268,14 @@ class CodexScanDedupTests(unittest.TestCase):
             }
             cache = {"v": USAGE._SCAN_CACHE_VERSION}
             old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
             USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
             try:
                 with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
                     USAGE.scan_codex(bounds, cache)
-                first_size = cache["codex"][str(path)]["parsed_size"]
+                cache_path = str(path.resolve())
+                first_size = cache["codex"][cache_path]["parsed_size"]
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(self.token_count(
                         "2024-01-08T00:02:00Z", (100, 80, 5, 2), (100, 80, 5, 2)) + "\n")
@@ -275,6 +293,7 @@ class CodexScanDedupTests(unittest.TestCase):
                     result = USAGE.scan_codex(bounds, cache)
             finally:
                 USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
 
         self.assertGreater(iterator.call_args.kwargs["start_offset"], 0)
         self.assertEqual(iterator.call_args.kwargs["start_offset"], first_size)
@@ -282,7 +301,7 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(usage["in"], 150)
         self.assertEqual(usage["cached"], 120)
         self.assertEqual(usage["out"], 8)
-        self.assertEqual(len(cache["codex"][str(path)]["events"]), 2)
+        self.assertEqual(len(cache["codex"][cache_path]["events"]), 2)
         self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 30)
 
     def test_scan_keeps_child_increment_and_drops_replayed_history(self):
@@ -319,11 +338,14 @@ class CodexScanDedupTests(unittest.TestCase):
                 "year": day.replace(month=1, day=1),
             }
             old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
             USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
             try:
                 result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
             finally:
                 USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
 
         all_usage = result["ranges"]["all"]
         self.assertEqual(all_usage["in"], 150)
@@ -363,11 +385,14 @@ class CodexScanDedupTests(unittest.TestCase):
                 "year": day.replace(month=1, day=1),
             }
             old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
             USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
             try:
                 result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
             finally:
                 USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
 
         all_usage = result["ranges"]["all"]
         self.assertEqual(all_usage["in"], 200)
@@ -375,6 +400,103 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(all_usage["out"], 10)
         self.assertEqual(all_usage["reason"], 4)
         self.assertEqual(len(all_usage["sessions"]), 2)
+
+    def test_scan_includes_active_and_archived_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active_dir = root / "sessions" / "2024" / "01" / "08"
+            archive_dir = root / "archived_sessions"
+            active_dir.mkdir(parents=True)
+            archive_dir.mkdir()
+            active = active_dir / "rollout-active.jsonl"
+            archived = archive_dir / "rollout-archived.jsonl"
+            active_usage = (100, 80, 5, 2)
+            archived_usage = (50, 40, 3, 1)
+            active.write_text("\n".join([
+                self.session_meta("active"),
+                self.token_count("2024-01-08T00:01:00Z", active_usage, active_usage),
+            ]) + "\n", encoding="utf-8")
+            archived.write_text("\n".join([
+                self.session_meta("archived"),
+                self.token_count("2024-01-08T01:01:00Z", archived_usage, archived_usage),
+            ]) + "\n", encoding="utf-8")
+
+            with mock.patch.object(USAGE, "CODEX_DIR", str(root / "sessions")), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(archive_dir)), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                result = USAGE.scan_codex(self.bounds(), {"v": USAGE._SCAN_CACHE_VERSION})
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["cached"], 120)
+        self.assertEqual(usage["out"], 8)
+        self.assertEqual(usage["reason"], 3)
+        self.assertEqual(len(usage["sessions"]), 2)
+
+    def test_cross_directory_copy_uses_more_complete_session_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active_dir = root / "sessions"
+            archive_dir = root / "archived_sessions"
+            active_dir.mkdir()
+            archive_dir.mkdir()
+            active = active_dir / "rollout-shared-active.jsonl"
+            archived = archive_dir / "rollout-shared-archived.jsonl"
+            first = self.token_count(
+                "2024-01-08T00:01:00Z", (100, 80, 5, 2), (100, 80, 5, 2))
+            second = self.token_count(
+                "2024-01-08T00:02:00Z", (150, 120, 8, 3), (50, 40, 3, 1))
+            active.write_text("\n".join([
+                self.session_meta("shared"), first,
+            ]) + "\n", encoding="utf-8")
+            archived.write_text("\n".join([
+                self.session_meta("shared"), first, second,
+            ]) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+
+            with mock.patch.object(USAGE, "CODEX_DIR", str(active_dir)), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(archive_dir)), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                result = USAGE.scan_codex(self.bounds(), cache)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["cached"], 120)
+        self.assertEqual(usage["out"], 8)
+        self.assertEqual(usage["reason"], 3)
+        self.assertEqual(len(usage["sessions"]), 1)
+        populated = [entry for entry in cache["codex"].values() if entry.get("days")]
+        self.assertEqual(len(populated), 1)
+        self.assertEqual(len(populated[0]["events"]), 2)
+
+    def test_moving_session_to_archive_preserves_total_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active_dir = root / "sessions"
+            archive_dir = root / "archived_sessions"
+            active_dir.mkdir()
+            archive_dir.mkdir()
+            active = active_dir / "rollout-moved.jsonl"
+            content = "\n".join([
+                self.session_meta("moved"),
+                self.token_count(
+                    "2024-01-08T00:01:00Z", (100, 80, 5, 2), (100, 80, 5, 2)),
+            ]) + "\n"
+            active.write_text(content, encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+
+            with mock.patch.object(USAGE, "CODEX_DIR", str(active_dir)), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(archive_dir)), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                before = USAGE.scan_codex(self.bounds(), cache)
+                archived = archive_dir / active.name
+                active.rename(archived)
+                after = USAGE.scan_codex(self.bounds(), cache)
+
+        self.assertEqual(before["ranges"]["all"]["in"], 100)
+        self.assertEqual(after["ranges"]["all"]["in"], 100)
+        self.assertEqual(len(after["ranges"]["all"]["sessions"]), 1)
+        self.assertEqual(set(cache["codex"]), {str(archived.resolve())})
 
 
 class ScanCacheMigrationTests(unittest.TestCase):

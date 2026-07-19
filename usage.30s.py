@@ -8,7 +8,7 @@
 # 数据主要读自本地会话日志,不改动任何 CLI；Codex 额度会短缓存查询官方 live usage。
 # 仅 --update-prices 显式联网更新价格表:
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
-#   Codex:       ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (token_count 事件,含额度)
+#   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
@@ -72,6 +72,7 @@ def _existing_dirs(paths):
 
 CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
+CODEX_ARCHIVED_DIR = os.path.join(HOME, ".codex", "archived_sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 GEMINI_DIRS = _path_candidates(
@@ -1279,12 +1280,59 @@ def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
     return None, None
 
 
+def _codex_rollout_files():
+    roots = _existing_dirs(
+        _path_candidates("TOKEI_CODEX_DIR", CODEX_DIR) +
+        _path_candidates("TOKEI_CODEX_ARCHIVED_DIR", CODEX_ARCHIVED_DIR)
+    )
+    files = []
+    seen = set()
+    for root in roots:
+        for path in sorted(glob.glob(os.path.join(root, "**", "rollout-*.jsonl"), recursive=True)):
+            real = os.path.realpath(path)
+            key = os.path.normcase(real)
+            if key not in seen and os.path.isfile(real):
+                seen.add(key)
+                files.append(real)
+    return files
+
+
+def _codex_canonical_file_cache(file_cache):
+    """Choose one complete physical copy for each logical Codex session."""
+    canonical = {}
+    selected = {}
+    for file_path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        session_id = entry.get("session_id")
+        logical_id = ("session", str(session_id)) if session_id else (
+            "rollout", os.path.basename(file_path))
+        events = entry.get("events") or []
+        events = events if isinstance(events, list) else []
+        event_timestamps = [str(event[0]) for event in events
+                            if isinstance(event, list) and event]
+        try:
+            parsed_size = int(entry.get("parsed_size", 0) or 0)
+        except (TypeError, ValueError):
+            parsed_size = 0
+        score = (len(events), max(event_timestamps, default=""), parsed_size)
+        previous = selected.get(logical_id)
+        if previous is not None and score <= previous[0]:
+            continue
+        if previous is not None:
+            canonical.pop(previous[1], None)
+        selected[logical_id] = (score, file_path)
+        canonical[file_path] = entry
+    return canonical
+
+
 def scan_codex(bounds, cache):
     fc = cache.setdefault("codex", {})
     B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0,
              "sessions": set(), "models": {}}
          for k in RANGE_KEYS}
-    if not os.path.isdir(CODEX_DIR):
+    rollout_files = _codex_rollout_files()
+    if not rollout_files:
         if fc:
             fc.clear()
             cache["_dirty"] = True
@@ -1300,15 +1348,20 @@ def scan_codex(bounds, cache):
 
     cur_file, cur_mtime = None, -1.0
     stale = set(fc.keys())
+    active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
 
-    for f in glob.glob(os.path.join(CODEX_DIR, "**", "rollout-*.jsonl"), recursive=True):
+    for f in rollout_files:
         stale.discard(f)
         try:
             st = os.stat(f)
         except OSError:
             continue
         mtime, size = st.st_mtime, st.st_size
-        if mtime > cur_mtime:
+        try:
+            is_active = active_root is not None and os.path.commonpath((f, active_root)) == active_root
+        except ValueError:
+            is_active = False
+        if is_active and mtime > cur_mtime:
             cur_mtime = mtime
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
@@ -1416,9 +1469,10 @@ def scan_codex(bounds, cache):
         fc.pop(p, None)
         cache["_dirty"] = True
 
-    # Forked and subagent rollouts can replay parent history. Remove copied
-    # prefixes while preserving independent sessions with matching snapshots.
-    days_by_file = _codex_deduped_days(fc)
+    # A session can briefly exist in active and archived directories together.
+    # Select the more complete copy before applying fork/replay deduplication.
+    canonical_fc = _codex_canonical_file_cache(fc)
+    days_by_file = _codex_deduped_days(canonical_fc)
     for f, entry in fc.items():
         days = days_by_file.get(f, {})
         if entry.get("days") != days:
@@ -1426,7 +1480,7 @@ def scan_codex(bounds, cache):
             cache["_dirty"] = True
 
     # Assembly: per-day → range buckets
-    for f, entry in fc.items():
+    for f, entry in canonical_fc.items():
         for dk, day in entry.get("days", {}).items():
             d = date.fromisoformat(dk)
             ks = ["all"]
