@@ -242,6 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let u = store.usage {
             let ud = UserDefaults.standard
             if ud.object(forKey: "showClaude") as? Bool ?? true,
+               u.claude.q5_stale != true,
                let q5 = u.claude.q5 {
                 let remaining = 100 - q5
                 metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),

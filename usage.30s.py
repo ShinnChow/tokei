@@ -137,6 +137,7 @@ def _writable_path(name):
 PRICING_FILE = _writable_path("pricing.json")
 OVERRIDES_FILE = _writable_path("pricing_overrides.json")
 CODEX_QUOTA_CACHE = _writable_path("codex_quota_cache.json")
+CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -3656,17 +3657,27 @@ CLAUDE_CACHE_DIRS = _path_candidates(
     os.path.join(LOCALAPPDATA, "Claude", "Cache", "Cache_Data"))
 
 
-def _claude_cache_files():
+def _claude_cache_records():
     cache_dirs = _existing_dirs(
         _path_candidates("TOKEI_CLAUDE_CACHE_DIR", CLAUDE_CACHE, *CLAUDE_CACHE_DIRS))
-    files = []
+    records = {}
     for cache_dir in cache_dirs:
         for path in glob.glob(os.path.join(cache_dir, "*_0")):
             try:
-                files.append((os.path.getmtime(path), os.path.realpath(path)))
+                real = os.path.realpath(path)
+                st = os.stat(real)
+                records[real] = {
+                    "path": real,
+                    "mtime_ns": st.st_mtime_ns,
+                    "size": st.st_size,
+                }
             except OSError:
                 continue
-    return [path for _, path in sorted(set(files), reverse=True)]
+    return sorted(records.values(), key=lambda r: (r["mtime_ns"], r["path"]), reverse=True)
+
+
+def _claude_cache_files():
+    return [record["path"] for record in _claude_cache_records()]
 
 
 def _iso_to_epoch(s):
@@ -3686,64 +3697,191 @@ def _zstd_decompress(data):
     return None
 
 
-def _scan_claude_plan_raw():
-    files = _claude_cache_files()
-    cand = None
-    for f in files[:200]:
-        try:
-            data = open(f, "rb").read()
-        except OSError:
-            continue
-        if b"organizations/" in data and b"/usage" in data and b"\x28\xb5\x2f\xfd" in data:
-            cand = data
-            break
-    if cand is None:
-        return {}
-    data = cand
-    i = data.find(b"\x28\xb5\x2f\xfd")
-    if i < 0:
-        return {}
-    raw = _zstd_decompress(data[i:])
-    if not raw:
-        return {}
+# 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
+_CLAUDE_QUOTA_STATE_VERSION = 1
+_CLAUDE_QUOTA_STALE_TTL = 1800
+_CLAUDE_QUOTA_FULL_SCAN_INTERVAL = 6 * 3600
+_CLAUDE_QUOTA_RETRY_SCAN_INTERVAL = 5 * 60
+_CLAUDE_CACHE_FILE_LIMIT = 16 * 1024 * 1024
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _claude_record_signature(record):
+    return f'{record["path"]}|{record["mtime_ns"]}|{record["size"]}'
+
+
+def _load_claude_quota_state():
+    state = _load_json(CLAUDE_QUOTA_CACHE, {})
+    if not isinstance(state, dict) or state.get("version") != _CLAUDE_QUOTA_STATE_VERSION:
+        return {"version": _CLAUDE_QUOTA_STATE_VERSION}
+    return state
+
+
+def _save_claude_quota_state(state):
     try:
-        j = json.loads(raw)
-    except Exception:
-        return {}
-    fh_ = j.get("five_hour") or {}
-    sd = j.get("seven_day") or {}
-    return {
-        "q5": fh_.get("utilization"),
-        "q5_reset": _iso_to_epoch(fh_.get("resets_at")),
-        "q7": sd.get("utilization"),
-        "q7_reset": _iso_to_epoch(sd.get("resets_at")),
-    }
-
-
-# Claude 额度只存在 Claude Desktop 的易失缓存条目里,缓存被淘汰/重写的瞬间会读不到。
-# 成功时落盘一份,失败时回退到最近一次有效值(30 分钟内,避免跨 reset 显示陈旧)。
-_QUOTA_FALLBACK_TTL = 1800
-
-def scan_claude_plan():
-    import tempfile
-    import time
-    cache = os.path.join(tempfile.gettempdir(), "_tokei_claude_quota.json")
-    r = _scan_claude_plan_raw()
-    if r and r.get("q5") is not None:
-        try:
-            with open(cache, "w") as fh:
-                json.dump({"t": time.time(), "v": r}, fh)
-        except OSError:
-            pass
-        return r
-    try:
-        with open(cache) as fh:
-            c = json.load(fh)
-        if time.time() - c["t"] < _QUOTA_FALLBACK_TTL:
-            return c["v"]
+        _atomic_write_json(CLAUDE_QUOTA_CACHE, state)
+        os.chmod(CLAUDE_QUOTA_CACHE, 0o600)
     except Exception:
         pass
-    return r
+
+
+def _parse_claude_quota_record(record):
+    if record["size"] <= 0 or record["size"] > _CLAUDE_CACHE_FILE_LIMIT:
+        return None
+    try:
+        with open(record["path"], "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    if b"organizations/" not in data or b"/usage" not in data:
+        return None
+    pos = data.find(_ZSTD_MAGIC)
+    if pos < 0:
+        return None
+    raw = _zstd_decompress(data[pos:])
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    five_hour = payload.get("five_hour") or {}
+    seven_day = payload.get("seven_day") or {}
+    if not isinstance(five_hour, dict):
+        five_hour = {}
+    if not isinstance(seven_day, dict):
+        seven_day = {}
+    result = {
+        "q5": five_hour.get("utilization"),
+        "q5_reset": _iso_to_epoch(five_hour.get("resets_at")),
+        "q7": seven_day.get("utilization"),
+        "q7_reset": _iso_to_epoch(seven_day.get("resets_at")),
+        "q_updated": int(record["mtime_ns"] // 1_000_000_000),
+    }
+    return result if result["q5"] is not None or result["q7"] is not None else None
+
+
+def _claude_quota_with_freshness(snapshot, now=None):
+    if not isinstance(snapshot, dict):
+        return {}
+    import time
+    now = int(time.time()) if now is None else int(now)
+    result = dict(snapshot)
+    try:
+        updated = int(result.get("q_updated"))
+    except (TypeError, ValueError):
+        updated = 0
+    age = now - updated
+    source_stale = updated <= 0 or age > _CLAUDE_QUOTA_STALE_TTL or age < -300
+    for value_key, reset_key, stale_key in (
+        ("q5", "q5_reset", "q5_stale"),
+        ("q7", "q7_reset", "q7_stale"),
+    ):
+        reset = result.get(reset_key)
+        try:
+            reset_expired = reset is not None and int(reset) <= now
+        except (TypeError, ValueError):
+            reset_expired = False
+        result[stale_key] = bool(result.get(value_key) is not None and
+                                 (source_stale or reset_expired))
+    return result
+
+
+def _scan_claude_plan_raw(now=None):
+    import time
+    now = int(time.time()) if now is None else int(now)
+    records = _claude_cache_records()
+    records_by_path = {record["path"]: record for record in records}
+    original = _load_claude_quota_state()
+    state = dict(original)
+    initial_scan = "scan_mtime_ns" not in state
+    snapshot = state.get("snapshot") if isinstance(state.get("snapshot"), dict) else None
+    candidate = state.get("candidate") if isinstance(state.get("candidate"), dict) else None
+    last_scan_ns = int(state.get("scan_mtime_ns") or -1)
+    scan_boundary = set(state.get("scan_boundary") or [])
+
+    changed = [
+        record for record in records
+        if record["mtime_ns"] > last_scan_ns or
+        (record["mtime_ns"] == last_scan_ns and
+         _claude_record_signature(record) not in scan_boundary)
+    ]
+    inspected = set()
+    selected = None
+
+    def inspect(record):
+        inspected.add(record["path"])
+        parsed = _parse_claude_quota_record(record)
+        return (record, parsed) if parsed else None
+
+    for record in changed:
+        selected = inspect(record)
+        if selected:
+            break
+
+    candidate_invalid = False
+    candidate_record = records_by_path.get(candidate.get("path")) if candidate else None
+    if selected is None and candidate:
+        if candidate_record is None:
+            candidate_invalid = True
+        else:
+            candidate_changed = (
+                candidate_record.get("mtime_ns") != candidate.get("mtime_ns") or
+                candidate_record.get("size") != candidate.get("size")
+            )
+            if candidate_changed and candidate_record["path"] not in inspected:
+                selected = inspect(candidate_record)
+                candidate_invalid = selected is None
+            elif candidate_changed:
+                candidate_invalid = True
+
+    if initial_scan:
+        state["last_full_scan"] = now
+
+    last_full_scan = int(state.get("last_full_scan") or 0)
+    retry_interval = (_CLAUDE_QUOTA_RETRY_SCAN_INTERVAL if snapshot is None
+                      else _CLAUDE_QUOTA_FULL_SCAN_INTERVAL)
+    needs_full_scan = (candidate_invalid or now - last_full_scan >= retry_interval)
+    if selected is None and needs_full_scan:
+        for record in records:
+            if record["path"] in inspected:
+                continue
+            selected = inspect(record)
+            if selected:
+                break
+        state["last_full_scan"] = now
+
+    if selected:
+        record, snapshot = selected
+        state["candidate"] = {
+            "path": record["path"],
+            "mtime_ns": record["mtime_ns"],
+            "size": record["size"],
+        }
+        state["snapshot"] = snapshot
+    elif candidate_invalid:
+        state.pop("candidate", None)
+
+    if records:
+        newest_mtime = records[0]["mtime_ns"]
+        state["scan_mtime_ns"] = newest_mtime
+        state["scan_boundary"] = [
+            _claude_record_signature(record)
+            for record in records if record["mtime_ns"] == newest_mtime
+        ]
+    else:
+        state["scan_mtime_ns"] = -1
+        state["scan_boundary"] = []
+    state["version"] = _CLAUDE_QUOTA_STATE_VERSION
+    if state != original:
+        _save_claude_quota_state(state)
+    return _claude_quota_with_freshness(snapshot, now=now)
+
+
+def scan_claude_plan():
+    return _scan_claude_plan_raw()
 
 
 def compute():
@@ -3897,6 +4035,8 @@ def compute():
             "session_name": cur["name"], "session_total": cur_total,
             "q5": plan.get("q5"), "q5_reset": plan.get("q5_reset"),
             "q7": plan.get("q7"), "q7_reset": plan.get("q7_reset"),
+            "q_updated": plan.get("q_updated"),
+            "q5_stale": plan.get("q5_stale"), "q7_stale": plan.get("q7_stale"),
         },
         "codex": {
             "ranges": xranges,

@@ -1,0 +1,146 @@
+import json
+import os
+import tempfile
+import time
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
+
+from test_codex_limits import USAGE
+
+
+MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+class ClaudeQuotaCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.now = int(time.time())
+
+    def _iso(self, epoch):
+        return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _payload(self, q5, q7):
+        return {
+            "five_hour": {
+                "utilization": q5,
+                "resets_at": self._iso(self.now + 3600),
+            },
+            "seven_day": {
+                "utilization": q7,
+                "resets_at": self._iso(self.now + 7 * 86400),
+            },
+        }
+
+    def _write_entry(self, directory, name, marker, modified):
+        path = Path(directory) / f"{name}_0"
+        path.write_bytes(b"organizations/test/usage\n" + MAGIC + marker.encode("ascii"))
+        os.utime(path, ns=(modified * 1_000_000_000, modified * 1_000_000_000))
+        return path
+
+    def _decoder(self, payloads):
+        def decode(data):
+            marker = data[len(MAGIC):].decode("ascii")
+            value = payloads.get(marker)
+            if value == "corrupt":
+                return b"{"
+            return json.dumps(value).encode("utf-8") if value is not None else None
+        return decode
+
+    def _scan(self, cache_dir, state_file, decoder, now=None):
+        with mock.patch.dict(os.environ, {"TOKEI_CLAUDE_CACHE_DIR": str(cache_dir)}), \
+             mock.patch.object(USAGE, "CLAUDE_CACHE", str(Path(cache_dir) / "missing")), \
+             mock.patch.object(USAGE, "CLAUDE_CACHE_DIRS", []), \
+             mock.patch.object(USAGE, "CLAUDE_QUOTA_CACHE", str(state_file)), \
+             mock.patch.object(USAGE, "_zstd_decompress", side_effect=decoder):
+            return USAGE._scan_claude_plan_raw(now=self.now if now is None else now)
+
+    def test_finds_entry_beyond_200_then_reuses_and_replaces_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir()
+            state_file = Path(tmp) / "state.json"
+            valid = self._write_entry(cache_dir, "valid", "old", self.now - 500)
+            for index in range(250):
+                path = cache_dir / f"noise-{index}_0"
+                path.write_bytes(b"ordinary chromium cache")
+                modified = self.now - 499 + index
+                os.utime(path, ns=(modified * 1_000_000_000, modified * 1_000_000_000))
+
+            payloads = {"old": self._payload(37.0, 62.0), "new": self._payload(41.0, 65.0)}
+            first = self._scan(cache_dir, state_file, self._decoder(payloads))
+
+            self.assertEqual(first["q5"], 37.0)
+            self.assertFalse(first["q5_stale"])
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["candidate"]["path"], str(valid.resolve()))
+
+            def should_not_decode(_):
+                raise AssertionError("unchanged candidate should use the persisted snapshot")
+
+            reused = self._scan(cache_dir, state_file, should_not_decode, now=self.now + 10)
+            self.assertEqual(reused["q7"], 62.0)
+
+            newest = self._write_entry(cache_dir, "newest", "new", self.now + 20)
+            replaced = self._scan(cache_dir, state_file, self._decoder(payloads), now=self.now + 20)
+            self.assertEqual(replaced["q5"], 41.0)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["candidate"]["path"], str(newest.resolve()))
+
+    def test_deleted_candidate_falls_back_to_remaining_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir()
+            state_file = Path(tmp) / "state.json"
+            backup = self._write_entry(cache_dir, "backup", "backup", self.now - 120)
+            primary = self._write_entry(cache_dir, "primary", "primary", self.now - 60)
+            payloads = {
+                "backup": self._payload(22.0, 44.0),
+                "primary": self._payload(33.0, 55.0),
+            }
+
+            first = self._scan(cache_dir, state_file, self._decoder(payloads))
+            self.assertEqual(first["q5"], 33.0)
+            primary.unlink()
+
+            fallback = self._scan(cache_dir, state_file, self._decoder(payloads), now=self.now + 5)
+            self.assertEqual(fallback["q5"], 22.0)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["candidate"]["path"], str(backup.resolve()))
+
+    def test_corrupt_new_response_keeps_last_valid_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir()
+            state_file = Path(tmp) / "state.json"
+            valid = self._write_entry(cache_dir, "valid", "valid", self.now - 60)
+            payloads = {"valid": self._payload(18.0, 29.0), "bad": "corrupt"}
+            self._scan(cache_dir, state_file, self._decoder(payloads))
+
+            self._write_entry(cache_dir, "bad", "bad", self.now + 5)
+            result = self._scan(cache_dir, state_file, self._decoder(payloads), now=self.now + 5)
+
+            self.assertEqual(result["q5"], 18.0)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["candidate"]["path"], str(valid.resolve()))
+
+    def test_freshness_checks_source_age_and_each_reset(self):
+        snapshot = {
+            "q5": 10.0,
+            "q5_reset": self.now + 300,
+            "q7": 20.0,
+            "q7_reset": self.now - 1,
+            "q_updated": self.now - 30,
+        }
+        fresh = USAGE._claude_quota_with_freshness(snapshot, now=self.now)
+        self.assertFalse(fresh["q5_stale"])
+        self.assertTrue(fresh["q7_stale"])
+
+        snapshot["q_updated"] = self.now - USAGE._CLAUDE_QUOTA_STALE_TTL - 1
+        expired = USAGE._claude_quota_with_freshness(snapshot, now=self.now)
+        self.assertTrue(expired["q5_stale"])
+        self.assertTrue(expired["q7_stale"])
+
+
+if __name__ == "__main__":
+    unittest.main()

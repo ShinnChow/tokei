@@ -257,7 +257,8 @@ struct PanelView: View {
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         let qcr = u.qwencode.ranges.get(sel)
         return [
-            ToolCardItem(id: "claude", name: "Claude", visible: showClaude, active: cr.sessions > 0,
+            ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
+                         active: cr.sessions > 0 || u.claude.q5 != nil || u.claude.q7 != nil,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
             ToolCardItem(id: "codex", name: "Codex", visible: showCodex, active: xr.sessions > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
@@ -335,17 +336,18 @@ struct PanelView: View {
                 if !claudeRows.isEmpty {
                     modelDisclosure(claudeRows, open: $claudeModelsOpen, tint: Theme.claude)
                 }
-                if c.q5 != nil || c.q7 != nil {
-                    thinDivider
-                    if let q5 = c.q5 {
-                        quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset, tint: Theme.claude)
-                    }
-                    if let q7 = c.q7 {
-                        quotaRow(title: "周剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
-                    }
-                }
             } else {
                 emptyHint
+            }
+            if c.q5 != nil || c.q7 != nil {
+                thinDivider
+                if let q5 = c.q5, c.q5_stale != true {
+                    quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset, tint: Theme.claude)
+                }
+                if let q7 = c.q7, c.q7_stale != true {
+                    quotaRow(title: "周剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
+                }
+                claudeQuotaStatus(c)
             }
         }
     }
@@ -1069,6 +1071,29 @@ struct PanelView: View {
             MiniBar(value: pct, tint: pct <= 15 ? .red : tint)
         }
         .help(reset != nil ? "\(Fmt.countdown(reset)) 后重置" : "")
+    }
+
+    func claudeQuotaStatus(_ stat: ClaudeStat) -> some View {
+        let staleCount = [stat.q5_stale, stat.q7_stale].filter { $0 == true }.count
+        let hasFreshQuota = (stat.q5 != nil && stat.q5_stale != true) ||
+            (stat.q7 != nil && stat.q7_stale != true)
+        let stale = staleCount > 0
+        let label: String
+        if stale {
+            label = hasFreshQuota ? "部分额度待更新" : "额度数据已过期"
+        } else {
+            label = "额度更新"
+        }
+        let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9))
+            Text("\(label) · \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
+        .help(stale ? "等待 Claude Desktop 写入新的额度缓存" : "来自 Claude Desktop 本地缓存")
     }
 
     var footer: some View {

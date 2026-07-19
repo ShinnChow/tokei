@@ -38,42 +38,252 @@ final class DataLoader {
         }
     }
 
-    static func scanClaudeQuota() -> [String: Any]? {
-        let cacheDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Claude/Cache/Cache_Data").path
-        guard FileManager.default.fileExists(atPath: cacheDir) else { return nil }
-        let zstdMagic: [UInt8] = [0x28, 0xb5, 0x2f, 0xfd]
-        let fm = FileManager.default
-        guard let allFiles = try? fm.contentsOfDirectory(atPath: cacheDir) else { return nil }
-        let cacheFiles = allFiles.filter { $0.hasSuffix("_0") }.map { name -> (String, Date) in
-            let path = (cacheDir as NSString).appendingPathComponent(name)
-            let mt = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? .distantPast
-            return (path, mt)
-        }.sorted { $0.1 > $1.1 }
-        let needle1 = "organizations/".data(using: .utf8)!
-        let needle2 = "/usage".data(using: .utf8)!
-        var raw: Data?
-        for (path, _) in cacheFiles.prefix(200) {
-            guard let data = fm.contents(atPath: path) else { continue }
-            guard data.range(of: needle1) != nil,
-                  data.range(of: needle2) != nil,
-                  data.range(of: Data(zstdMagic)) != nil else { continue }
-            raw = data
-            break
+    // 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
+    private struct ClaudeCacheRecord {
+        let url: URL
+        let modified: TimeInterval
+        let size: Int
+
+        var signature: String {
+            "\(url.path)|\(modified.bitPattern)|\(size)"
         }
-        guard let raw = raw else { return nil }
-        guard let magicRange = raw.range(of: Data(zstdMagic)) else { return nil }
-        let compressed = raw[magicRange.lowerBound...]
-        guard let decompressed = zstdDecompress(Data(compressed)) else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: decompressed) as? [String: Any] else { return nil }
-        let fh = json["five_hour"] as? [String: Any] ?? [:]
-        let sd = json["seven_day"] as? [String: Any] ?? [:]
-        var result: [String: Any] = [:]
-        result["q5"] = fh["utilization"]
-        result["q5_reset"] = isoToEpoch(fh["resets_at"] as? String)
-        result["q7"] = sd["utilization"]
-        result["q7_reset"] = isoToEpoch(sd["resets_at"] as? String)
+    }
+
+    private struct ClaudeQuotaCandidate: Codable, Equatable {
+        var path: String
+        var modified: TimeInterval
+        var size: Int
+    }
+
+    private struct ClaudeQuotaSnapshot: Codable, Equatable {
+        var q5: Double?
+        var q5Reset: Int?
+        var q7: Double?
+        var q7Reset: Int?
+        var updated: Int
+    }
+
+    private struct ClaudeQuotaState: Codable, Equatable {
+        var version = 1
+        var candidate: ClaudeQuotaCandidate?
+        var snapshot: ClaudeQuotaSnapshot?
+        var scanModified: TimeInterval = -1
+        var scanBoundary: [String] = []
+        var lastFullScan = 0
+    }
+
+    private static let claudeQuotaStaleTTL = 30 * 60
+    private static let claudeQuotaFullScanInterval = 6 * 60 * 60
+    private static let claudeQuotaRetryScanInterval = 5 * 60
+    private static let claudeCacheFileLimit = 16 * 1024 * 1024
+    private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
+
+    private static var claudeQuotaStateURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tokei/claude_quota_swift_cache.json")
+    }
+
+    private static func claudeCacheRecords() -> [ClaudeCacheRecord] {
+        let cacheDir: URL
+        if let configured = ProcessInfo.processInfo.environment["TOKEI_CLAUDE_CACHE_DIR"],
+           !configured.isEmpty {
+            cacheDir = URL(fileURLWithPath: NSString(string: configured).expandingTildeInPath)
+        } else {
+            cacheDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Claude/Cache/Cache_Data")
+        }
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: cacheDir,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return urls.compactMap { url in
+            guard url.lastPathComponent.hasSuffix("_0"),
+                  let values = try? url.resourceValues(forKeys: keys),
+                  let modified = values.contentModificationDate,
+                  let size = values.fileSize else { return nil }
+            return ClaudeCacheRecord(
+                url: url.resolvingSymlinksInPath(),
+                modified: modified.timeIntervalSince1970,
+                size: size
+            )
+        }.sorted {
+            if $0.modified == $1.modified { return $0.url.path > $1.url.path }
+            return $0.modified > $1.modified
+        }
+    }
+
+    private static func loadClaudeQuotaState() -> ClaudeQuotaState {
+        guard let data = try? Data(contentsOf: claudeQuotaStateURL),
+              let state = try? JSONDecoder().decode(ClaudeQuotaState.self, from: data),
+              state.version == 1 else { return ClaudeQuotaState() }
+        return state
+    }
+
+    private static func saveClaudeQuotaState(_ state: ClaudeQuotaState) {
+        let directory = claudeQuotaStateURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(state)
+            try data.write(to: claudeQuotaStateURL, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: claudeQuotaStateURL.path
+            )
+        } catch {
+            fputs("Tokei Claude quota cache write failed: \(error)\n", stderr)
+        }
+    }
+
+    private static func parseClaudeQuota(_ record: ClaudeCacheRecord) -> ClaudeQuotaSnapshot? {
+        guard record.size > 0, record.size <= claudeCacheFileLimit,
+              let data = try? Data(contentsOf: record.url, options: .mappedIfSafe) else { return nil }
+        let organization = Data("organizations/".utf8)
+        let usage = Data("/usage".utf8)
+        guard data.range(of: organization) != nil,
+              data.range(of: usage) != nil,
+              let magicRange = data.range(of: zstdMagic) else { return nil }
+        let compressed = Data(data[magicRange.lowerBound...])
+        guard let decompressed = zstdDecompress(compressed),
+              let json = try? JSONSerialization.jsonObject(with: decompressed) as? [String: Any]
+        else { return nil }
+        let fiveHour = json["five_hour"] as? [String: Any] ?? [:]
+        let sevenDay = json["seven_day"] as? [String: Any] ?? [:]
+        let q5 = (fiveHour["utilization"] as? NSNumber)?.doubleValue
+        let q7 = (sevenDay["utilization"] as? NSNumber)?.doubleValue
+        guard q5 != nil || q7 != nil else { return nil }
+        return ClaudeQuotaSnapshot(
+            q5: q5,
+            q5Reset: isoToEpoch(fiveHour["resets_at"] as? String),
+            q7: q7,
+            q7Reset: isoToEpoch(sevenDay["resets_at"] as? String),
+            updated: Int(record.modified)
+        )
+    }
+
+    private static func claudeQuotaDictionary(
+        _ snapshot: ClaudeQuotaSnapshot,
+        now: Int
+    ) -> [String: Any] {
+        var result: [String: Any] = ["q_updated": snapshot.updated]
+        if let q5 = snapshot.q5 { result["q5"] = q5 }
+        if let reset = snapshot.q5Reset { result["q5_reset"] = reset }
+        if let q7 = snapshot.q7 { result["q7"] = q7 }
+        if let reset = snapshot.q7Reset { result["q7_reset"] = reset }
+        let age = now - snapshot.updated
+        let sourceStale = age > claudeQuotaStaleTTL || age < -300
+        result["q5_stale"] = snapshot.q5 != nil &&
+            (sourceStale || (snapshot.q5Reset.map { $0 <= now } ?? false))
+        result["q7_stale"] = snapshot.q7 != nil &&
+            (sourceStale || (snapshot.q7Reset.map { $0 <= now } ?? false))
         return result
+    }
+
+    static func scanClaudeQuota(now: Date = Date()) -> [String: Any]? {
+        let nowEpoch = Int(now.timeIntervalSince1970)
+        let records = claudeCacheRecords()
+        var recordsByPath: [String: ClaudeCacheRecord] = [:]
+        for record in records { recordsByPath[record.url.path] = record }
+        let original = loadClaudeQuotaState()
+        var state = original
+        let initialScan = state.scanModified < 0
+        let boundary = Set(state.scanBoundary)
+        let changed = records.filter {
+            $0.modified > state.scanModified ||
+                ($0.modified == state.scanModified && !boundary.contains($0.signature))
+        }
+        var inspected = Set<String>()
+        var selected: (ClaudeCacheRecord, ClaudeQuotaSnapshot)?
+
+        func inspect(_ record: ClaudeCacheRecord) -> (ClaudeCacheRecord, ClaudeQuotaSnapshot)? {
+            inspected.insert(record.url.path)
+            guard let snapshot = parseClaudeQuota(record) else { return nil }
+            return (record, snapshot)
+        }
+
+        for record in changed {
+            if let value = inspect(record) {
+                selected = value
+                break
+            }
+        }
+
+        var candidateInvalid = false
+        let candidateRecord = state.candidate.flatMap { recordsByPath[$0.path] }
+        if selected == nil, let candidate = state.candidate {
+            if let record = candidateRecord {
+                let changedCandidate = record.modified != candidate.modified || record.size != candidate.size
+                if changedCandidate {
+                    if !inspected.contains(record.url.path) {
+                        selected = inspect(record)
+                    }
+                    candidateInvalid = selected == nil
+                }
+            } else {
+                candidateInvalid = true
+            }
+        }
+
+        return finishClaudeQuotaScan(
+            records: records,
+            original: original,
+            state: &state,
+            selected: &selected,
+            inspected: &inspected,
+            candidateInvalid: candidateInvalid,
+            initialScan: initialScan,
+            nowEpoch: nowEpoch
+        )
+    }
+
+    private static func finishClaudeQuotaScan(
+        records: [ClaudeCacheRecord],
+        original: ClaudeQuotaState,
+        state: inout ClaudeQuotaState,
+        selected: inout (ClaudeCacheRecord, ClaudeQuotaSnapshot)?,
+        inspected: inout Set<String>,
+        candidateInvalid: Bool,
+        initialScan: Bool,
+        nowEpoch: Int
+    ) -> [String: Any]? {
+        if initialScan { state.lastFullScan = nowEpoch }
+        let retryInterval = state.snapshot == nil
+            ? claudeQuotaRetryScanInterval
+            : claudeQuotaFullScanInterval
+        let needsFullScan = candidateInvalid || nowEpoch - state.lastFullScan >= retryInterval
+        if selected == nil && needsFullScan {
+            for record in records where !inspected.contains(record.url.path) {
+                inspected.insert(record.url.path)
+                if let snapshot = parseClaudeQuota(record) {
+                    selected = (record, snapshot)
+                    break
+                }
+            }
+            state.lastFullScan = nowEpoch
+        }
+
+        if let (record, snapshot) = selected {
+            state.candidate = ClaudeQuotaCandidate(
+                path: record.url.path,
+                modified: record.modified,
+                size: record.size
+            )
+            state.snapshot = snapshot
+        } else if candidateInvalid {
+            state.candidate = nil
+        }
+
+        if let newest = records.first {
+            state.scanModified = newest.modified
+            state.scanBoundary = records.prefix { $0.modified == newest.modified }.map(\.signature)
+        } else {
+            state.scanModified = 0
+            state.scanBoundary = []
+        }
+        if state != original { saveClaudeQuotaState(state) }
+        guard let snapshot = state.snapshot else { return nil }
+        return claudeQuotaDictionary(snapshot, now: nowEpoch)
     }
 
     private static func zstdDecompress(_ src: Data) -> Data? {
@@ -125,18 +335,61 @@ final class DataLoader {
         do {
             guard var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
             for key in raw.keys where key.hasPrefix("_") { raw.removeValue(forKey: key) }
-            if var claude = raw["claude"] as? [String: Any],
-               claude["q5"] == nil || (claude["q5"] as? Double) == nil {
-                if let quota = scanClaudeQuota() {
-                    for (k, v) in quota { claude[k] = v }
-                    raw["claude"] = claude
+            if var claude = raw["claude"] as? [String: Any] {
+                let scriptHasQuota = numberValue(claude["q5"]) != nil ||
+                    numberValue(claude["q7"]) != nil
+                let scriptUpdated = intValue(claude["q_updated"]) ?? 0
+                if let nativeQuota = scanClaudeQuota() {
+                    let nativeHasQuota = numberValue(nativeQuota["q5"]) != nil ||
+                        numberValue(nativeQuota["q7"]) != nil
+                    let nativeUpdated = intValue(nativeQuota["q_updated"]) ?? 0
+                    if nativeHasQuota && (!scriptHasQuota || nativeUpdated >= scriptUpdated) {
+                        for key in [
+                            "q5", "q5_reset", "q7", "q7_reset", "q_updated",
+                            "q5_stale", "q7_stale",
+                        ] {
+                            if let value = nativeQuota[key] {
+                                claude[key] = value
+                            } else {
+                                claude.removeValue(forKey: key)
+                            }
+                        }
+                    }
                 }
+                normalizeClaudeQuota(&claude)
+                raw["claude"] = claude
             }
             let cleaned = try JSONSerialization.data(withJSONObject: raw)
             return try JSONDecoder().decode(Usage.self, from: cleaned)
         } catch {
             fputs("Tokei decode error: \(error)\n", stderr)
             return nil
+        }
+    }
+
+    private static func numberValue(_ value: Any?) -> Double? {
+        (value as? NSNumber)?.doubleValue
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        (value as? NSNumber)?.intValue
+    }
+
+    private static func normalizeClaudeQuota(_ claude: inout [String: Any]) {
+        let now = Int(Date().timeIntervalSince1970)
+        let updated = intValue(claude["q_updated"]) ?? 0
+        let age = now - updated
+        let sourceStale = updated <= 0 || age > claudeQuotaStaleTTL || age < -300
+        for (valueKey, resetKey, staleKey) in [
+            ("q5", "q5_reset", "q5_stale"),
+            ("q7", "q7_reset", "q7_stale"),
+        ] {
+            guard numberValue(claude[valueKey]) != nil else {
+                claude.removeValue(forKey: staleKey)
+                continue
+            }
+            let resetExpired = intValue(claude[resetKey]).map { $0 <= now } ?? false
+            claude[staleKey] = sourceStale || resetExpired
         }
     }
 
