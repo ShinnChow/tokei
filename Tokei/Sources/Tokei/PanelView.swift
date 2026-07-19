@@ -497,11 +497,12 @@ struct PanelView: View {
             if let pct = g.pct, g.stale != true {
                 if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
                 let title = (g.window == "month") ? "月剩余" : "周剩余"
+                // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
                 ForEach(g.products.filter { $0.pct != nil }) { product in
-                    if let p = product.pct {
-                        quotaRow(title: product.name, pct: 100 - p, reset: nil,
-                                 tint: Theme.grok.opacity(0.85))
+                    if let used = product.pct {
+                        grokProductShareRow(name: Self.grokProductLabel(product.name),
+                                            usedPct: used, tint: Theme.grok)
                     }
                 }
                 if let plan = g.plan, !plan.isEmpty {
@@ -542,8 +543,33 @@ struct PanelView: View {
         }
         .foregroundStyle(Theme.tTertiary)
         .help(stat.source == "live"
-              ? "已开启 Grok 实时额度查询"
+              ? "已开启 Grok 实时额度查询。Grok Build / API 等为同一周额度池内的占用拆分，共享上方重置时间。"
               : "默认只读 ~/.grok 本地日志，不访问网络")
+    }
+
+    /// 账单 product 字段 → 更可读的名称。
+    static func grokProductLabel(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "grokbuild": return "Grok Build"
+        case "api": return "API"
+        case "grokchat": return "Grok Chat"
+        default: return raw
+        }
+    }
+
+    /// 分产品占用：显示该产品在统一周额度里占了多少，不展示独立重置时间。
+    func grokProductShareRow(name: String, usedPct: Double, tint: Color) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(name).font(.system(size: 11)).foregroundStyle(Theme.tSecondary)
+                Spacer()
+                Text(String(format: "占用 %.0f%%", usedPct))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+            }
+            MiniBar(value: max(0, min(100, 100 - usedPct)), tint: tint.opacity(0.75))
+        }
+        .help("\(name) 在本周统一额度池中的占用比例（与周剩余共用同一重置时间）")
     }
 
     // MARK: - Qoder IDE 卡片
@@ -1119,9 +1145,12 @@ struct PanelView: View {
                 Text(String(format: "%.0f%%", pct))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(pct <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.tPrimary))
-                Text("· \(Fmt.reset(reset))")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(Theme.tTertiary)
+                // 无重置时间时不显示「· ?」，避免分产品行误导。
+                if reset != nil {
+                    Text("· \(Fmt.reset(reset))")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
             }
             MiniBar(value: pct, tint: pct <= 15 ? .red : tint)
         }
