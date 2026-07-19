@@ -501,8 +501,12 @@ struct PanelView: View {
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
                 ForEach(g.products.filter { $0.pct != nil }) { product in
                     if let used = product.pct {
-                        grokProductShareRow(name: Self.grokProductLabel(product.name),
-                                            usedPct: used, tint: Theme.grok)
+                        grokProductShareRow(
+                            name: Self.grokProductLabel(product.name),
+                            usedPct: used,
+                            tint: Theme.grok,
+                            help: Self.grokProductHelp(product.name)
+                        )
                     }
                 }
                 if let plan = g.plan, !plan.isEmpty {
@@ -550,26 +554,44 @@ struct PanelView: View {
     /// 账单 product 字段 → 更可读的名称。
     static func grokProductLabel(_ raw: String) -> String {
         switch raw.lowercased() {
-        case "grokbuild": return "Grok Build"
-        case "api": return "API"
-        case "grokchat": return "Grok Chat"
+        case "grokbuild": return "Grok Build（本机 CLI）"
+        case "api": return "开放 API（api.x.ai）"
+        case "grokchat": return "Grok 网页聊天"
         default: return raw
         }
     }
 
+    /// 分产品占用说明（悬停 / 辅助读屏）。
+    static func grokProductHelp(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "grokbuild":
+            return "Grok Build / 本机 CLI 编程消耗，占用本周统一额度池的比例。"
+        case "api":
+            return "通过 xAI 开放 API（api.x.ai / Console 密钥）调用模型的消耗，与 CLI 共用同一周额度池。"
+        case "grokchat":
+            return "grok.com 网页聊天消耗，与 CLI / 开放 API 共用同一周额度池。"
+        default:
+            return "该产品在本周统一额度池中的占用比例（与周剩余共用同一重置时间）。"
+        }
+    }
+
     /// 分产品占用：显示该产品在统一周额度里占了多少，不展示独立重置时间。
-    func grokProductShareRow(name: String, usedPct: Double, tint: Color) -> some View {
+    func grokProductShareRow(name: String, usedPct: Double, tint: Color, help: String) -> some View {
         VStack(spacing: 4) {
             HStack {
-                Text(name).font(.system(size: 11)).foregroundStyle(Theme.tSecondary)
-                Spacer()
+                Text(name)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                Spacer(minLength: 6)
                 Text(String(format: "占用 %.0f%%", usedPct))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
             }
             MiniBar(value: max(0, min(100, 100 - usedPct)), tint: tint.opacity(0.75))
         }
-        .help("\(name) 在本周统一额度池中的占用比例（与周剩余共用同一重置时间）")
+        .help(help)
     }
 
     // MARK: - Qoder IDE 卡片
