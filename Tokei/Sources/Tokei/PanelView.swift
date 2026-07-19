@@ -1336,9 +1336,8 @@ struct PanelView: View {
             }
 
             settingsStackedValue("额度来源") {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6),
-                                    GridItem(.flexible(), spacing: 6),
-                                    GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 7),
+                                    GridItem(.flexible(), spacing: 7)], spacing: 7) {
                     settingsRow("Claude", tint: Theme.claude, isOn: $menuBarQuotaClaude)
                     settingsRow("Codex", tint: Theme.codex, isOn: $menuBarQuotaCodex)
                     settingsRow("Grok", tint: Theme.grok, isOn: $menuBarQuotaGrok)
