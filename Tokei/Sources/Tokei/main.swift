@@ -243,20 +243,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let u = store.usage {
             let ud = UserDefaults.standard
-            if ud.object(forKey: "showClaude") as? Bool ?? true,
+            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的来源。
+            if MenuBarQuotaSource.claude.isEnabled,
+               ud.object(forKey: "showClaude") as? Bool ?? true,
                u.claude.q5_stale != true,
                let q5 = u.claude.q5 {
                 let remaining = 100 - q5
                 metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),
                                      remaining: remaining))
             }
-            if ud.object(forKey: "showCodex") as? Bool ?? true,
+            if MenuBarQuotaSource.codex.isEnabled,
+               ud.object(forKey: "showCodex") as? Bool ?? true,
                let quota = u.codex.p5 ?? u.codex.pw {
                 let remaining = 100 - quota
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
                                      remaining: remaining))
             }
-            if ud.object(forKey: "showGrok") as? Bool ?? true,
+            if MenuBarQuotaSource.grok.isEnabled,
+               ud.object(forKey: "showGrok") as? Bool ?? true,
                u.grok.stale != true,
                let pct = u.grok.pct {
                 let remaining = 100 - pct

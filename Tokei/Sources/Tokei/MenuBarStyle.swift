@@ -55,6 +55,47 @@ enum MenuBarDensity: String, CaseIterable, Identifiable {
     }
 }
 
+/// 菜单栏额度来源（与面板「显示卡片」独立；只控制状态栏显示哪些剩余额度）。
+enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
+    case claude
+    case codex
+    case grok
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .grok: return "Grok"
+        }
+    }
+
+    var defaultsKey: String {
+        switch self {
+        case .claude: return "menuBarQuotaClaude"
+        case .codex: return "menuBarQuotaCodex"
+        case .grok: return "menuBarQuotaGrok"
+        }
+    }
+
+    /// Claude/Codex 默认开，与历史行为一致；Grok 额度是新增来源，默认关，避免抢占状态栏。
+    var defaultEnabled: Bool {
+        switch self {
+        case .claude, .codex: return true
+        case .grok: return false
+        }
+    }
+
+    var isEnabled: Bool {
+        let ud = UserDefaults.standard
+        if ud.object(forKey: defaultsKey) == nil { return defaultEnabled }
+        return ud.bool(forKey: defaultsKey)
+    }
+
+    static func isEnabled(_ source: MenuBarQuotaSource) -> Bool { source.isEnabled }
+}
+
 enum MenuBarMetricKind {
     case claude
     case codex
