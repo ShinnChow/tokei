@@ -42,6 +42,8 @@ struct PanelView: View {
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
+    /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
+    @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showZcode, showMimoCode,
@@ -265,8 +267,8 @@ struct PanelView: View {
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini, active: gr.sessions > 0,
                          tint: Theme.gemini, content: AnyView(geminiBlock(gr))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
-                         active: kr.sessions > 0 || kr.usage_calls > 0,
-                         tint: Theme.grok, content: AnyView(grokBlock(kr, model: u.grok.model))),
+                         active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
+                         tint: Theme.grok, content: AnyView(grokBlock(u.grok, kr))),
             ToolCardItem(id: "qoder", name: "Qoder", visible: showQoder, active: qr.calls > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
             ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
@@ -432,7 +434,7 @@ struct PanelView: View {
 
     // MARK: - Grok 卡片
     @ViewBuilder
-    func grokBlock(_ r: GrokRange, model: String?) -> some View {
+    func grokBlock(_ g: GrokStat, _ r: GrokRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Grok", tint: Theme.grok, sessions: r.sessions)
             if r.sessions > 0 || r.usage_calls > 0 {
@@ -476,7 +478,7 @@ struct PanelView: View {
                            extra: grokMetrics, tint: Theme.grok)
                 if r.usage_available && !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: $grokModelsOpen, tint: Theme.grok)
-                } else if let model, !model.isEmpty {
+                } else if let model = g.model, !model.isEmpty {
                     modelBadge(model, tint: Theme.grok)
                 }
                 Text(r.usage_available
@@ -485,10 +487,59 @@ struct PanelView: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if g.pct == nil {
                 emptyHint
             }
+            if let pct = g.pct, g.stale != true {
+                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
+                let title = (g.window == "month") ? "月剩余" : "周剩余"
+                quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
+                ForEach(g.products.filter { $0.pct != nil }) { product in
+                    if let p = product.pct {
+                        quotaRow(title: product.name, pct: 100 - p, reset: nil,
+                                 tint: Theme.grok.opacity(0.85))
+                    }
+                }
+                if let plan = g.plan, !plan.isEmpty {
+                    HStack {
+                        Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                        Spacer()
+                        Text(plan)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.tSecondary)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.grok.opacity(0.16)))
+                    }
+                }
+                grokQuotaStatus(g)
+            } else if g.stale == true {
+                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
+                Text("额度周期已结束，等待 Grok 写入新日志")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(Color.orange.opacity(0.88))
+            }
         }
+    }
+
+    func grokQuotaStatus(_ stat: GrokStat) -> some View {
+        let sourceLabel: String
+        switch stat.source {
+        case "live": sourceLabel = "实时接口"
+        case "cache": sourceLabel = "本地缓存"
+        default: sourceLabel = "本地日志"
+        }
+        let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: "clock")
+                .font(.system(size: 9))
+            Text("额度来源 \(sourceLabel) · \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(Theme.tTertiary)
+        .help(stat.source == "live"
+              ? "已开启 Grok 实时额度查询"
+              : "默认只读 ~/.grok 本地日志，不访问网络")
     }
 
     // MARK: - Qoder IDE 卡片
@@ -1207,6 +1258,7 @@ struct PanelView: View {
 
                 VStack(alignment: .leading, spacing: 11) {
                     settingsMenuBarSection
+                    settingsPrivacySection
                     settingsSystemSection
                     settingsReminderSection
                     settingsSyncSection
@@ -1350,8 +1402,26 @@ struct PanelView: View {
         }
     }
 
+    var settingsPrivacySection: some View {
+        settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("Grok 实时额度查询", isOn: $grokLiveQuotaEnabled)
+            Text("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: grokLiveQuotaEnabled) { enabled in
+            Self.setGrokLiveQuotaEnabled(enabled)
+            store.refresh()
+        }
+    }
+
     private static func setQoderIdeEnabled(_ enabled: Bool) {
         SyncManager.setQoderIdeEnabled(enabled)
+    }
+
+    private static func setGrokLiveQuotaEnabled(_ enabled: Bool) {
+        SyncManager.setGrokLiveQuotaEnabled(enabled)
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -1360,6 +1430,12 @@ struct PanelView: View {
     static func syncQoderIdeConfigOnLaunch() {
         let enabled = UserDefaults.standard.object(forKey: "showQoderIde") as? Bool ?? true
         setQoderIdeEnabled(enabled)
+    }
+
+    /// 启动时同步 Grok 实时额度开关（默认关）。
+    static func syncGrokLiveQuotaConfigOnLaunch() {
+        let enabled = UserDefaults.standard.object(forKey: "grokLiveQuotaEnabled") as? Bool ?? false
+        setGrokLiveQuotaEnabled(enabled)
     }
 
     var settingsPricingSection: some View {

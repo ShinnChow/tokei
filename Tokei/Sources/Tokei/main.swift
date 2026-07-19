@@ -175,9 +175,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var globalMouseMonitor: Any?
 
-    // 菜单栏额度颜色(与面板 Theme.claude/codex 一致)。
+    // 菜单栏额度颜色(与面板 Theme.claude/codex/grok 一致)。
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
+    static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -194,9 +195,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .applicationDefined
         popover.animates = true
 
-        // 启动时先把 Qoder IDE 开关状态落盘到 config.json,
-        // 确保随后的 refresh() 触发的 Python 扫描能读到正确的 qoder_ide_enabled。
+        // 启动时先把 Qoder IDE / Grok 实时额度开关落盘到 config.json,
+        // 确保随后的 refresh() 触发的 Python 扫描能读到正确配置。
         PanelView.syncQoderIdeConfigOnLaunch()
+        PanelView.syncGrokLiveQuotaConfigOnLaunch()
         if var syncConfig = store.syncManager.config {
             let interval = SyncManager.normalizedSyncInterval(syncConfig.sync_interval)
             if syncConfig.sync_interval != interval {
@@ -254,6 +256,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
                                      remaining: remaining))
             }
+            if ud.object(forKey: "showGrok") as? Bool ?? true,
+               u.grok.stale != true,
+               let pct = u.grok.pct {
+                let remaining = 100 - pct
+                metrics.append(.init(kind: .grok, value: String(format: "%.0f", remaining),
+                                     remaining: remaining))
+            }
             if metrics.isEmpty {
                 let showC = ud.object(forKey: "showClaude") as? Bool ?? true
                 let showX = ud.object(forKey: "showCodex") as? Bool ?? true
@@ -303,6 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch metric.kind {
             case .claude: name = "Claude"
             case .codex: name = "Codex"
+            case .grok: name = "Grok"
             case .total: name = "今日"
             }
             if metric.remaining != nil {

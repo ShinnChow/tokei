@@ -58,6 +58,7 @@ enum MenuBarDensity: String, CaseIterable, Identifiable {
 enum MenuBarMetricKind {
     case claude
     case codex
+    case grok
     case total
 }
 
@@ -591,6 +592,7 @@ enum MenuBarTitleRenderer {
         switch kind {
         case .claude: return AppDelegate.claudeColor
         case .codex: return AppDelegate.codexColor
+        case .grok: return AppDelegate.grokColor
         case .total: return .secondaryLabelColor
         }
     }
@@ -714,6 +716,7 @@ struct MenuBarStylePreview: View {
         switch kind {
         case .claude: return AppDelegate.claudeColor
         case .codex: return AppDelegate.codexColor
+        case .grok: return AppDelegate.grokColor
         case .total: return .secondaryLabelColor
         }
     }
@@ -722,6 +725,7 @@ struct MenuBarStylePreview: View {
         switch kind {
         case .claude: return Theme.claude
         case .codex: return Theme.codex
+        case .grok: return Theme.grok
         case .total: return Theme.tSecondary
         }
     }

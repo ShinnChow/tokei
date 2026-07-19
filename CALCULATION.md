@@ -244,6 +244,32 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 直接使用消
 
 兼容 Codex 新旧返回结构:旧结构通常是 primary=5h、secondary=周;新结构可能只有 primary=周。
 
+### Grok Build(credits)
+
+默认**只读本地日志**，不访问网络：
+
+- 来源：`${GROK_HOME:-~/.grok}/logs/unified.jsonl` 中
+  `billing: fetched credits config`
+- `pct` — 当前周期已用百分比（`creditUsagePercent`）
+- `reset` — 周期结束/重置时间
+- `plan` — 套餐名（日志里的 `subscriptionTier`，如 SuperGrok）
+- `window` — `week` / `month`（由 `currentPeriod.type` 推断）
+- `source` — `log` / `live` / `cache`
+
+可选实时接口（**默认关闭**，需用户显式开启）：
+
+- 配置：`~/.tokei/config.json` 中 `grok_live_quota_enabled: true`
+- 或环境变量：`TOKEI_GROK_LIVE_QUOTA=1`（`0` 强制关闭）
+- 接口：`GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`
+- 鉴权：`~/.grok/auth.json` 中的 Bearer token
+- 额外字段：`products[]`（如 GrokBuild / Api 分产品已用百分比）
+
+策略：
+
+1. 始终优先解析本地日志
+2. 仅当用户开启实时查询时，才请求账单接口覆盖为最新值
+3. 失败时回退到本地日志或短缓存，不报错
+
 ### Qoder(credit)
 
 从 QoderWork 日志 `main.log` 中提取 `userQuota`:
