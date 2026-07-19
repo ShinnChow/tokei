@@ -1344,7 +1344,7 @@ struct PanelView: View {
                 }
             }
 
-            Text("只影响状态栏剩余额度，与「显示卡片」无关。双额度会按勾选显示；单额度在勾选项里取剩余最少的一项。")
+            Text("只影响状态栏剩余额度，与「显示卡片」无关。双额度按勾选显示；单额度在勾选项中取剩余最少。全部关闭时状态栏只留图标，不再显示用量数字。")
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)

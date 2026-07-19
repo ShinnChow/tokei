@@ -268,29 +268,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      remaining: remaining))
             }
             if metrics.isEmpty {
-                let showC = ud.object(forKey: "showClaude") as? Bool ?? true
-                let showX = ud.object(forKey: "showCodex") as? Bool ?? true
-                let showP = ud.object(forKey: "showPi") as? Bool ?? true
-                let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
-                let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
-                let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
-                let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
-                let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
-                let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
-                var total = 0
-                if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
-                if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
-                if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
-                if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
-                if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
-                if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if total > 0 {
-                    metrics.append(.init(kind: .total, value: Fmt.human(total)))
-                } else {
+                // 用户把额度来源全部关掉时：只保留图标，不再回退显示今日 token 总量。
+                let anyQuotaSourceOn = MenuBarQuotaSource.allCases.contains { $0.isEnabled }
+                if !anyQuotaSourceOn {
                     fallbackIcon = true
+                } else {
+                    let showC = ud.object(forKey: "showClaude") as? Bool ?? true
+                    let showX = ud.object(forKey: "showCodex") as? Bool ?? true
+                    let showP = ud.object(forKey: "showPi") as? Bool ?? true
+                    let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
+                    let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
+                    let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
+                    let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
+                    let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
+                    let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
+                    var total = 0
+                    if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
+                    if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if total > 0 {
+                        metrics.append(.init(kind: .total, value: Fmt.human(total)))
+                    } else {
+                        fallbackIcon = true
+                    }
                 }
             }
         } else {
