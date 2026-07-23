@@ -13,7 +13,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | Gemini CLI | `~/.gemini/*/chats/session-*.json` | JSON, `messages[].tokens` |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl` + `sessions/*/*/{summary,signals}.json` | JSONL, `shell.turn.inference_done` + 会话指标 |
 | Qoder | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
-| Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `sessions` 表 |
+| Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
@@ -68,6 +68,11 @@ token 快照误删。
 - 缓存读 = `cache_read_tokens`
 - 缓存写 = `cache_write_tokens`
 - 推理 = `reasoning_tokens`
+
+优先合并 `session_model_usage` 与升级中断时保留的 `session_model_usage_v21`，按会话、模型、
+计费端点和任务维度去重；主循环明细不存在时才回退 `sessions` 汇总。这样既包含 0.19 新增的
+审批、标题生成等辅助调用，也保留已删除会话留下的历史用量；会话数仍以 `sessions` 中
+可见的会话为准，避免把内部清理记录重复算作对话。
 
 **OpenCode** — 字段独立:
 - 输入 = `tokens.input`
@@ -211,7 +216,8 @@ cost = non_cached_input/1M × price_in
 
 ### Hermes 成本
 
-直接使用数据库中的 `actual_cost_usd`,回退到 `estimated_cost_usd`。
+优先使用数据库中的 `actual_cost_usd`,回退到 `estimated_cost_usd`；两者都为 0 时按统一
+价格表估算，避免 Hermes 自定义供应商未写入账单金额时把成本显示为 0。
 
 ### Pi Coding Agent CLI / OpenCode 成本
 
