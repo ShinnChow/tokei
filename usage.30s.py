@@ -3752,7 +3752,7 @@ def _zstd_decompress(data):
 
 
 # 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
-_CLAUDE_QUOTA_STATE_VERSION = 1
+_CLAUDE_QUOTA_STATE_VERSION = 2
 _CLAUDE_QUOTA_STALE_TTL = 1800
 _CLAUDE_QUOTA_FULL_SCAN_INTERVAL = 6 * 3600
 _CLAUDE_QUOTA_RETRY_SCAN_INTERVAL = 5 * 60
@@ -3807,14 +3807,28 @@ def _parse_claude_quota_record(record):
         five_hour = {}
     if not isinstance(seven_day, dict):
         seven_day = {}
+    fable_limit = {}
+    limits = payload.get("limits") or []
+    if isinstance(limits, list):
+        for limit in limits:
+            if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+                continue
+            scope = limit.get("scope") or {}
+            model = scope.get("model") or {} if isinstance(scope, dict) else {}
+            display_name = model.get("display_name") if isinstance(model, dict) else None
+            if isinstance(display_name, str) and display_name.casefold() == "fable":
+                fable_limit = limit
+                break
     result = {
         "q5": five_hour.get("utilization"),
         "q5_reset": _iso_to_epoch(five_hour.get("resets_at")),
         "q7": seven_day.get("utilization"),
         "q7_reset": _iso_to_epoch(seven_day.get("resets_at")),
+        "qf": fable_limit.get("percent"),
+        "qf_reset": _iso_to_epoch(fable_limit.get("resets_at")),
         "q_updated": int(record["mtime_ns"] // 1_000_000_000),
     }
-    return result if result["q5"] is not None or result["q7"] is not None else None
+    return result if any(result[key] is not None for key in ("q5", "q7", "qf")) else None
 
 
 def _claude_quota_with_freshness(snapshot, now=None):
@@ -3832,6 +3846,7 @@ def _claude_quota_with_freshness(snapshot, now=None):
     for value_key, reset_key, stale_key in (
         ("q5", "q5_reset", "q5_stale"),
         ("q7", "q7_reset", "q7_stale"),
+        ("qf", "qf_reset", "qf_stale"),
     ):
         reset = result.get(reset_key)
         try:
@@ -4089,8 +4104,10 @@ def compute():
             "session_name": cur["name"], "session_total": cur_total,
             "q5": plan.get("q5"), "q5_reset": plan.get("q5_reset"),
             "q7": plan.get("q7"), "q7_reset": plan.get("q7_reset"),
+            "qf": plan.get("qf"), "qf_reset": plan.get("qf_reset"),
             "q_updated": plan.get("q_updated"),
             "q5_stale": plan.get("q5_stale"), "q7_stale": plan.get("q7_stale"),
+            "qf_stale": plan.get("qf_stale"),
         },
         "codex": {
             "ranges": xranges,

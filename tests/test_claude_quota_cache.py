@@ -20,8 +20,8 @@ class ClaudeQuotaCacheTests(unittest.TestCase):
     def _iso(self, epoch):
         return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _payload(self, q5, q7):
-        return {
+    def _payload(self, q5, q7, qf=None):
+        payload = {
             "five_hour": {
                 "utilization": q5,
                 "resets_at": self._iso(self.now + 3600),
@@ -31,6 +31,18 @@ class ClaudeQuotaCacheTests(unittest.TestCase):
                 "resets_at": self._iso(self.now + 7 * 86400),
             },
         }
+        if qf is not None:
+            payload["limits"] = [{
+                "group": "weekly",
+                "kind": "weekly_scoped",
+                "percent": qf,
+                "resets_at": self._iso(self.now + 7 * 86400),
+                "scope": {
+                    "model": {"display_name": "Fable", "id": None},
+                    "surface": None,
+                },
+            }]
+        return payload
 
     def _write_entry(self, directory, name, marker, modified):
         path = Path(directory) / f"{name}_0"
@@ -67,11 +79,16 @@ class ClaudeQuotaCacheTests(unittest.TestCase):
                 modified = self.now - 499 + index
                 os.utime(path, ns=(modified * 1_000_000_000, modified * 1_000_000_000))
 
-            payloads = {"old": self._payload(37.0, 62.0), "new": self._payload(41.0, 65.0)}
+            payloads = {
+                "old": self._payload(37.0, 62.0, 81.0),
+                "new": self._payload(41.0, 65.0, 83.0),
+            }
             first = self._scan(cache_dir, state_file, self._decoder(payloads))
 
             self.assertEqual(first["q5"], 37.0)
+            self.assertEqual(first["qf"], 81.0)
             self.assertFalse(first["q5_stale"])
+            self.assertFalse(first["qf_stale"])
             state = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(state["candidate"]["path"], str(valid.resolve()))
 
@@ -84,6 +101,7 @@ class ClaudeQuotaCacheTests(unittest.TestCase):
             newest = self._write_entry(cache_dir, "newest", "new", self.now + 20)
             replaced = self._scan(cache_dir, state_file, self._decoder(payloads), now=self.now + 20)
             self.assertEqual(replaced["q5"], 41.0)
+            self.assertEqual(replaced["qf"], 83.0)
             state = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertEqual(state["candidate"]["path"], str(newest.resolve()))
 
@@ -130,16 +148,20 @@ class ClaudeQuotaCacheTests(unittest.TestCase):
             "q5_reset": self.now + 300,
             "q7": 20.0,
             "q7_reset": self.now - 1,
+            "qf": 30.0,
+            "qf_reset": self.now + 300,
             "q_updated": self.now - 30,
         }
         fresh = USAGE._claude_quota_with_freshness(snapshot, now=self.now)
         self.assertFalse(fresh["q5_stale"])
         self.assertTrue(fresh["q7_stale"])
+        self.assertFalse(fresh["qf_stale"])
 
         snapshot["q_updated"] = self.now - USAGE._CLAUDE_QUOTA_STALE_TTL - 1
         expired = USAGE._claude_quota_with_freshness(snapshot, now=self.now)
         self.assertTrue(expired["q5_stale"])
         self.assertTrue(expired["q7_stale"])
+        self.assertTrue(expired["qf_stale"])
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ struct PanelView: View {
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
-    enum PanelMode { case cards, dashboard, projects, settings }
+    enum PanelMode { case cards, quotaHistory, dashboard, projects, settings }
     private struct ToolCardItem: Identifiable {
         let id: String
         let name: String
@@ -75,7 +75,9 @@ struct PanelView: View {
     }
 
     var body: some View {
-        let w = mode == .settings ? settingsPanelWidth : (mode == .cards ? panelWidth : max(panelWidth, 420))
+        let w = (mode == .settings || mode == .quotaHistory)
+            ? settingsPanelWidth
+            : (mode == .cards ? panelWidth : max(panelWidth, 420))
         if scrollable {
             if mode == .projects {
                 projectPanelContent
@@ -115,7 +117,9 @@ struct PanelView: View {
     private var panelContent: some View {
         VStack(alignment: .leading, spacing: 13) {
             header
-            if mode == .dashboard {
+            if mode == .quotaHistory {
+                QuotaHistoryView(history: store.quotaHistory)
+            } else if mode == .dashboard {
                 DashboardView(store: store)
             } else if mode == .projects {
                 ProjectTrailView(cached: $trailProjects)
@@ -209,6 +213,20 @@ struct PanelView: View {
             .buttonStyle(.plain)
             .tip("项目足迹")
             Button {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    mode = mode == .quotaHistory ? .cards : .quotaHistory
+                }
+            } label: {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(mode == .quotaHistory ? Theme.claude : Theme.tTertiary)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.primary.opacity(0.06)))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .tip("额度曲线")
+            Button {
                 withAnimation(.easeInOut(duration: 0.35)) { mode = mode == .dashboard ? .cards : .dashboard }
             } label: {
                 Image(systemName: "chart.bar")
@@ -258,7 +276,8 @@ struct PanelView: View {
         let qcr = u.qwencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
-                         active: cr.sessions > 0 || u.claude.q5 != nil || u.claude.q7 != nil,
+                         active: cr.sessions > 0 || u.claude.q5 != nil ||
+                             u.claude.q7 != nil || u.claude.qf != nil,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
             ToolCardItem(id: "codex", name: "Codex", visible: showCodex, active: xr.sessions > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
@@ -339,13 +358,16 @@ struct PanelView: View {
             } else {
                 emptyHint
             }
-            if c.q5 != nil || c.q7 != nil {
+            if c.q5 != nil || c.q7 != nil || c.qf != nil {
                 thinDivider
                 if let q5 = c.q5, c.q5_stale != true {
                     quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset, tint: Theme.claude)
                 }
                 if let q7 = c.q7, c.q7_stale != true {
-                    quotaRow(title: "周剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
+                    quotaRow(title: "周 · 全部剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
+                }
+                if let qf = c.qf, c.qf_stale != true {
+                    quotaRow(title: "周 · Fable 剩余", pct: 100 - qf, reset: c.qf_reset, tint: .orange)
                 }
                 claudeQuotaStatus(c)
             }
@@ -373,10 +395,7 @@ struct PanelView: View {
                     tokenModelDisclosure(r.models, open: $codexModelsOpen, tint: Theme.codex,
                                          reasonIncludedInOutput: true)
                 }
-                if x.p5 != nil || x.pw != nil { thinDivider }
-                if let p5 = x.p5 {
-                    quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.codex)
-                }
+                if x.pw != nil { thinDivider }
                 if let pw = x.pw {
                     quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
                 }
@@ -1074,9 +1093,10 @@ struct PanelView: View {
     }
 
     func claudeQuotaStatus(_ stat: ClaudeStat) -> some View {
-        let staleCount = [stat.q5_stale, stat.q7_stale].filter { $0 == true }.count
+        let staleCount = [stat.q5_stale, stat.q7_stale, stat.qf_stale].filter { $0 == true }.count
         let hasFreshQuota = (stat.q5 != nil && stat.q5_stale != true) ||
-            (stat.q7 != nil && stat.q7_stale != true)
+            (stat.q7 != nil && stat.q7_stale != true) ||
+            (stat.qf != nil && stat.qf_stale != true)
         let stale = staleCount > 0
         let label: String
         if stale {

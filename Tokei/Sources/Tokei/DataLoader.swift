@@ -60,11 +60,13 @@ final class DataLoader {
         var q5Reset: Int?
         var q7: Double?
         var q7Reset: Int?
+        var qf: Double?
+        var qfReset: Int?
         var updated: Int
     }
 
     private struct ClaudeQuotaState: Codable, Equatable {
-        var version = 1
+        var version = 2
         var candidate: ClaudeQuotaCandidate?
         var snapshot: ClaudeQuotaSnapshot?
         var scanModified: TimeInterval = -1
@@ -117,7 +119,7 @@ final class DataLoader {
     private static func loadClaudeQuotaState() -> ClaudeQuotaState {
         guard let data = try? Data(contentsOf: claudeQuotaStateURL),
               let state = try? JSONDecoder().decode(ClaudeQuotaState.self, from: data),
-              state.version == 1 else { return ClaudeQuotaState() }
+              state.version == 2 else { return ClaudeQuotaState() }
         return state
     }
 
@@ -150,14 +152,25 @@ final class DataLoader {
         else { return nil }
         let fiveHour = json["five_hour"] as? [String: Any] ?? [:]
         let sevenDay = json["seven_day"] as? [String: Any] ?? [:]
+        let fableLimit = (json["limits"] as? [[String: Any]])?.first { limit in
+            guard limit["kind"] as? String == "weekly_scoped",
+                  let scope = limit["scope"] as? [String: Any],
+                  let model = scope["model"] as? [String: Any],
+                  let displayName = model["display_name"] as? String
+            else { return false }
+            return displayName.caseInsensitiveCompare("Fable") == .orderedSame
+        } ?? [:]
         let q5 = (fiveHour["utilization"] as? NSNumber)?.doubleValue
         let q7 = (sevenDay["utilization"] as? NSNumber)?.doubleValue
-        guard q5 != nil || q7 != nil else { return nil }
+        let qf = (fableLimit["percent"] as? NSNumber)?.doubleValue
+        guard q5 != nil || q7 != nil || qf != nil else { return nil }
         return ClaudeQuotaSnapshot(
             q5: q5,
             q5Reset: isoToEpoch(fiveHour["resets_at"] as? String),
             q7: q7,
             q7Reset: isoToEpoch(sevenDay["resets_at"] as? String),
+            qf: qf,
+            qfReset: isoToEpoch(fableLimit["resets_at"] as? String),
             updated: Int(record.modified)
         )
     }
@@ -171,12 +184,16 @@ final class DataLoader {
         if let reset = snapshot.q5Reset { result["q5_reset"] = reset }
         if let q7 = snapshot.q7 { result["q7"] = q7 }
         if let reset = snapshot.q7Reset { result["q7_reset"] = reset }
+        if let qf = snapshot.qf { result["qf"] = qf }
+        if let reset = snapshot.qfReset { result["qf_reset"] = reset }
         let age = now - snapshot.updated
         let sourceStale = age > claudeQuotaStaleTTL || age < -300
         result["q5_stale"] = snapshot.q5 != nil &&
             (sourceStale || (snapshot.q5Reset.map { $0 <= now } ?? false))
         result["q7_stale"] = snapshot.q7 != nil &&
             (sourceStale || (snapshot.q7Reset.map { $0 <= now } ?? false))
+        result["qf_stale"] = snapshot.qf != nil &&
+            (sourceStale || (snapshot.qfReset.map { $0 <= now } ?? false))
         return result
     }
 
@@ -337,16 +354,18 @@ final class DataLoader {
             for key in raw.keys where key.hasPrefix("_") { raw.removeValue(forKey: key) }
             if var claude = raw["claude"] as? [String: Any] {
                 let scriptHasQuota = numberValue(claude["q5"]) != nil ||
-                    numberValue(claude["q7"]) != nil
+                    numberValue(claude["q7"]) != nil ||
+                    numberValue(claude["qf"]) != nil
                 let scriptUpdated = intValue(claude["q_updated"]) ?? 0
                 if let nativeQuota = scanClaudeQuota() {
                     let nativeHasQuota = numberValue(nativeQuota["q5"]) != nil ||
-                        numberValue(nativeQuota["q7"]) != nil
+                        numberValue(nativeQuota["q7"]) != nil ||
+                        numberValue(nativeQuota["qf"]) != nil
                     let nativeUpdated = intValue(nativeQuota["q_updated"]) ?? 0
                     if nativeHasQuota && (!scriptHasQuota || nativeUpdated >= scriptUpdated) {
                         for key in [
-                            "q5", "q5_reset", "q7", "q7_reset", "q_updated",
-                            "q5_stale", "q7_stale",
+                            "q5", "q5_reset", "q7", "q7_reset", "qf", "qf_reset",
+                            "q_updated", "q5_stale", "q7_stale", "qf_stale",
                         ] {
                             if let value = nativeQuota[key] {
                                 claude[key] = value
@@ -383,6 +402,7 @@ final class DataLoader {
         for (valueKey, resetKey, staleKey) in [
             ("q5", "q5_reset", "q5_stale"),
             ("q7", "q7_reset", "q7_stale"),
+            ("qf", "qf_reset", "qf_stale"),
         ] {
             guard numberValue(claude[valueKey]) != nil else {
                 claude.removeValue(forKey: staleKey)
