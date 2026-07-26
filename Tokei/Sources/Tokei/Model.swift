@@ -294,13 +294,16 @@ struct QoderRange: Codable {
     var turns: Int = 0
     var duration: Int = 0
     var ctx: Double = 0
+    var tools: Int = 0
+    var est: Int = 0
 
     enum CodingKeys: String, CodingKey {
-        case `in`, out, sessions, calls, sub_agents, turns, duration, ctx
+        case `in`, out, sessions, calls, sub_agents, turns, duration, ctx, tools, est
     }
 
     init(`in` input: Int = 0, out: Int = 0, sessions: Int = 0, calls: Int = 0,
-         sub_agents: Int = 0, turns: Int = 0, duration: Int = 0, ctx: Double = 0) {
+         sub_agents: Int = 0, turns: Int = 0, duration: Int = 0, ctx: Double = 0,
+         tools: Int = 0, est: Int = 0) {
         self.in = input
         self.out = out
         self.sessions = sessions
@@ -309,6 +312,8 @@ struct QoderRange: Codable {
         self.turns = turns
         self.duration = duration
         self.ctx = ctx
+        self.tools = tools
+        self.est = est
     }
 
     init(from decoder: Decoder) throws {
@@ -321,6 +326,8 @@ struct QoderRange: Codable {
         self.turns = try c.decodeIfPresent(Int.self, forKey: .turns) ?? 0
         self.duration = try c.decodeIfPresent(Int.self, forKey: .duration) ?? 0
         self.ctx = try c.decodeIfPresent(Double.self, forKey: .ctx) ?? 0
+        self.tools = try c.decodeIfPresent(Int.self, forKey: .tools) ?? 0
+        self.est = try c.decodeIfPresent(Int.self, forKey: .est) ?? 0
     }
 }
 
@@ -615,6 +622,7 @@ struct Usage: Codable {
     var grok: GrokStat
     var qoderwork: QoderStat
     var qoder: QoderIdeStat
+    var qodercli: QoderStat
     var hermes: HermesStat
     var zcode: TokenUsageStat
     var mimocode: TokenUsageStat
@@ -625,7 +633,7 @@ struct Usage: Codable {
     var qwencode: TokenUsageStat
 
     enum CodingKeys: String, CodingKey {
-        case claude, codex, gemini, grok, qoder, qoderwork, hermes, zcode, mimocode
+        case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, opencode, qwencode
     }
 
@@ -640,6 +648,8 @@ struct Usage: Codable {
             ?? QoderStat(ranges: .empty, model: nil)
         qoder = (try? c.decodeIfPresent(QoderIdeStat.self, forKey: .qoder))
             ?? QoderIdeStat(ranges: .empty, model: nil)
+        qodercli = (try? c.decodeIfPresent(QoderStat.self, forKey: .qodercli))
+            ?? QoderStat(ranges: .empty, model: nil)
         hermes = try c.decode(HermesStat.self, forKey: .hermes)
         zcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .zcode) ?? TokenUsageStat(ranges: .empty)
         mimocode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .mimocode) ?? TokenUsageStat(ranges: .empty)

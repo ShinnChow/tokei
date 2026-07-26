@@ -13,6 +13,7 @@ final class Store: ObservableObject {
     @Published var syncStatus = ""
     @Published var syncSucceeded: Bool?
     @Published var syncDetail = ""
+    @Published var syncFailStreak = 0
     @Published var peerLoadIssues: [PeerLoadIssue] = []
 
     let syncManager = SyncManager()
@@ -126,6 +127,7 @@ final class Store: ObservableObject {
             self.syncDetail = result.output
             if result.succeeded {
                 self.syncSucceeded = true
+                self.syncFailStreak = 0
                 let formatter = DateFormatter()
                 formatter.dateFormat = "HH:mm"
                 self.syncStatus = "已同步 " + formatter.string(from: Date())
@@ -135,8 +137,12 @@ final class Store: ObservableObject {
                 self.syncStatus = "同步任务已在运行"
             } else {
                 self.syncSucceeded = false
-                self.syncStatus = "同步失败"
+                self.syncFailStreak += 1
+                self.syncStatus = self.syncFailStreak > 1
+                    ? "同步失败（连续 \(self.syncFailStreak) 次）"
+                    : "同步失败"
             }
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
         }
     }
 
@@ -295,7 +301,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         b.imagePosition = presentation.image == nil
             ? .noImage
             : (presentation.title.length == 0 ? .imageOnly : .imageLeading)
-        b.attributedTitle = presentation.title
+        if store.syncFailStreak >= 3 {
+            let warned = NSMutableAttributedString(attributedString: presentation.title)
+            warned.append(NSAttributedString(
+                string: (warned.length > 0 ? " " : "") + "⚠",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: NSColor.systemOrange,
+                    .baselineOffset: 1,
+                ]))
+            b.attributedTitle = warned
+        } else {
+            b.attributedTitle = presentation.title
+        }
         b.contentTintColor = nil
         fitStatusItemWidth(b)
         var summaryParts = metrics.map { metric in
@@ -312,6 +330,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if store.keepAwake.active {
             summaryParts.insert("保持唤醒已开启", at: 0)
+        }
+        if store.syncFailStreak >= 3 {
+            summaryParts.insert("多设备同步已连续失败 \(store.syncFailStreak) 次，请打开设置查看", at: 0)
         }
         let summary = summaryParts.joined(separator: " · ")
         let accessibility = summary.isEmpty ? "Tokei" : "Tokei · \(summary)"

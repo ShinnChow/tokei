@@ -869,7 +869,7 @@ struct DashboardView: View {
         let qoder = usage.qoder.ranges.get(key)
         let qoderTokens = qoder.in + qoder.cached + qoder.out
         if qoderTokens > 0 {
-            out.append(modelCost(name: usage.qoder.model ?? "Qoder IDE", cost: 0, tool: "qoder",
+            out.append(modelCost(name: usage.qoder.model ?? "Qoder Desktop", cost: 0, tool: "qoder",
                                  input: qoder.in + qoder.cached, out: qoder.out, tokens: qoderTokens))
         }
 

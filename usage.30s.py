@@ -2139,6 +2139,7 @@ def scan_qoder(bounds, cache):
                 conn = _sqlite3.connect(_sqlite_ro_uri(qoder_db), uri=True, timeout=1)
                 conn.execute("PRAGMA query_only=ON")
                 # messages: calls, sessions, tokens, duration, turns
+                # 只统计 assistant 行:user 行也可能带 metadata,会虚增任务数
                 for row in conn.execute("""
                     SELECT date(created_at,'unixepoch','localtime') as day,
                            COUNT(*) as calls,
@@ -2147,7 +2148,7 @@ def scan_qoder(bounds, cache):
                            COALESCE(SUM(json_extract(metadata,'$.outputTokens')),0),
                            COALESCE(SUM(json_extract(metadata,'$.durationMs')),0),
                            COALESCE(SUM(json_extract(metadata,'$.numTurns')),0)
-                    FROM messages WHERE metadata!='{}'
+                    FROM messages WHERE metadata!='{}' AND role='assistant'
                     GROUP BY day
                 """):
                     dk, calls, sessions, ti, to_, dur, turns = row
@@ -2161,7 +2162,7 @@ def scan_qoder(bounds, cache):
                            CAST(strftime('%H',created_at,'unixepoch','localtime') AS INTEGER),
                            COALESCE(SUM(json_extract(metadata,'$.inputTokens')),0) +
                            COALESCE(SUM(json_extract(metadata,'$.outputTokens')),0)
-                    FROM messages WHERE metadata!='{}'
+                    FROM messages WHERE metadata!='{}' AND role='assistant'
                     GROUP BY day, strftime('%H',created_at,'unixepoch','localtime')
                 """):
                     dk, hour, tokens = row
@@ -2462,6 +2463,175 @@ def _scan_hermes_db(db_path, _sq):
     except Exception:
         pass
     return days
+
+
+# ---------- Qoder CLI ----------
+# qodercli(独立 CLI,数据目录 ~/.qoder,与 Qoder IDE / QoderWork 无关)。
+# transcript 中 usage 恒为空(服务端不下发 token),因此只采会话/活跃维度:
+# 会话数、用户消息数(turns)、模型调用数(calls)、工具调用(tools)、活跃时长,
+# token 为文本 chars/4 估算值(est)。
+_QODERCLI_DIR = os.path.join(HOME, ".qoder", "projects")
+
+
+def _qodercli_dir():
+    return os.environ.get("TOKEI_QODERCLI_DIR", _QODERCLI_DIR)
+
+
+def _empty_qodercli():
+    ranges = {k: {"in": 0, "out": 0, "sessions": 0, "calls": 0, "sub_agents": 0,
+                  "duration": 0, "turns": 0, "tools": 0, "est": 0,
+                  "ctx_sum": 0.0, "ctx_count": 0} for k in RANGE_KEYS}
+    return {"ranges": ranges, "model": None}
+
+
+def _est_tokens(text):
+    """CJK 感知估算:汉字/全角 ≈1 token,其余字符 ≈1/4 token(英文 4 字符/token 经验值)。"""
+    if not text:
+        return 0.0
+    cjk = sum(1 for ch in text if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef")
+    return cjk + (len(text) - cjk) / 4
+
+
+def _parse_qodercli_file(path):
+    """解析单个 qodercli transcript,返回 {"days": {day: {...}}, "model": str|None}。"""
+    days = {}
+    model = None
+    prev_ts = None
+    seen_ids = set()
+    with open(path, "r", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            typ = row.get("type")
+            if typ == "runtime-config":
+                m = row.get("model")
+                if m:
+                    model = m
+                continue
+            if typ not in ("user", "assistant"):
+                continue
+            dt = parse_ts(row.get("timestamp") or "")
+            if dt is None:
+                continue
+            dt = dt.astimezone()
+            dk = dt.date().isoformat()
+            day = days.setdefault(dk, {"calls": 0, "turns": 0, "tools": 0,
+                                       "est": 0.0, "active": 0.0})
+            ts = dt.timestamp()
+            # 活跃时长:相邻事件间隔≤5min 才累计,排除挂机空档
+            if prev_ts is not None:
+                gap = ts - prev_ts
+                if 0 < gap <= 300:
+                    day["active"] += gap
+            prev_ts = ts
+            content = (row.get("message") or {}).get("content")
+            if typ == "assistant":
+                # 一次模型响应按内容块拆成多行(共享 message.id),去重后才是真实调用数
+                mid = (row.get("message") or {}).get("id")
+                if not mid or mid not in seen_ids:
+                    if mid:
+                        seen_ids.add(mid)
+                    day["calls"] += 1
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        bt = block.get("type")
+                        if bt == "tool_use":
+                            day["tools"] += 1
+                            try:
+                                day["est"] += _est_tokens(json.dumps(block.get("input") or {}, ensure_ascii=False))
+                            except (TypeError, ValueError):
+                                pass
+                        elif bt == "text":
+                            day["est"] += _est_tokens(block.get("text"))
+                        elif bt == "thinking":
+                            day["est"] += _est_tokens(block.get("thinking"))
+            elif not row.get("isMeta") and not row.get("isSidechain"):
+                # 只统计真实用户输入,跳过命令回显/系统注入
+                if isinstance(content, str) and content and not content.startswith("<"):
+                    day["turns"] += 1
+                    day["est"] += _est_tokens(content)
+    return {"days": days, "model": model}
+
+
+def scan_qodercli(bounds, cache):
+    fc = cache.setdefault("qodercli", {})
+    root = _qodercli_dir()
+    paths = []
+    if os.path.isdir(root):
+        paths = glob.glob(os.path.join(root, "*", "*.jsonl"))
+        paths += glob.glob(os.path.join(root, "*", "transcript", "*.jsonl"))
+        paths += glob.glob(os.path.join(root, "*", "*", "subagents", "*.jsonl"))
+
+    stale = set(fc)
+    stale.discard("_model")
+    latest_model = fc.get("_model")
+    latest_mtime = -1
+    for path in paths:
+        stale.discard(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_size}|{st.st_mtime_ns}"
+        entry = fc.get(path)
+        if isinstance(entry, dict) and entry.get("sig") == sig:
+            if entry.get("model") and st.st_mtime_ns > latest_mtime:
+                latest_mtime = st.st_mtime_ns
+                latest_model = entry["model"]
+            continue
+        try:
+            parsed = _parse_qodercli_file(path)
+        except OSError:
+            continue
+        fc[path] = {"sig": sig, "days": parsed["days"], "model": parsed["model"],
+                    "sub": (os.sep + "subagents" + os.sep) in path}
+        cache["_dirty"] = True
+        if parsed["model"] and st.st_mtime_ns > latest_mtime:
+            latest_mtime = st.st_mtime_ns
+            latest_model = parsed["model"]
+    for path in stale:
+        fc.pop(path, None)
+        cache["_dirty"] = True
+    if latest_model and fc.get("_model") != latest_model:
+        fc["_model"] = latest_model
+        cache["_dirty"] = True
+
+    B = _empty_qodercli()["ranges"]
+    for path, entry in fc.items():
+        if path == "_model" or not isinstance(entry, dict):
+            continue
+        is_sub = entry.get("sub", False)
+        first_day = min(entry.get("days", {}), default=None)
+        for dk, day in entry.get("days", {}).items():
+            try:
+                d = date.fromisoformat(dk)
+            except ValueError:
+                continue
+            ks = classify_date(d, bounds)
+            if not ks:
+                continue
+            dur_ms = int(day.get("active", 0.0) * 1000)
+            for k in ks:
+                b = B[k]
+                if is_sub:
+                    # 子 agent transcript:不算人类会话/消息,首个活跃日计 1 个子 agent
+                    if dk == first_day:
+                        b["sub_agents"] += 1
+                else:
+                    b["sessions"] += 1
+                    b["turns"] += day.get("turns", 0)
+                b["calls"] += day.get("calls", 0)
+                b["tools"] += day.get("tools", 0)
+                b["est"] += int(day.get("est", 0))
+                b["duration"] += dur_ms
+    return {"ranges": B, "model": fc.get("_model")}
 
 
 def scan_hermes(bounds, cache):
@@ -3948,6 +4118,7 @@ def compute():
     gk = _safe_scan("grok", lambda: scan_grok(bounds, cache), _empty_grok, errors)
     qd = _safe_scan("qoderwork", lambda: scan_qoder(bounds, cache), _empty_qoder, errors)
     qi = _safe_scan("qoder_ide", lambda: scan_qoder_ide(bounds, cache), _empty_qoder_ide, errors)
+    qcli = _safe_scan("qodercli", lambda: scan_qodercli(bounds, cache), _empty_qodercli, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
@@ -4042,6 +4213,14 @@ def compute():
     qwranges = {k: qoderwork_range(qd["ranges"][k]) for k in RANGE_KEYS}
     qranges = {k: qoder_range(qi["ranges"][k]) for k in RANGE_KEYS}
 
+    def qodercli_range(b):
+        r = qoderwork_range(b)
+        r["tools"] = b.get("tools", 0)
+        r["est"] = int(b.get("est", 0))
+        return r
+
+    qcliranges = {k: qodercli_range(qcli["ranges"][k]) for k in RANGE_KEYS}
+
     def hermes_range(b):
         denom = b["cr"] + b["cw"] + b["in"]
         hit = (b["cr"] / denom * 100) if denom else 0.0
@@ -4111,6 +4290,10 @@ def compute():
         "qoder": {
             "ranges": qranges,
             "model": qi.get("model"),
+        },
+        "qodercli": {
+            "ranges": qcliranges,
+            "model": qcli.get("model"),
         },
         "hermes": {
             "ranges": hranges,

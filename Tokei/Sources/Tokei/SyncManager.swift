@@ -685,6 +685,7 @@ final class SyncManager {
         device_id=\(quotedDevice)
         device_pathspec=":(icase,literal)$device_id.json"
         exclude_pathspec=":(exclude,icase,literal)$device_id.json"
+        junk_pathspec=":(exclude,icase)*.ds_store"
         peer_json_pathspec=":(top,glob)*.json"
 
         cleanup_temporary_files() {
@@ -748,7 +749,7 @@ final class SyncManager {
             || fail 23 "无法恢复其他设备快照"
         fi
         other_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
-          -- . "$exclude_pathspec") \
+          -- . "$exclude_pathspec" "$junk_pathspec") \
           || fail 23 "无法检查同步仓库的工作区状态"
         [ -z "$other_changes" ] \
           || fail 23 "同步仓库包含本机快照以外的未提交改动"
@@ -796,7 +797,7 @@ final class SyncManager {
           || fail 24 "本机设备快照缺失或存在大小写重名文件"
 
         other_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
-          -- . "$exclude_pathspec") \
+          -- . "$exclude_pathspec" "$junk_pathspec") \
           || fail 23 "无法检查生成快照后的工作区状态"
         [ -z "$other_changes" ] \
           || fail 23 "生成快照时检测到其他文件被修改"
@@ -806,7 +807,8 @@ final class SyncManager {
           sync_git commit --no-gpg-sign --only -m "tokei sync $device_id" -- "$device_pathspec" \
             || fail 26 "提交本机快照失败"
         fi
-        post_commit_changes=$(sync_git status --porcelain=v1 --untracked-files=all) \
+        post_commit_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
+          -- . "$junk_pathspec") \
           || fail 23 "无法检查提交后的工作区状态"
         [ -z "$post_commit_changes" ] \
           || fail 23 "提交后工作区仍有改动，已停止"

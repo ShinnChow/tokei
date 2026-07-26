@@ -34,6 +34,7 @@ struct PanelView: View {
     @AppStorage("showGrok") private var showGrok = true
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
+    @AppStorage("showQoderCli") private var showQoderCli = true
     @AppStorage("showHermes") private var showHermes = true
     @AppStorage("showZcode") private var showZcode = true
     @AppStorage("showMimoCode") private var showMimoCode = true
@@ -44,7 +45,7 @@ struct PanelView: View {
     @AppStorage("showQwenCode") private var showQwenCode = true
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showHermes, showZcode, showMimoCode,
+        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
@@ -189,6 +190,12 @@ struct PanelView: View {
             .buttonStyle(.plain)
             .tip("主页")
             updatePill
+            if store.syncFailStreak >= 3 {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .help("多设备同步已连续失败 \(store.syncFailStreak) 次：\(store.syncStatus)\n\(store.syncDetail)")
+            }
             Spacer()
             if hasMultipleDevices {
                 deviceScopePicker
@@ -251,6 +258,7 @@ struct PanelView: View {
         let cr = u.claude.ranges.get(sel), xr = u.codex.ranges.get(sel)
         let gr = u.gemini.ranges.get(sel), kr = u.grok.ranges.get(sel)
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
+        let qclir = u.qodercli.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
         let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
@@ -267,10 +275,12 @@ struct PanelView: View {
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0,
                          tint: Theme.grok, content: AnyView(grokBlock(kr, model: u.grok.model))),
-            ToolCardItem(id: "qoder", name: "Qoder", visible: showQoder, active: qr.calls > 0,
+            ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder, active: qr.calls > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
             ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
                          tint: Theme.qoderwork, content: AnyView(qoderworkBlock(u.qoderwork, qwr))),
+            ToolCardItem(id: "qodercli", name: "Qoder CLI", visible: showQoderCli, active: qclir.calls > 0,
+                         tint: Theme.qodercli, content: AnyView(qodercliBlock(u.qodercli, qclir))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr))),
             ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
@@ -495,7 +505,7 @@ struct PanelView: View {
     @ViewBuilder
     func qoderIdeBlock(_ q: QoderIdeStat, _ r: QoderIdeRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain("Qoder", tint: Theme.qoder)
+            cardHeadPlain("Qoder Desktop", tint: Theme.qoder)
             if r.calls > 0 {
                 let total = r.in + r.cached + r.out
                 if total > 0 {
@@ -503,7 +513,7 @@ struct PanelView: View {
                 }
                 metricGrid({
                     var items: [Metric] = [
-                        .init("terminal", "调用", "\(r.calls)"),
+                        .init("terminal", "模型调用", "\(r.calls)"),
                         .init("person.2", "会话", "\(r.sessions)"),
                     ]
                     if r.sub_agents > 0 {
@@ -546,7 +556,7 @@ struct PanelView: View {
             if r.calls > 0 {
                 metricGrid({
                     var items: [Metric] = [
-                        .init("terminal", "调用", "\(r.calls)"),
+                        .init("terminal", "任务", "\(r.calls)"),
                         .init("person.2", "会话", "\(r.sessions)"),
                         .init("clock", "耗时", Fmt.duration(r.duration)),
                     ]
@@ -554,7 +564,7 @@ struct PanelView: View {
                         items.append(.init("point.3.connected.trianglepath.dotted", "子agent", "\(r.sub_agents)"))
                     }
                     if r.turns > 0 {
-                        items.append(.init("bubble.left.and.bubble.right", "消息数", Fmt.human(r.turns)))
+                        items.append(.init("bubble.left.and.bubble.right", "模型调用", Fmt.human(r.turns)))
                     }
                     if r.ctx > 0 {
                         items.append(.init("chart.bar.fill", "平均深度", String(format: "%.0f%%", r.ctx)))
@@ -563,6 +573,40 @@ struct PanelView: View {
                 }(), tint: Theme.qoderwork)
                 if let model = q.model, !model.isEmpty {
                     modelBadge(model, tint: Theme.qoderwork)
+                }
+            } else {
+                emptyHint
+            }
+        }
+    }
+
+    // MARK: - Qoder CLI 卡片(仅活跃维度:qodercli 本地不落 token 数)
+    @ViewBuilder
+    func qodercliBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHeadPlain("Qoder CLI", tint: Theme.qodercli)
+            if r.calls > 0 {
+                if r.est > 0 {
+                    CostHeadline(value: "≈" + Fmt.human(r.est), caption: "\(sel.label) tokens(估)", tint: Theme.qodercli)
+                        .help("按生成内容估算（汉字≈1 token、其余 4 字符≈1 token）\n不含每次调用重发的上下文，非计费口径")
+                }
+                metricGrid({
+                    var items: [Metric] = [
+                        .init("terminal", "模型调用", "\(r.calls)"),
+                        .init("person.2", "会话", "\(r.sessions)"),
+                        .init("bubble.left.and.bubble.right", "消息数", Fmt.human(r.turns)),
+                        .init("clock", "活跃", Fmt.duration(r.duration)),
+                    ]
+                    if r.tools > 0 {
+                        items.append(.init("wrench.and.screwdriver", "工具调用", Fmt.human(r.tools)))
+                    }
+                    if r.sub_agents > 0 {
+                        items.append(.init("point.3.connected.trianglepath.dotted", "子agent", "\(r.sub_agents)"))
+                    }
+                    return items
+                }(), tint: Theme.qodercli)
+                if let model = q.model, !model.isEmpty {
+                    modelBadge(model, tint: Theme.qodercli)
                 }
             } else {
                 emptyHint
@@ -1333,8 +1377,9 @@ struct PanelView: View {
                 settingsRow("Codex", tint: Theme.codex, isOn: $showCodex)
                 settingsRow("Gemini", tint: Theme.gemini, isOn: $showGemini)
                 settingsRow("Grok", tint: Theme.grok, isOn: $showGrok)
-                settingsRow("Qoder", tint: Theme.qoder, isOn: $showQoder)
+                settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
+                settingsRow("Qoder CLI", tint: Theme.qodercli, isOn: $showQoderCli)
                 settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
                 settingsRow("ZCode", tint: Theme.zcode, isOn: $showZcode)
                 settingsRow("MiMoCode", tint: Theme.mimocode, isOn: $showMimoCode)
