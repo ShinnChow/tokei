@@ -1084,6 +1084,32 @@ def _codex_replayed_event_indexes(file_cache):
             best = max(best, _codex_prefix_match_count(child_events, parent_events))
         if best >= 2:
             drops.setdefault(file_path, set()).update(range(best))
+
+    # 兜底:文件开头同一秒内 ≥5 条 token 事件必是回放转储(真实 API 一秒内
+    # 不可能完成 5 次响应)。覆盖从父会话中段(如 compact 后)分叉、
+    # 累计值与父文件开头对不上导致前缀匹配失效的场景。
+    for file_path, entry in ordered:
+        events = entry.get("events") or []
+        if len(events) < 5:
+            continue
+        already = drops.get(file_path, set())
+        start = 0
+        while start in already:
+            start += 1
+        if start + 4 >= len(events):
+            continue
+        first_ev = events[start]
+        if not isinstance(first_ev, list) or not first_ev:
+            continue
+        burst_sec = str(first_ev[0])[:19]
+        n = start
+        while n < len(events):
+            ev = events[n]
+            if not isinstance(ev, list) or not ev or str(ev[0])[:19] != burst_sec:
+                break
+            n += 1
+        if n - start >= 5:
+            drops.setdefault(file_path, set()).update(range(start, n))
     return drops
 
 

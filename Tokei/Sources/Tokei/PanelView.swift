@@ -586,10 +586,6 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain("Qoder CLI", tint: Theme.qodercli)
             if r.calls > 0 {
-                if r.est > 0 {
-                    CostHeadline(value: "≈" + Fmt.human(r.est), caption: "\(sel.label) tokens(估)", tint: Theme.qodercli)
-                        .help("按生成内容估算（汉字≈1 token、其余 4 字符≈1 token）\n不含每次调用重发的上下文，非计费口径")
-                }
                 metricGrid({
                     var items: [Metric] = [
                         .init("terminal", "模型调用", "\(r.calls)"),
