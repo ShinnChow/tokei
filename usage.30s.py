@@ -143,6 +143,7 @@ def _writable_path(name):
 PRICING_FILE = _writable_path("pricing.json")
 OVERRIDES_FILE = _writable_path("pricing_overrides.json")
 CODEX_QUOTA_CACHE = _writable_path("codex_quota_cache.json")
+CODEX_RESET_CARDS_CACHE = _writable_path("codex_reset_cards_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 
@@ -930,6 +931,12 @@ def _claude_usage(line, want_dt=False):
 # ---------- Codex ----------
 _CODEX_QUOTA_TTL = 30
 _CODEX_QUOTA_FALLBACK_TTL = 300
+_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+_CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
+_CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+_CODEX_RESET_CARDS_REFRESH_INTERVAL = 24 * 3600
+_CODEX_RESET_CARDS_RETRY_INTERVAL = 6 * 3600
+_CODEX_RESET_CARDS_MAX_RESPONSE_BYTES = 256 * 1024
 
 
 def _atomic_write_json(path, data):
@@ -994,6 +1001,55 @@ def _cached_codex_live_limits(max_age):
     return limits, cached.get("plan")
 
 
+def _decode_jwt_claims(token):
+    if not isinstance(token, str) or token.count(".") < 2:
+        return {}
+    try:
+        import base64
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload))
+        return decoded if isinstance(decoded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _codex_auth_context(auth):
+    if not isinstance(auth, dict):
+        return {}
+    nested = auth.get("tokens")
+    tokens = nested if isinstance(nested, dict) else {}
+
+    def value(*names):
+        for source in (tokens, auth):
+            for name in names:
+                item = source.get(name)
+                if isinstance(item, str) and item:
+                    return item
+        return None
+
+    access_token = value("access_token", "accessToken")
+    if not access_token:
+        return {}
+    id_token = value("id_token", "idToken")
+    claims = _decode_jwt_claims(access_token)
+    id_claims = _decode_jwt_claims(id_token)
+    auth_claim = claims.get("https://api.openai.com/auth")
+    id_auth_claim = id_claims.get("https://api.openai.com/auth")
+    auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
+    id_auth_claim = id_auth_claim if isinstance(id_auth_claim, dict) else {}
+    account_id = value("account_id", "accountId")
+    account_id = account_id or auth_claim.get("chatgpt_account_id")
+    account_id = account_id or id_auth_claim.get("chatgpt_account_id")
+    identity = account_id or claims.get("sub") or id_claims.get("sub") or access_token
+    return {
+        "access_token": access_token,
+        "account_id": str(account_id) if account_id else None,
+        "account_key": hashlib.sha256(str(identity).encode("utf-8")).hexdigest(),
+        "auth_key": hashlib.sha256(access_token.encode("utf-8")).hexdigest(),
+    }
+
+
 def fetch_codex_live_limits():
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return None
@@ -1001,25 +1057,28 @@ def fetch_codex_live_limits():
     if cached:
         return cached
     auth = _load_json(CODEX_AUTH, {})
-    tokens = auth.get("tokens") or {}
-    access_token = tokens.get("access_token")
+    auth_context = _codex_auth_context(auth)
+    access_token = auth_context.get("access_token")
     if not access_token:
         return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
     try:
         import urllib.request
-        req = urllib.request.Request(
-            "https://chatgpt.com/backend-api/wham/usage",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "User-Agent": "Tokei",
-            },
-        )
-        account_id = tokens.get("account_id")
+        from urllib.parse import urlparse
+        req = urllib.request.Request(_CODEX_USAGE_URL)
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", "Tokei")
+        req.add_unredirected_header("Authorization", f"Bearer {access_token}")
+        account_id = auth_context.get("account_id")
         if account_id:
-            req.add_header("ChatGPT-Account-Id", account_id)
+            req.add_unredirected_header("ChatGPT-Account-Id", account_id)
         with urllib.request.urlopen(req, timeout=3) as res:
-            data = json.load(res)
+            final_url = urlparse(res.geturl())
+            if final_url.scheme != "https" or final_url.hostname != "chatgpt.com":
+                return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+            raw = res.read(_CODEX_USAGE_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _CODEX_USAGE_MAX_RESPONSE_BYTES:
+            return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+        data = json.loads(raw)
         limits = _codex_live_to_limits(data)
         if not limits:
             return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
@@ -1032,6 +1091,148 @@ def fetch_codex_live_limits():
         return limits, plan
     except Exception:
         return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+
+
+def _normalize_codex_reset_cards(data, now_epoch):
+    if not isinstance(data, dict) or not isinstance(data.get("credits"), list):
+        return None
+    expires = []
+    for credit in data["credits"]:
+        if not isinstance(credit, dict) or credit.get("status") != "available":
+            continue
+        if credit.get("is_supported_by_plan") is False:
+            continue
+        expires_at = parse_ts(credit.get("expires_at") or "")
+        if expires_at is None:
+            continue
+        epoch = int(expires_at.timestamp())
+        if epoch > now_epoch:
+            expires.append(epoch)
+    ordered = sorted(expires)
+    return {
+        "count": len(ordered),
+        "expires": ordered,
+        "updated": int(now_epoch),
+    }
+
+
+def _cached_codex_reset_cards(state, now_epoch):
+    cards = state.get("cards") if isinstance(state, dict) else None
+    if not isinstance(cards, dict):
+        return {}
+    expires = []
+    for value in cards.get("expires") or []:
+        try:
+            epoch = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if epoch > now_epoch:
+            expires.append(epoch)
+    expires.sort()
+    return {
+        "count": len(expires),
+        "expires": expires,
+        "updated": cards.get("updated"),
+    }
+
+
+def _codex_reset_cards_next_attempt(cards, now_epoch):
+    next_daily = int(now_epoch + _CODEX_RESET_CARDS_REFRESH_INTERVAL)
+    expires = []
+    for value in cards.get("expires") or []:
+        try:
+            epoch = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if epoch > now_epoch:
+            expires.append(epoch)
+    return min(next_daily, min(expires) + 60) if expires else next_daily
+
+
+def _save_codex_reset_cards_state(state):
+    try:
+        _atomic_write_json(CODEX_RESET_CARDS_CACHE, state)
+        os.chmod(CODEX_RESET_CARDS_CACHE, 0o600)
+    except Exception:
+        pass
+
+
+def fetch_codex_reset_cards(now_epoch=None):
+    """Return available reset-card expirations with a persistent low-frequency cache."""
+    if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
+        return {}
+    now_epoch = int(datetime.now().timestamp()) if now_epoch is None else int(now_epoch)
+    auth = _load_json(CODEX_AUTH, {})
+    auth_context = _codex_auth_context(auth)
+    access_token = auth_context.get("access_token")
+    account_key = auth_context.get("account_key")
+    auth_key = auth_context.get("auth_key")
+    if not access_token or not account_key or not auth_key:
+        return {}
+
+    state = _load_json(CODEX_RESET_CARDS_CACHE, {})
+    if not isinstance(state, dict) or state.get("account_key") != account_key:
+        state = {"account_key": account_key, "auth_key": auth_key}
+    elif state.get("auth_key") and state.get("auth_key") != auth_key:
+        # Codex refreshed or replaced the token after an auth failure. Retry once now.
+        state["next_attempt_at"] = 0
+        state.pop("last_error", None)
+    state["auth_key"] = auth_key
+    cached = _cached_codex_reset_cards(state, now_epoch)
+    try:
+        next_attempt_at = int(state.get("next_attempt_at") or 0)
+    except (TypeError, ValueError, OverflowError):
+        next_attempt_at = 0
+    if now_epoch < next_attempt_at:
+        return cached
+
+    try:
+        import urllib.request
+        from urllib.parse import urlparse
+        request = urllib.request.Request(_CODEX_RESET_CARDS_URL)
+        request.add_header("Accept", "application/json")
+        request.add_header("User-Agent", "Tokei")
+        request.add_unredirected_header("Authorization", f"Bearer {access_token}")
+        account_id = auth_context.get("account_id")
+        if account_id:
+            request.add_unredirected_header("ChatGPT-Account-Id", str(account_id))
+        with urllib.request.urlopen(request, timeout=3) as response:
+            final_url = urlparse(response.geturl())
+            if final_url.scheme != "https" or final_url.hostname != "chatgpt.com":
+                raise ValueError("unexpected Codex reset-card redirect")
+            raw = response.read(_CODEX_RESET_CARDS_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES:
+            raise ValueError("Codex reset-card response is too large")
+        cards = _normalize_codex_reset_cards(json.loads(raw), now_epoch)
+        if cards is None:
+            raise ValueError("invalid Codex reset-card response")
+        state = {
+            "account_key": account_key,
+            "auth_key": auth_key,
+            "fetched_at": now_epoch,
+            "last_attempt_at": now_epoch,
+            "next_attempt_at": _codex_reset_cards_next_attempt(cards, now_epoch),
+            "cards": cards,
+        }
+        _save_codex_reset_cards_state(state)
+        return cards
+    except Exception as exc:
+        status = getattr(exc, "code", None)
+        if status in (401, 403):
+            state["last_error"] = "auth"
+        elif status in (404, 410):
+            state["last_error"] = "unsupported"
+        else:
+            state["last_error"] = "request"
+        state["last_attempt_at"] = now_epoch
+        retry_interval = (
+            _CODEX_RESET_CARDS_REFRESH_INTERVAL
+            if status in (404, 410)
+            else _CODEX_RESET_CARDS_RETRY_INTERVAL
+        )
+        state["next_attempt_at"] = now_epoch + retry_interval
+        _save_codex_reset_cards_state(state)
+        return cached
 
 
 def _codex_event_key(event):
@@ -5063,6 +5264,8 @@ def compute():
 
     plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
     grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
+    codex_reset_cards = _safe_scan(
+        "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
     result = {
         "claude": {
@@ -5079,6 +5282,7 @@ def compute():
             "ranges": xranges,
             "p5": p5, "pw": pw, "r5": r5, "rw": rw,
             "plan": cx["plan"],
+            "reset_cards": codex_reset_cards if codex_reset_cards.get("count", 0) > 0 else None,
         },
         "gemini": {
             "ranges": granges,

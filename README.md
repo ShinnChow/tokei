@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编程工具** 上的用量、成本和性能——全部基于本地日志，零网络流量。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
 
 ### 支持的工具
 
@@ -80,8 +80,10 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 - 可自定义间隔时间
 
 ### 隐私优先
-- 仅读取本地日志文件，从不联网上报
-- 唯一的网络操作：手动执行 `--update-prices` 更新价格表
+- Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据
+- Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
+- Grok 实时额度默认关闭，可选择只读本地日志
+- 其余联网操作仅用于检查/下载更新，以及手动更新模型价格表
 
 ## 快速开始
 
@@ -183,6 +185,21 @@ chmod +x ~/.tokei/tokei-sync.sh
 > CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
 
 ## 更新日志
+
+### v1.0.19
+
+- feat: Codex 卡片显示可用重置卡数量、最近到期时间及完整北京时间列表
+- feat: Grok Build 显示周额度、重置时间和分产品用量，菜单栏可选择 Grok 作为额度来源
+- feat: 新增最近 7 天额度历史轨迹，每分钟记录一次本地快照
+- fix: 补齐 Hermes 0.19 迁移后的历史与辅助用量
+- fix: Codex 额度活动基线跨扫描间隙保持稳定，事件缓存拆分后刷新性能更平稳
+- privacy: 重置卡仅缓存数量和到期时间；按天或最近一张到期后更新，未登录及接口失败静默降级
+
+#### 社区贡献
+
+- [**CherryLover**](https://github.com/CherryLover)：贡献 [Grok 周额度、重置时间与菜单栏额度来源 #34](https://github.com/cclank/tokei/pull/34)
+- [**刘巍峰**](https://github.com/liuweifeng)：修复 [Hermes 0.19 历史与辅助用量 #36](https://github.com/cclank/tokei/pull/36)
+- [**AMortalsOdyssey**](https://github.com/AMortalsOdyssey)：贡献 [额度历史轨迹 #37](https://github.com/cclank/tokei/pull/37)
 
 ### v1.0.16
 - chore: 自动检查更新频率从 24 小时缩短为 6 小时

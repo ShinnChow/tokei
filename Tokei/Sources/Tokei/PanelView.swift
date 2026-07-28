@@ -8,6 +8,7 @@ struct PanelView: View {
     @State private var sel: RangeKey = .today
     @State private var claudeModelsOpen = false
     @State private var codexModelsOpen = false
+    @State private var codexResetCardsOpen = false
     @State private var geminiModelsOpen = false
     @State private var grokModelsOpen = false
     @State private var zcodeModelsOpen = false
@@ -293,7 +294,9 @@ struct PanelView: View {
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
                              u.claude.q7 != nil || u.claude.qf != nil,
                          tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
-            ToolCardItem(id: "codex", name: "Codex", visible: showCodex, active: xr.sessions > 0,
+            ToolCardItem(id: "codex", name: "Codex", visible: showCodex,
+                         active: xr.sessions > 0 || u.codex.p5 != nil || u.codex.pw != nil ||
+                             (u.codex.reset_cards?.count ?? 0) > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini, active: gr.sessions > 0,
                          tint: Theme.gemini, content: AnyView(geminiBlock(gr))),
@@ -411,24 +414,98 @@ struct PanelView: View {
                     tokenModelDisclosure(r.models, open: $codexModelsOpen, tint: Theme.codex,
                                          reasonIncludedInOutput: true)
                 }
-                if x.pw != nil { thinDivider }
-                if let pw = x.pw {
-                    quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
-                }
-                if let plan = x.plan {
-                    HStack {
-                        Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
-                        Spacer()
-                        Text(plan)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.tSecondary)
-                            .padding(.horizontal, 7).padding(.vertical, 2)
-                            .background(Capsule().fill(Theme.codex.opacity(0.16)))
-                    }
-                }
             } else {
                 emptyHint
             }
+            if x.pw != nil || (x.reset_cards?.count ?? 0) > 0 {
+                thinDivider
+            }
+            if let pw = x.pw {
+                quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
+            }
+            if let cards = x.reset_cards, cards.count > 0 {
+                codexResetCardsRow(cards)
+            }
+            if let plan = x.plan {
+                HStack {
+                    Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text(plan)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tSecondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.codex.opacity(0.16)))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    func codexResetCardsRow(_ cards: CodexResetCards) -> some View {
+        let expirations = cards.expires.sorted()
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                codexResetCardsOpen.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.codex)
+                Text("重置卡")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tSecondary)
+                Text("\(cards.count) 张")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+                Spacer(minLength: 6)
+                if let nearest = expirations.first {
+                    Text("最近 \(Fmt.beijingTime(nearest)) · 北京时间")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                Image(systemName: codexResetCardsOpen ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Theme.tTertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("查看重置卡到期时间")
+
+        if codexResetCardsOpen {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("到期时间")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text("北京时间 UTC+8")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                ForEach(Array(expirations.enumerated()), id: \.offset) { index, expiry in
+                    HStack(spacing: 7) {
+                        Text("\(index + 1)")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.codex)
+                            .frame(width: 16, height: 16)
+                            .background(Circle().fill(Theme.codex.opacity(0.14)))
+                        Text("完整重置")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(Theme.tSecondary)
+                        Spacer()
+                        Text(Fmt.beijingTime(expiry, full: true))
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(Theme.tPrimary)
+                    }
+                }
+            }
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
         }
     }
 

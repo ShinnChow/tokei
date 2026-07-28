@@ -151,6 +151,13 @@ struct CodexStat: Codable {
     var r5: Int?
     var rw: Int?
     var plan: String?
+    var reset_cards: CodexResetCards?
+}
+
+struct CodexResetCards: Codable {
+    var count: Int
+    var expires: [Int]
+    var updated: Int?
 }
 
 struct GeminiModelStat: Codable, Identifiable {
@@ -712,6 +719,15 @@ enum Fmt {
         let d = Date(timeIntervalSince1970: TimeInterval(e))
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm"
+        return f.string(from: d)
+    }
+
+    static func beijingTime(_ epoch: Int, full: Bool = false) -> String {
+        let d = Date(timeIntervalSince1970: TimeInterval(epoch))
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = full ? "yyyy-MM-dd HH:mm:ss" : "MM-dd HH:mm"
         return f.string(from: d)
     }
 

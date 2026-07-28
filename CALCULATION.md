@@ -250,6 +250,12 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 直接使用消
 
 兼容 Codex 新旧返回结构:旧结构通常是 primary=5h、secondary=周;新结构可能只有 primary=周。
 
+重置卡使用当前 Codex 登录态只读查询
+`/backend-api/wham/rate-limit-reset-credits`。本地仅缓存可用数量和到期时间，不保存卡片
+ID、邀请信息或个人资料；每天最多自动查询一次，最近一张卡到期后立即更新，失败后
+6 小时再试。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
+Codex 刷新登录 Token 后立即重试。
+
 ### Grok Build(credits)
 
 默认**只读本地日志**，不访问网络：
