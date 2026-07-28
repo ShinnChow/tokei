@@ -98,7 +98,82 @@ struct QuotaHistoryStoreCheck {
         )
         try expect(reloaded.points.count == 1, "points outside retention should be pruned")
 
+        try checkProjection()
         print("quota history store checks passed")
+    }
+
+    private static func checkProjection() throws {
+        let base = 1_800_000_000
+        let points = [
+            historyPoint(base, 80, 60, 20, activity: []),
+            historyPoint(base + 60, 80, 60, 20, activity: []),
+            historyPoint(base + 120, 80, 60, 20, activity: []),
+            historyPoint(
+                base + 180,
+                79,
+                59.5,
+                19.5,
+                activity: [
+                    QuotaModelActivity(model: "Claude Opus", tokenDelta: 300),
+                    QuotaModelActivity(model: "Claude Fable", tokenDelta: 100),
+                ]
+            ),
+            historyPoint(
+                base + 240,
+                79,
+                59.5,
+                19.5,
+                activity: [
+                    QuotaModelActivity(model: "Claude Fable", tokenDelta: 200),
+                    QuotaModelActivity(model: "Claude Opus", tokenDelta: 600),
+                ]
+            ),
+            historyPoint(base + 300, 79, 59.5, 19.5, activity: []),
+        ]
+        let projection = QuotaHistoryProjection(points: points, tool: .claude)
+
+        try expect(projection.latestValues["5 小时"] == 79, "projection should keep the latest value")
+        try expect(projection.latestDatumIDs.count == 3, "each series should have one latest marker")
+        try expect(projection.lineData.count == 12, "flat plateaus should compact to transition edges")
+        try expect(projection.markerData.count == 6, "activity and latest markers should be preserved")
+        try expect(projection.dropEvents.count == 3, "drops should be detected for every Claude window")
+        try expect(projection.activityEvents.count == 2, "detailed model activity should remain visible")
+        try expect(projection.hoverSamples.count == 6, "every sampled minute should remain hoverable")
+        let nearest = projection.nearestHoverSample(
+            to: Date(timeIntervalSince1970: TimeInterval(base + 250))
+        )
+        try expect(nearest?.timestamp.timeIntervalSince1970 == TimeInterval(base + 240),
+                   "hover should find the nearest sampled minute")
+        try expect(nearest?.rows.map(\.window) == ["5 小时", "周 · 全部", "周 · Fable"],
+                   "hover should include every available quota window")
+        try expect(nearest?.activity.map(\.model) == ["Claude Fable", "Claude Opus"],
+                   "hover should retain activity for the selected minute")
+
+        let fableMarker = projection.markerData.first {
+            $0.window == "周 · Fable" && !$0.activity.isEmpty
+        }
+        try expect(
+            fableMarker?.activity.map(\.model) == ["Claude Fable"],
+            "Fable markers should only include Fable activity"
+        )
+    }
+
+    private static func historyPoint(
+        _ timestamp: Int,
+        _ fiveHour: Double,
+        _ week: Double,
+        _ fable: Double,
+        activity: [QuotaModelActivity]
+    ) -> QuotaHistoryPoint {
+        QuotaHistoryPoint(
+            timestamp: timestamp,
+            claudeFiveHourRemaining: fiveHour,
+            claudeWeekRemaining: week,
+            claudeFableWeekRemaining: fable,
+            codexWeekRemaining: 50,
+            claudeActivity: activity,
+            codexActivity: []
+        )
     }
 
     private static func expect(

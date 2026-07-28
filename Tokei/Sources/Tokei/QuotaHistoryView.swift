@@ -1,11 +1,7 @@
 import Charts
 import SwiftUI
 
-private enum QuotaHistoryTool: String, CaseIterable, Identifiable {
-    case claude = "Claude"
-    case codex = "Codex"
-
-    var id: String { rawValue }
+private extension QuotaHistoryTool {
     var tint: Color { self == .claude ? Theme.claude : Theme.codex }
 }
 
@@ -31,23 +27,10 @@ private enum QuotaHistorySpan: Int, CaseIterable, Identifiable {
     }
 }
 
-private struct QuotaChartDatum: Identifiable {
-    var timestamp: Date
-    var remaining: Double
-    var window: String
-    var activity: [QuotaModelActivity]
-
-    var id: String { "\(Int(timestamp.timeIntervalSince1970)):\(window)" }
-}
-
-private struct QuotaDropEvent: Identifiable {
-    var timestamp: Date
-    var durationMinutes: Int
-    var window: String
-    var drop: Double
-    var activity: [QuotaModelActivity]
-
-    var id: String { "\(Int(timestamp.timeIntervalSince1970)):\(window)" }
+private struct QuotaHistoryFrame {
+    var now: Date
+    var start: Date
+    var projection: QuotaHistoryProjection
 }
 
 struct QuotaHistoryView: View {
@@ -55,25 +38,22 @@ struct QuotaHistoryView: View {
     @State private var tool: QuotaHistoryTool = .claude
     @State private var span: QuotaHistorySpan = .day
 
-    private var now: Date { Date() }
-    private var start: Date { now.addingTimeInterval(TimeInterval(-span.rawValue * 60 * 60)) }
-    private var recentPoints: [QuotaHistoryPoint] { history.points(since: start) }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        let frame = makeFrame()
+        return VStack(alignment: .leading, spacing: 13) {
             controls
             Card(tint: tool.tint) {
                 VStack(alignment: .leading, spacing: 12) {
-                    summary
-                    if chartData.isEmpty {
+                    summary(frame.projection)
+                    if frame.projection.lineData.isEmpty {
                         emptyState
                     } else {
-                        quotaChart
+                        quotaChart(frame)
                     }
                 }
             }
-            changesSection
-            activitySection
+            changesSection(frame.projection)
+            activitySection(frame.projection)
             Text("额度曲线来自本机定时快照；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。")
                 .font(.system(size: 9.5))
                 .foregroundStyle(Theme.tTertiary)
@@ -111,12 +91,12 @@ struct QuotaHistoryView: View {
         }
     }
 
-    private var summary: some View {
+    private func summary(_ projection: QuotaHistoryProjection) -> some View {
         HStack(spacing: 13) {
-            ForEach(windowNames, id: \.self) { window in
+            ForEach(projection.windowNames, id: \.self) { window in
                 quotaSummary(
                     title: summaryTitle(for: window),
-                    value: latestValue(window: window),
+                    value: projection.latestValues[window],
                     tint: seriesColor(for: window)
                 )
             }
@@ -124,12 +104,12 @@ struct QuotaHistoryView: View {
                 Text("采样点")
                     .font(.system(size: 9.5))
                     .foregroundStyle(Theme.tTertiary)
-                Text("\(recentPoints.count)")
+                Text("\(projection.points.count)")
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.tPrimary)
             }
             Spacer()
-            if let largest = dropEvents.max(by: { $0.drop < $1.drop }) {
+            if let largest = projection.dropEvents.max(by: { $0.drop < $1.drop }) {
                 VStack(alignment: .trailing, spacing: 3) {
                     Text("最大区间下降")
                         .font(.system(size: 9.5))
@@ -153,59 +133,18 @@ struct QuotaHistoryView: View {
         }
     }
 
-    private var quotaChart: some View {
-        Chart {
-            ForEach(chartData) { item in
-                LineMark(
-                    x: .value("时间", item.timestamp),
-                    y: .value("剩余额度", item.remaining),
-                    series: .value("额度窗口", item.window)
-                )
-                .foregroundStyle(by: .value("额度窗口", item.window))
-                .interpolationMethod(.stepEnd)
-                .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-
-                let isLatest = item.id == latestDatumID(for: item.window)
-                if !item.activity.isEmpty || isLatest {
-                    PointMark(
-                        x: .value("活动时间", item.timestamp),
-                        y: .value("活动额度", item.remaining)
-                    )
-                    .foregroundStyle(by: .value("额度窗口", item.window))
-                    .symbolSize(isLatest ? 16 : 8)
-                    .opacity(isLatest ? 1 : 0.62)
+    private func quotaChart(_ frame: QuotaHistoryFrame) -> some View {
+        QuotaHistoryChart(
+            projection: frame.projection,
+            start: frame.start,
+            end: frame.now,
+            span: span,
+            colors: Dictionary(
+                uniqueKeysWithValues: frame.projection.windowNames.map {
+                    ($0, seriesColor(for: $0))
                 }
-            }
-        }
-        .chartXScale(domain: start ... now)
-        .chartYScale(domain: 0 ... 100)
-        .chartForegroundStyleScale(
-            domain: windowNames,
-            range: windowColors
+            )
         )
-        .chartLegend(position: .top, alignment: .trailing, spacing: 10)
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: span.axisStride)) { value in
-                AxisGridLine().foregroundStyle(Color.white.opacity(0.06))
-                AxisTick().foregroundStyle(Color.white.opacity(0.18))
-                AxisValueLabel(format: .dateTime.hour().minute())
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundStyle(Theme.tTertiary)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
-                AxisGridLine().foregroundStyle(Color.white.opacity(0.08))
-                AxisValueLabel {
-                    if let number = value.as(Int.self) {
-                        Text("\(number)%")
-                    }
-                }
-                .font(.system(size: 8.5, design: .monospaced))
-                .foregroundStyle(Theme.tTertiary)
-            }
-        }
-        .frame(height: 235)
     }
 
     private var emptyState: some View {
@@ -225,17 +164,17 @@ struct QuotaHistoryView: View {
         .frame(height: 210)
     }
 
-    private var changesSection: some View {
+    private func changesSection(_ projection: QuotaHistoryProjection) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("最近额度变化")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(Theme.tPrimary)
-            if dropEvents.isEmpty {
+            if projection.dropEvents.isEmpty {
                 Text("当前时间范围内还没有检测到额度下降")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.tTertiary)
             } else {
-                ForEach(Array(dropEvents.prefix(8))) { event in
+                ForEach(Array(projection.dropEvents.prefix(8))) { event in
                     HStack(spacing: 8) {
                         Text(Self.timeFormatter.string(from: event.timestamp))
                             .font(.system(size: 9.5, design: .monospaced))
@@ -260,24 +199,25 @@ struct QuotaHistoryView: View {
         }
     }
 
-    private var activitySection: some View {
-        let events = activityEvents
-        return VStack(alignment: .leading, spacing: 8) {
+    private func activitySection(_ projection: QuotaHistoryProjection) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text("模型活动标记")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(Theme.tPrimary)
-            if events.isEmpty {
+            if projection.activityEvents.isEmpty {
                 Text("尚未检测到该工具的模型 token 增量")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.tTertiary)
             } else {
-                ForEach(Array(events.prefix(8)), id: \.timestamp) { point in
+                ForEach(Array(projection.activityEvents.prefix(8))) { event in
                     HStack(spacing: 8) {
-                        Text(Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(point.timestamp))))
+                        Text(Self.timeFormatter.string(
+                            from: Date(timeIntervalSince1970: TimeInterval(event.timestamp))
+                        ))
                             .font(.system(size: 9.5, design: .monospaced))
                             .foregroundStyle(Theme.tTertiary)
                             .frame(width: 40, alignment: .leading)
-                        activityText(activity(for: point))
+                        activityText(event.activity)
                         Spacer()
                     }
                 }
@@ -292,75 +232,17 @@ struct QuotaHistoryView: View {
             .lineLimit(1)
     }
 
-    private var chartData: [QuotaChartDatum] {
-        recentPoints.flatMap { point -> [QuotaChartDatum] in
-            let date = Date(timeIntervalSince1970: TimeInterval(point.timestamp))
-            return windowNames.compactMap { window in
-                value(for: window, point: point).map { remaining in
-                    QuotaChartDatum(
-                        timestamp: date,
-                        remaining: remaining,
-                        window: window,
-                        activity: activity(for: point, window: window)
-                    )
-                }
-            }
-        }
-    }
-
-    private var dropEvents: [QuotaDropEvent] {
-        var events: [QuotaDropEvent] = []
-        for window in windowNames {
-            let samples = recentPoints.compactMap { point -> (QuotaHistoryPoint, Double)? in
-                value(for: window, point: point).map { (point, $0) }
-            }
-            for pair in zip(samples, samples.dropFirst()) {
-                let previous = pair.0
-                let current = pair.1
-                let drop = previous.1 - current.1
-                guard drop >= 0.05 else { continue }
-                let minutes = max(1, (current.0.timestamp - previous.0.timestamp) / 60)
-                events.append(.init(
-                    timestamp: Date(timeIntervalSince1970: TimeInterval(current.0.timestamp)),
-                    durationMinutes: minutes,
-                    window: window,
-                    drop: drop,
-                    activity: activity(for: current.0, window: window)
-                ))
-            }
-        }
-        return events.sorted { $0.timestamp > $1.timestamp }
-    }
-
-    private var activityEvents: [QuotaHistoryPoint] {
-        recentPoints.filter { !activity(for: $0).isEmpty }
-            .sorted { $0.timestamp > $1.timestamp }
-    }
-
-    private func activity(for point: QuotaHistoryPoint) -> [QuotaModelActivity] {
-        tool == .claude ? point.claudeActivity : point.codexActivity
-    }
-
-    private func activity(
-        for point: QuotaHistoryPoint,
-        window: String
-    ) -> [QuotaModelActivity] {
-        let all = activity(for: point)
-        guard tool == .claude, window == "周 · Fable" else { return all }
-        return all.filter { $0.model.localizedCaseInsensitiveContains("fable") }
-    }
-
-    private var windowNames: [String] {
-        switch tool {
-        case .claude:
-            return ["5 小时", "周 · 全部", "周 · Fable"]
-        case .codex:
-            return ["周"]
-        }
-    }
-
-    private var windowColors: [Color] {
-        windowNames.map { seriesColor(for: $0) }
+    private func makeFrame() -> QuotaHistoryFrame {
+        let now = Date()
+        let start = now.addingTimeInterval(TimeInterval(-span.rawValue * 60 * 60))
+        return QuotaHistoryFrame(
+            now: now,
+            start: start,
+            projection: QuotaHistoryProjection(
+                points: history.points(since: start),
+                tool: tool
+            )
+        )
     }
 
     private func seriesColor(for window: String) -> Color {
@@ -378,32 +260,172 @@ struct QuotaHistoryView: View {
         }
     }
 
-    private func value(for window: String, point: QuotaHistoryPoint) -> Double? {
-        switch (tool, window) {
-        case (.claude, "5 小时"):
-            return point.claudeFiveHourRemaining
-        case (.claude, "周 · 全部"):
-            return point.claudeWeekRemaining
-        case (.claude, "周 · Fable"):
-            return point.claudeFableWeekRemaining
-        case (.codex, "周"):
-            return point.codexWeekRemaining
-        default:
-            return nil
-        }
-    }
-
     private func summaryTitle(for window: String) -> String {
         window == "5 小时" ? "5h 剩余" : "\(window)剩余"
     }
 
-    private func latestValue(window: String) -> Double? {
-        let values = chartData.filter { $0.window == window }
-        return values.last?.remaining
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+}
+
+/// Owns hover state so pointer movement redraws only the chart, not the parent
+/// page and its complete history projection.
+private struct QuotaHistoryChart: View {
+    let projection: QuotaHistoryProjection
+    let start: Date
+    let end: Date
+    let span: QuotaHistorySpan
+    let colors: [String: Color]
+
+    @State private var hover: (sample: QuotaHoverSample, x: CGFloat)?
+
+    var body: some View {
+        Chart {
+            ForEach(projection.lineData) { item in
+                LineMark(
+                    x: .value("时间", item.timestamp),
+                    y: .value("剩余额度", item.remaining),
+                    series: .value("额度窗口", item.window)
+                )
+                .foregroundStyle(by: .value("额度窗口", item.window))
+                .interpolationMethod(.stepEnd)
+                .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+            }
+            ForEach(projection.markerData) { item in
+                let isLatest = projection.latestDatumIDs.contains(item.id)
+                PointMark(
+                    x: .value("活动时间", item.timestamp),
+                    y: .value("活动额度", item.remaining)
+                )
+                .foregroundStyle(by: .value("额度窗口", item.window))
+                .symbolSize(isLatest ? 16 : 8)
+                .opacity(isLatest ? 1 : 0.62)
+            }
+        }
+        .chartXScale(domain: start ... end)
+        .chartYScale(domain: 0 ... 100)
+        .chartForegroundStyleScale(
+            domain: projection.windowNames,
+            range: projection.windowNames.map { colors[$0] ?? Theme.claude }
+        )
+        .chartLegend(position: .top, alignment: .trailing, spacing: 10)
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .hour, count: span.axisStride)) { value in
+                AxisGridLine().foregroundStyle(Color.white.opacity(0.06))
+                AxisTick().foregroundStyle(Color.white.opacity(0.18))
+                AxisValueLabel(format: .dateTime.hour().minute())
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
+                AxisGridLine().foregroundStyle(Color.white.opacity(0.08))
+                AxisValueLabel {
+                    if let number = value.as(Int.self) {
+                        Text("\(number)%")
+                    }
+                }
+                .font(.system(size: 8.5, design: .monospaced))
+                .foregroundStyle(Theme.tTertiary)
+            }
+        }
+        .frame(height: 235)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                let plot = geometry[proxy.plotAreaFrame]
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            guard plot.contains(location),
+                                  let date: Date = proxy.value(atX: location.x - plot.minX),
+                                  let sample = projection.nearestHoverSample(to: date),
+                                  let x = proxy.position(forX: sample.timestamp)
+                            else {
+                                hover = nil
+                                return
+                            }
+                            hover = (sample: sample, x: x + plot.minX)
+                        case .ended:
+                            hover = nil
+                        }
+                    }
+                if let hover {
+                    hoverBubble(at: hover, plot: plot)
+                }
+            }
+        }
     }
 
-    private func latestDatumID(for window: String) -> String? {
-        chartData.last(where: { $0.window == window })?.id
+    @ViewBuilder
+    private func hoverBubble(
+        at hover: (sample: QuotaHoverSample, x: CGFloat),
+        plot: CGRect
+    ) -> some View {
+        if !hover.sample.rows.isEmpty {
+            let bubbleWidth: CGFloat = 154
+            let rightmost = max(plot.minX, plot.maxX - bubbleWidth)
+            let anchor = min(
+                max(hover.x - bubbleWidth / 2, plot.minX),
+                rightmost
+            )
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.32))
+                    .frame(width: 1, height: plot.height)
+                    .position(x: hover.x, y: plot.midY)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(Self.timeFormatter.string(from: hover.sample.timestamp))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tPrimary)
+                    ForEach(hover.sample.rows) { row in
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(colors[row.window] ?? Theme.claude)
+                                .frame(width: 5, height: 5)
+                            Text(row.window)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.tSecondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(String(format: "%.1f%%", row.remaining))
+                                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tPrimary)
+                        }
+                    }
+                    if !hover.sample.activity.isEmpty {
+                        Text(
+                            hover.sample.activity
+                                .map { "\($0.model) +\(Fmt.human($0.tokenDelta))" }
+                                .joined(separator: " · ")
+                        )
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .lineLimit(1)
+                    }
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 6)
+                .frame(width: bubbleWidth, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color(red: 0.10, green: 0.11, blue: 0.14).opacity(0.96))
+                        .shadow(color: Color.black.opacity(0.32), radius: 5, y: 2)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.75)
+                )
+                .offset(x: anchor, y: plot.minY + 4)
+                .allowsHitTesting(false)
+            }
+        }
     }
 
     private static let timeFormatter: DateFormatter = {
