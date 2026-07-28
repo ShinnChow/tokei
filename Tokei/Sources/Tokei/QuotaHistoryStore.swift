@@ -52,6 +52,8 @@ private struct QuotaHistoryState: Codable {
     var lastCodexModelTotals: [String: Int] = [:]
     var hasClaudeBaseline = false
     var hasCodexBaseline = false
+    var claudeBaselineDay: Int?
+    var codexBaselineDay: Int?
 }
 
 final class QuotaHistoryStore: ObservableObject {
@@ -76,6 +78,7 @@ final class QuotaHistoryStore: ObservableObject {
 
     func record(_ capture: QuotaCapture, at date: Date = Date()) {
         let minute = Int(date.timeIntervalSince1970 / 60) * 60
+        let day = Int(Calendar.current.startOfDay(for: date).timeIntervalSince1970)
         let cutoff = minute - retentionSeconds
         var changed = false
 
@@ -85,25 +88,48 @@ final class QuotaHistoryStore: ObservableObject {
             changed = true
         }
 
+        let claudeBaseline = prepareBaseline(
+            previous: state.lastClaudeModelTotals,
+            hasBaseline: state.hasClaudeBaseline,
+            baselineDay: state.claudeBaselineDay,
+            currentDay: day
+        )
+        let codexBaseline = prepareBaseline(
+            previous: state.lastCodexModelTotals,
+            hasBaseline: state.hasCodexBaseline,
+            baselineDay: state.codexBaselineDay,
+            currentDay: day
+        )
         let claudeActivity = activity(
             current: capture.claudeModelTotals,
-            previous: state.lastClaudeModelTotals,
-            hasBaseline: state.hasClaudeBaseline
+            previous: claudeBaseline.previous,
+            hasBaseline: claudeBaseline.hasBaseline
         )
         let codexActivity = activity(
             current: capture.codexModelTotals,
-            previous: state.lastCodexModelTotals,
-            hasBaseline: state.hasCodexBaseline
+            previous: codexBaseline.previous,
+            hasBaseline: codexBaseline.hasBaseline
         )
 
-        let claudeBaselineChanged = !state.hasClaudeBaseline ||
-            state.lastClaudeModelTotals != capture.claudeModelTotals
-        let codexBaselineChanged = !state.hasCodexBaseline ||
-            state.lastCodexModelTotals != capture.codexModelTotals
-        state.lastClaudeModelTotals = capture.claudeModelTotals
-        state.lastCodexModelTotals = capture.codexModelTotals
-        state.hasClaudeBaseline = true
-        state.hasCodexBaseline = true
+        let nextClaudeBaseline = updatedBaseline(
+            current: capture.claudeModelTotals,
+            prepared: claudeBaseline,
+            existingDay: state.claudeBaselineDay,
+            currentDay: day
+        )
+        state.lastClaudeModelTotals = nextClaudeBaseline.totals
+        state.hasClaudeBaseline = nextClaudeBaseline.hasBaseline
+        state.claudeBaselineDay = nextClaudeBaseline.day
+
+        let nextCodexBaseline = updatedBaseline(
+            current: capture.codexModelTotals,
+            prepared: codexBaseline,
+            existingDay: state.codexBaselineDay,
+            currentDay: day
+        )
+        state.lastCodexModelTotals = nextCodexBaseline.totals
+        state.hasCodexBaseline = nextCodexBaseline.hasBaseline
+        state.codexBaselineDay = nextCodexBaseline.day
 
         let incoming = QuotaHistoryPoint(
             timestamp: minute,
@@ -135,7 +161,7 @@ final class QuotaHistoryStore: ObservableObject {
             }
         }
 
-        if changed || claudeBaselineChanged || codexBaselineChanged {
+        if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed {
             state.points = points
             saveState()
         }
@@ -198,6 +224,38 @@ final class QuotaHistoryStore: ObservableObject {
             if $0.tokenDelta == $1.tokenDelta { return $0.model < $1.model }
             return $0.tokenDelta > $1.tokenDelta
         }
+    }
+
+    private func prepareBaseline(
+        previous: [String: Int],
+        hasBaseline: Bool,
+        baselineDay: Int?,
+        currentDay: Int
+    ) -> (previous: [String: Int], hasBaseline: Bool, dayChanged: Bool) {
+        let dayChanged = baselineDay != nil && baselineDay != currentDay
+        if dayChanged {
+            return ([:], false, true)
+        }
+        return (previous, hasBaseline, false)
+    }
+
+    private func updatedBaseline(
+        current: [String: Int],
+        prepared: (previous: [String: Int], hasBaseline: Bool, dayChanged: Bool),
+        existingDay: Int?,
+        currentDay: Int
+    ) -> (totals: [String: Int], hasBaseline: Bool, day: Int?, changed: Bool) {
+        // A successful top-level refresh can still contain an empty tool range when one
+        // scanner fails. Preserve a non-empty same-day baseline so recovery does not
+        // attribute the whole day to one minute.
+        let shouldReplace = prepared.dayChanged || !prepared.hasBaseline ||
+            !current.isEmpty || prepared.previous.isEmpty
+        guard shouldReplace else {
+            return (prepared.previous, prepared.hasBaseline, existingDay, false)
+        }
+        let changed = prepared.previous != current ||
+            !prepared.hasBaseline || existingDay != currentDay
+        return (current, true, currentDay, changed)
     }
 
     private func merge(

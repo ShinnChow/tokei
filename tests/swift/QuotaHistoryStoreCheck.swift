@@ -62,6 +62,28 @@ struct QuotaHistoryStoreCheck {
             "claude-opus", "claude-sonnet",
         ], "new and growing models should both be attributed")
 
+        store.record(
+            QuotaCapture(
+                claudeFiveHourRemaining: 78,
+                claudeWeekRemaining: 59,
+                codexWeekRemaining: 47
+            ),
+            at: base.addingTimeInterval(125)
+        )
+        store.record(
+            QuotaCapture(
+                claudeFiveHourRemaining: 77,
+                claudeWeekRemaining: 58,
+                codexWeekRemaining: 46,
+                claudeModelTotals: ["claude-opus": 170, "claude-sonnet": 10],
+                codexModelTotals: ["gpt-5": 260]
+            ),
+            at: base.addingTimeInterval(185)
+        )
+        try expect(store.points.last?.claudeActivity == [
+            QuotaModelActivity(model: "claude-opus", tokenDelta: 20),
+        ], "a transient empty scan should not reset the activity baseline")
+
         let reloaded = QuotaHistoryStore(fileURL: fileURL)
         try expect(reloaded.points == store.points, "history should survive a reload")
 
