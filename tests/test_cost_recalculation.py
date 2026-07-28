@@ -45,6 +45,31 @@ class CostRecalculationTests(unittest.TestCase):
             self.assertEqual(model["cost"], 42.0, tool)
             self.assertEqual(result[tool]["ranges"]["today"]["cost"], 42.0, tool)
 
+    def test_hermes_missing_cost_uses_pricing_fallback(self):
+        name = "Deepseek V4 Flash"
+        model = {
+            "name": name,
+            "in": 100,
+            "out": 20,
+            "cr": 30,
+            "cw": 4,
+            "reason": 5,
+            "cost": 0.0,
+        }
+        result = {"hermes": {"ranges": {"today": {"models": [model], "cost": 0.0}}}}
+
+        USAGE._recalc_costs(result)
+
+        price = USAGE._raw_price(USAGE._pricing_id(name))
+        expected = (
+            100 * price["in"]
+            + 25 * price["out"]
+            + 30 * price["cache_read"]
+            + 4 * price["cache_write"]
+        ) / 1_000_000
+        self.assertAlmostEqual(model["cost"], expected, places=6)
+        self.assertAlmostEqual(result["hermes"]["ranges"]["today"]["cost"], expected, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -410,7 +410,7 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 18
+_SCAN_CACHE_VERSION = 19
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
 
@@ -2452,39 +2452,170 @@ def _hermes_db_paths():
 def _scan_hermes_db(db_path, _sq):
     days = {}
     try:
-        conn = _sq.connect(f"file:{db_path}?mode=ro", uri=True)
-        for row in conn.execute("""
-            SELECT date(started_at,'unixepoch','localtime') as day,
-                   CAST(strftime('%H',started_at,'unixepoch','localtime') AS INTEGER) as hour,
-                   COUNT(*) as cnt, model,
-                   COALESCE(SUM(input_tokens),0),
-                   COALESCE(SUM(output_tokens),0),
-                   COALESCE(SUM(cache_read_tokens),0),
-                   COALESCE(SUM(cache_write_tokens),0),
-                   COALESCE(SUM(reasoning_tokens),0),
-                   COALESCE(SUM(COALESCE(actual_cost_usd,estimated_cost_usd)),0)
-            FROM sessions WHERE started_at > 0
-            GROUP BY day, hour, model
-        """):
-            dk, hour, cnt, model, ti, to_, cr, cw, reason, cost = row
-            if not dk:
+        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True)
+        conn.row_factory = _sq.Row
+
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "sessions" not in tables:
+            conn.close()
+            return days
+
+        def columns(table):
+            return {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+
+        def expr(alias, available, name, fallback="0"):
+            if name in available:
+                return f'{alias}."{name}"'
+            return fallback
+
+        session_columns = columns("sessions")
+        session_query = f"""
+            SELECT s.id AS session_id,
+                   {expr('s', session_columns, 'started_at')} AS started_at,
+                   {expr('s', session_columns, 'model', "''")} AS model,
+                   {expr('s', session_columns, 'input_tokens')} AS input_tokens,
+                   {expr('s', session_columns, 'output_tokens')} AS output_tokens,
+                   {expr('s', session_columns, 'cache_read_tokens')} AS cache_read_tokens,
+                   {expr('s', session_columns, 'cache_write_tokens')} AS cache_write_tokens,
+                   {expr('s', session_columns, 'reasoning_tokens')} AS reasoning_tokens,
+                   {expr('s', session_columns, 'estimated_cost_usd')} AS estimated_cost_usd,
+                   {expr('s', session_columns, 'actual_cost_usd', 'NULL')} AS actual_cost_usd
+            FROM sessions s
+        """
+        sessions = {row["session_id"]: dict(row) for row in conn.execute(session_query)}
+
+        # Hermes 0.19 / schema v22 会把旧表改名为 session_model_usage_v21，再创建
+        # 带 task 维度的新表。旧库含孤立用量行时迁移会被外键约束中断，两张表会
+        # 同时保留；因此两张都读，并按完整主键去重。
+        usage_rows = {}
+        for table in ("session_model_usage_v21", "session_model_usage"):
+            if table not in tables:
                 continue
+            usage_columns = columns(table)
+            if "session_id" not in usage_columns:
+                continue
+            usage_query = f"""
+                SELECT u.session_id AS session_id,
+                       {expr('u', usage_columns, 'model', "''")} AS model,
+                       {expr('u', usage_columns, 'billing_provider', "''")} AS billing_provider,
+                       {expr('u', usage_columns, 'billing_base_url', "''")} AS billing_base_url,
+                       {expr('u', usage_columns, 'billing_mode', "''")} AS billing_mode,
+                       {expr('u', usage_columns, 'task', "''")} AS task,
+                       {expr('u', usage_columns, 'input_tokens')} AS input_tokens,
+                       {expr('u', usage_columns, 'output_tokens')} AS output_tokens,
+                       {expr('u', usage_columns, 'cache_read_tokens')} AS cache_read_tokens,
+                       {expr('u', usage_columns, 'cache_write_tokens')} AS cache_write_tokens,
+                       {expr('u', usage_columns, 'reasoning_tokens')} AS reasoning_tokens,
+                       {expr('u', usage_columns, 'estimated_cost_usd')} AS estimated_cost_usd,
+                       {expr('u', usage_columns, 'actual_cost_usd', 'NULL')} AS actual_cost_usd,
+                       {expr('u', usage_columns, 'first_seen', 'NULL')} AS first_seen,
+                       {expr('u', usage_columns, 'last_seen', 'NULL')} AS last_seen
+                FROM "{table}" u
+            """
+            for row in conn.execute(usage_query):
+                item = dict(row)
+                key = tuple(item.get(name) or "" for name in (
+                    "session_id", "model", "billing_provider", "billing_base_url",
+                    "billing_mode", "task"))
+                previous = usage_rows.get(key)
+                if previous and token_total({
+                    "in": previous.get("input_tokens", 0),
+                    "out": previous.get("output_tokens", 0),
+                    "cr": previous.get("cache_read_tokens", 0),
+                    "cw": previous.get("cache_write_tokens", 0),
+                    "reason": previous.get("reasoning_tokens", 0),
+                }) > token_total({
+                    "in": item.get("input_tokens", 0),
+                    "out": item.get("output_tokens", 0),
+                    "cr": item.get("cache_read_tokens", 0),
+                    "cw": item.get("cache_write_tokens", 0),
+                    "reason": item.get("reasoning_tokens", 0),
+                }):
+                    continue
+                usage_rows[key] = item
+
+        records = list(usage_rows.values())
+        main_usage_sessions = {
+            row.get("session_id") for row in records if not (row.get("task") or "")}
+
+        # 没有用量明细表或主循环明细缺失时，回退到 sessions 汇总。这样既兼容
+        # 老版本，也不会把 v22 的主循环行与 sessions 再算一次。
+        for session_id, session in sessions.items():
+            if session_id in main_usage_sessions:
+                continue
+            records.append({
+                **session,
+                "task": "",
+                "first_seen": session.get("started_at"),
+                "last_seen": session.get("started_at"),
+            })
+
+        def row_cost(row):
+            actual = row.get("actual_cost_usd")
+            return float(actual if actual is not None else row.get("estimated_cost_usd", 0) or 0)
+
+        records_by_session = {}
+        for row in records:
+            records_by_session.setdefault(row.get("session_id"), []).append(row)
+        for session_id, session_records in records_by_session.items():
+            session = sessions.get(session_id)
+            if not session or any(row_cost(row) for row in session_records):
+                continue
+            fallback_cost = row_cost(session)
+            if not fallback_cost:
+                continue
+            main_records = [row for row in session_records if not (row.get("task") or "")]
+            if not main_records:
+                continue
+            target = next(
+                (row for row in main_records if row.get("model") == session.get("model")),
+                main_records[0],
+            )
+            target["actual_cost_usd"] = session.get("actual_cost_usd")
+            target["estimated_cost_usd"] = session.get("estimated_cost_usd")
+
+        session_first_seen = {}
+        for row in records:
+            session_id = row.get("session_id")
+            if not session_id:
+                continue
+            session = sessions.get(session_id) or {}
+            timestamp = session.get("started_at") or row.get("first_seen") or row.get("last_seen")
+            try:
+                timestamp = float(timestamp)
+                if timestamp > 100_000_000_000:
+                    timestamp /= 1000.0
+            except (TypeError, ValueError):
+                continue
+            if timestamp <= 0:
+                continue
+            session_first_seen[session_id] = min(
+                timestamp, session_first_seen.get(session_id, timestamp))
+
+        day_sessions = {}
+        for row in records:
+            session_id = row.get("session_id")
+            timestamp = session_first_seen.get(session_id)
+            if timestamp is None:
+                continue
+            local_dt = datetime.fromtimestamp(timestamp).astimezone()
+            dk = local_dt.date().isoformat()
             day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
                                        "reason": 0, "cost": 0.0, "sessions": 0,
                                        "models": {}, "hours": [0] * 24})
-            day["in"] += int(ti); day["out"] += int(to_)
-            day["cr"] += int(cr); day["cw"] += int(cw)
-            day["reason"] += int(reason); day["cost"] += float(cost)
-            day["sessions"] += int(cnt)
-            if hour is not None:
-                day["hours"][int(hour)] += int(ti) + int(to_) + int(cr) + int(cw) + int(reason)
-            if model:
-                mm = day["models"].setdefault(
-                    model, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                            "reason": 0, "cost": 0.0})
-                mm["in"] += int(ti); mm["out"] += int(to_)
-                mm["cr"] += int(cr); mm["cw"] += int(cw)
-                mm["reason"] += int(reason); mm["cost"] += float(cost)
+            inp = int(row.get("input_tokens") or 0)
+            out = int(row.get("output_tokens") or 0)
+            cr = int(row.get("cache_read_tokens") or 0)
+            cw = int(row.get("cache_write_tokens") or 0)
+            reason = int(row.get("reasoning_tokens") or 0)
+            _add_token_usage(day, inp, out, cr, cw, reason, row_cost(row), row.get("model"))
+            day["hours"][local_dt.hour] += inp + out + cr + cw + reason
+            if session_id in sessions:
+                day_sessions.setdefault(dk, set()).add(session_id)
+
+        for dk, session_ids in day_sessions.items():
+            days[dk]["sessions"] = len(session_ids)
         conn.close()
     except Exception:
         pass
@@ -4354,7 +4485,7 @@ def compute():
 
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
-    for tool_key in ("gemini", "zcode", "mimocode", "workbuddy", "qwencode"):
+    for tool_key in ("gemini", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -4367,8 +4498,16 @@ def _recalc_costs(result):
             for m in r["models"]:
                 name = m.get("name", "")
                 price_id = _pricing_id(name)
+                authoritative_cost = float(m.get("cost", 0) or 0)
+                if tool_key == "hermes" and authoritative_cost:
+                    total_cost += authoritative_cost
+                    if price_id:
+                        price = _raw_price(price_id)
+                        m["pin"] = price["in"]
+                        m["pout"] = price["out"]
+                    continue
                 if not price_id:
-                    total_cost += float(m.get("cost", 0) or 0)
+                    total_cost += authoritative_cost
                     m["pin"] = 0
                     m["pout"] = 0
                     continue
@@ -4380,7 +4519,7 @@ def _recalc_costs(result):
                     thoughts = m.get("thoughts", 0)
                     cost = (ti / 1e6 * p["in"] + (to + thoughts) / 1e6 * p["out"]
                             + cached / 1e6 * p["cache_read"])
-                elif tool_key in ("zcode", "mimocode"):
+                elif tool_key in ("hermes", "zcode", "mimocode"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
