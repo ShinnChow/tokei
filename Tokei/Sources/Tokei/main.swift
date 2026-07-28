@@ -17,6 +17,7 @@ final class Store: ObservableObject {
     @Published var peerLoadIssues: [PeerLoadIssue] = []
 
     let syncManager = SyncManager()
+    let quotaHistory = QuotaHistoryStore.shared
     let keepAwake = KeepAwake()
     let sitReminder = SitReminder()
     var autoSyncTimer: Timer?
@@ -67,6 +68,7 @@ final class Store: ObservableObject {
             }
             self.retryCount = 0
             self.loadError = nil
+            self.recordQuotaHistory(local)
             self.localUsage = local
             var allDevices = local
             if self.syncEnabled {
@@ -104,6 +106,30 @@ final class Store: ObservableObject {
         } else {
             refreshInFlight = false
         }
+    }
+
+    private func recordQuotaHistory(_ usage: Usage) {
+        let claudeRange = usage.claude.ranges.get(.today)
+        let codexRange = usage.codex.ranges.get(.today)
+        let claudeModels = claudeRange.models.reduce(into: [String: Int]()) { totals, model in
+            guard model.name != "合成" else { return }
+            totals[model.name, default: 0] += model.in + model.out + model.cr + model.cw
+        }
+        let codexModels = codexRange.models.reduce(into: [String: Int]()) { totals, model in
+            totals[model.name, default: 0] +=
+                model.in + model.out + model.cr + model.cw + model.reason
+        }
+        quotaHistory.record(QuotaCapture(
+            claudeFiveHourRemaining: usage.claude.q5_stale == true
+                ? nil : usage.claude.q5.map { 100 - $0 },
+            claudeWeekRemaining: usage.claude.q7_stale == true
+                ? nil : usage.claude.q7.map { 100 - $0 },
+            claudeFableWeekRemaining: usage.claude.qf_stale == true
+                ? nil : usage.claude.qf.map { 100 - $0 },
+            codexWeekRemaining: usage.codex.pw.map { 100 - $0 },
+            claudeModelTotals: claudeModels,
+            codexModelTotals: codexModels
+        ))
     }
 
     func doSync() {
@@ -255,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      remaining: remaining))
             }
             if ud.object(forKey: "showCodex") as? Bool ?? true,
-               let quota = u.codex.p5 ?? u.codex.pw {
+               let quota = u.codex.pw {
                 let remaining = 100 - quota
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
                                      remaining: remaining))

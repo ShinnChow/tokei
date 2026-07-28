@@ -75,9 +75,12 @@ struct ClaudeStat: Codable {
     var q5_reset: Int?
     var q7: Double?
     var q7_reset: Int?
+    var qf: Double?
+    var qf_reset: Int?
     var q_updated: Int?
     var q5_stale: Bool?
     var q7_stale: Bool?
+    var qf_stale: Bool?
 }
 
 struct CodexRange: Codable {
