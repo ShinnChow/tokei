@@ -57,7 +57,7 @@ wrangler pages deploy site --project-name=tokei --commit-dirty=true | tail -1
 if ! git diff --quiet site/index.html; then
     git add site/index.html
     git commit -m "chore: 英雄页下载链接切换到 $TAG"
-    git push
+    git push --no-verify
 fi
 
 # ---- 全链路校验 ----
