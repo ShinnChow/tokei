@@ -207,9 +207,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var globalMouseMonitor: Any?
 
-    // 菜单栏额度颜色(与面板 Theme.claude/codex 一致)。
+    // 菜单栏额度颜色(与面板 Theme.claude/codex/grok 一致)。
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
+    static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -226,9 +227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .applicationDefined
         popover.animates = true
 
-        // 启动时先把 Qoder IDE 开关状态落盘到 config.json,
-        // 确保随后的 refresh() 触发的 Python 扫描能读到正确的 qoder_ide_enabled。
+        // 启动时先把 Qoder IDE / Grok 实时额度开关落盘到 config.json,
+        // 确保随后的 refresh() 触发的 Python 扫描能读到正确配置。
         PanelView.syncQoderIdeConfigOnLaunch()
+        PanelView.syncGrokLiveQuotaConfigOnLaunch()
         if var syncConfig = store.syncManager.config {
             let interval = SyncManager.normalizedSyncInterval(syncConfig.sync_interval)
             if syncConfig.sync_interval != interval {
@@ -273,43 +275,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let u = store.usage {
             let ud = UserDefaults.standard
-            if ud.object(forKey: "showClaude") as? Bool ?? true,
+            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的来源。
+            if MenuBarQuotaSource.claude.isEnabled,
                u.claude.q5_stale != true,
                let q5 = u.claude.q5 {
                 let remaining = 100 - q5
                 metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),
                                      remaining: remaining))
             }
-            if ud.object(forKey: "showCodex") as? Bool ?? true,
+            if MenuBarQuotaSource.codex.isEnabled,
                let quota = u.codex.pw {
                 let remaining = 100 - quota
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
                                      remaining: remaining))
             }
+            if MenuBarQuotaSource.grok.isEnabled,
+               u.grok.stale != true,
+               let pct = u.grok.pct {
+                let remaining = 100 - pct
+                metrics.append(.init(kind: .grok, value: String(format: "%.0f", remaining),
+                                     remaining: remaining))
+            }
             if metrics.isEmpty {
-                let showC = ud.object(forKey: "showClaude") as? Bool ?? true
-                let showX = ud.object(forKey: "showCodex") as? Bool ?? true
-                let showP = ud.object(forKey: "showPi") as? Bool ?? true
-                let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
-                let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
-                let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
-                let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
-                let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
-                let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
-                var total = 0
-                if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
-                if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
-                if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
-                if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
-                if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
-                if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
-                if total > 0 {
-                    metrics.append(.init(kind: .total, value: Fmt.human(total)))
-                } else {
+                // 用户把额度来源全部关掉时：只保留图标，不再回退显示今日 token 总量。
+                let anyQuotaSourceOn = MenuBarQuotaSource.allCases.contains { $0.isEnabled }
+                if !anyQuotaSourceOn {
                     fallbackIcon = true
+                } else {
+                    let showC = ud.object(forKey: "showClaude") as? Bool ?? true
+                    let showX = ud.object(forKey: "showCodex") as? Bool ?? true
+                    let showP = ud.object(forKey: "showPi") as? Bool ?? true
+                    let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
+                    let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
+                    let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
+                    let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
+                    let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
+                    let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
+                    var total = 0
+                    if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
+                    if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
+                    if total > 0 {
+                        metrics.append(.init(kind: .total, value: Fmt.human(total)))
+                    } else {
+                        fallbackIcon = true
+                    }
                 }
             }
         } else {
@@ -322,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             metrics: metrics,
             fallbackIcon: fallbackIcon
         )
+        let displayedMetrics = MenuBarTitleRenderer.metricsForDisplay(metrics, density: density)
         b.image = presentation.image
         b.imageScaling = .scaleNone
         b.imagePosition = presentation.image == nil
@@ -342,11 +359,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         b.contentTintColor = nil
         fitStatusItemWidth(b)
-        var summaryParts = metrics.map { metric in
+        var summaryParts = displayedMetrics.map { metric in
             let name: String
             switch metric.kind {
             case .claude: name = "Claude"
             case .codex: name = "Codex"
+            case .grok: name = "Grok"
             case .total: name = "今日"
             }
             if metric.remaining != nil {

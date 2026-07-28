@@ -220,6 +220,24 @@ final class SyncManager {
         } ?? false
     }
 
+    /// Grok 实时额度：默认关闭，只写 config 字段，不改动同步相关配置。
+    @discardableResult
+    static func setGrokLiveQuotaEnabled(_ enabled: Bool) -> Bool {
+        withConfigLock {
+            var dictionary: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                let data = try Data(contentsOf: configPath)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                dictionary = object
+            }
+            dictionary["grok_live_quota_enabled"] = enabled
+            try writeConfigDictionary(dictionary)
+            return true
+        } ?? false
+    }
+
     // MARK: - Read peers
 
     func loadPeers() -> PeerLoadReport {

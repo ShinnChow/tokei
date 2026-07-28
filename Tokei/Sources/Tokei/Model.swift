@@ -283,9 +283,43 @@ struct GrokRanges: Codable {
     }
 }
 
+struct GrokProductUsage: Codable, Identifiable {
+    var name: String
+    var pct: Double?
+    var id: String { name }
+}
+
 struct GrokStat: Codable {
     var ranges: GrokRanges
     var model: String?
+    /// 本周期已用百分比（0–100）。
+    var pct: Double?
+    /// 周期重置时间（unix epoch 秒）。
+    var reset: Int?
+    /// 套餐名，如 SuperGrok。
+    var plan: String?
+    /// 分产品已用百分比（GrokBuild / Api 等）。
+    var products: [GrokProductUsage] = []
+    /// week / month。
+    var window: String?
+    /// log / live / cache。
+    var source: String?
+    var q_updated: Int?
+    var stale: Bool?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = try c.decode(GrokRanges.self, forKey: .ranges)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        pct = try c.decodeIfPresent(Double.self, forKey: .pct)
+        reset = try c.decodeIfPresent(Int.self, forKey: .reset)
+        plan = try c.decodeIfPresent(String.self, forKey: .plan)
+        products = try c.decodeIfPresent([GrokProductUsage].self, forKey: .products) ?? []
+        window = try c.decodeIfPresent(String.self, forKey: .window)
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        q_updated = try c.decodeIfPresent(Int.self, forKey: .q_updated)
+        stale = try c.decodeIfPresent(Bool.self, forKey: .stale)
+    }
 }
 
 struct QoderRange: Codable {

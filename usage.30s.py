@@ -6,6 +6,8 @@
 # <swiftbar.runInBash>false</swiftbar.runInBash>
 #
 # 数据主要读自本地会话日志,不改动任何 CLI；Codex 额度会短缓存查询官方 live usage。
+# Grok 额度默认只读本地 unified.jsonl billing 日志；实时账单接口需显式开启
+# (config grok_live_quota_enabled 或 TOKEI_GROK_LIVE_QUOTA=1)。
 # 仅 --update-prices 显式联网更新价格表:
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
@@ -17,6 +19,7 @@ import os
 import sys
 import glob
 import json
+import math
 import re
 from datetime import datetime, timedelta, date
 from pathlib import Path
@@ -82,6 +85,7 @@ GROK_HOME = os.path.abspath(os.path.expanduser(
     os.environ.get("GROK_HOME", os.path.join(HOME, ".grok"))))
 GROK_DIR = os.path.join(GROK_HOME, "sessions")
 GROK_LOG = os.path.join(GROK_HOME, "logs", "unified.jsonl")
+GROK_AUTH = os.path.join(GROK_HOME, "auth.json")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
                             "SharedClientCache", "cache", "db", "local.db")
@@ -139,6 +143,7 @@ PRICING_FILE = _writable_path("pricing.json")
 OVERRIDES_FILE = _writable_path("pricing_overrides.json")
 CODEX_QUOTA_CACHE = _writable_path("codex_quota_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
+GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -2037,6 +2042,270 @@ def _grok_usage_days(records, sessions, latest_model):
                 project_day["sessions"].add(sid)
             project_day["models"][model] = project_day["models"].get(model, 0) + amount
     return days
+
+
+# ---------- Grok 额度 (默认只读本地日志;实时 API 需显式开启) ----------
+# 本地: ~/.grok/logs/unified.jsonl 中 `billing: fetched credits config`
+# 可选: GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
+# 开关: ~/.tokei/config.json 的 grok_live_quota_enabled, 或 TOKEI_GROK_LIVE_QUOTA=1
+_GROK_QUOTA_TTL = 30
+_GROK_QUOTA_FALLBACK_TTL = 300
+_GROK_QUOTA_LOG_SCAN_BYTES = 2 * 1024 * 1024
+_GROK_BILLING_MAX_RESPONSE_BYTES = 1024 * 1024
+_GROK_BILLING_MSG = "billing: fetched credits config"
+_GROK_LIVE_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+
+
+def _tokei_config():
+    cfg = _load_json(os.path.join(_USER_DIR, "config.json"), {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _grok_live_quota_enabled():
+    """实时额度默认关闭;仅用户显式开启或环境变量强制时才联网。"""
+    env = os.environ.get("TOKEI_GROK_LIVE_QUOTA")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    return bool(_tokei_config().get("grok_live_quota_enabled"))
+
+
+def _grok_auth_token():
+    auth = _load_json(GROK_AUTH, {})
+    if not isinstance(auth, dict):
+        return None
+    for entry in auth.values():
+        if not isinstance(entry, dict):
+            continue
+        token = entry.get("key") or entry.get("access_token")
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    return None
+
+
+def _normalize_grok_billing(config, *, plan=None, source=None, updated=None,
+                            now_epoch=None):
+    if not isinstance(config, dict):
+        return None
+    pct_raw = config.get("creditUsagePercent")
+    if pct_raw is None:
+        return None
+    try:
+        pct = float(pct_raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(pct):
+        return None
+    pct = min(100.0, max(0.0, pct))
+    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+    end = period.get("end") or config.get("billingPeriodEnd")
+    reset = _iso_to_epoch(end) if end else None
+    products = []
+    for item in config.get("productUsage") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("product") or item.get("name")
+        if not name:
+            continue
+        usage_pct = item.get("usagePercent")
+        try:
+            normalized_pct = float(usage_pct) if usage_pct is not None else None
+            if normalized_pct is not None:
+                normalized_pct = (min(100.0, max(0.0, normalized_pct))
+                                  if math.isfinite(normalized_pct) else None)
+            products.append({
+                "name": str(name),
+                "pct": normalized_pct,
+            })
+        except (TypeError, ValueError):
+            products.append({"name": str(name), "pct": None})
+    now = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    stale = bool(reset is not None and reset <= now)
+    if stale:
+        # 周期已过重置点,本地快照不再代表当前额度。
+        pct = 0.0
+        for item in products:
+            if item.get("pct") is not None:
+                item["pct"] = 0.0
+    period_type = period.get("type") or ""
+    if "WEEKLY" in str(period_type).upper():
+        window = "week"
+    elif "MONTH" in str(period_type).upper():
+        window = "month"
+    else:
+        window = "week"
+    plan_name = plan
+    if not plan_name:
+        plan_name = config.get("subscriptionTier") or config.get("plan")
+    return {
+        "pct": pct,
+        "reset": None if stale else reset,
+        "plan": plan_name,
+        "products": products,
+        "window": window,
+        "source": source,
+        "updated": int(updated) if updated is not None else now,
+        "stale": stale,
+    }
+
+
+def _scan_grok_billing_from_log(path=None, max_bytes=_GROK_QUOTA_LOG_SCAN_BYTES):
+    """从 unified.jsonl 尾部读取最近一次 billing: fetched credits config。"""
+    log_path = path or GROK_LOG
+    try:
+        size = os.path.getsize(log_path)
+    except OSError:
+        return None
+    if size <= 0:
+        return None
+    start = max(0, size - max_bytes)
+    latest = None
+    latest_ts = None
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(start)
+            if start:
+                fh.readline()  # 丢掉半行
+            for raw in fh:
+                if _GROK_BILLING_MSG.encode("utf-8") not in raw:
+                    continue
+                try:
+                    obj = json.loads(raw.decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                if obj.get("msg") != _GROK_BILLING_MSG:
+                    continue
+                ctx = obj.get("ctx") or {}
+                if not isinstance(ctx, dict):
+                    continue
+                config = ctx.get("config")
+                if not isinstance(config, dict):
+                    continue
+                ts = obj.get("ts")
+                if latest_ts is None or (isinstance(ts, str) and ts >= latest_ts):
+                    latest_ts = ts if isinstance(ts, str) else latest_ts
+                    latest = {
+                        "config": config,
+                        "plan": ctx.get("subscriptionTier") or ctx.get("plan"),
+                        "ts": ts,
+                    }
+    except OSError:
+        return None
+    if not latest:
+        return None
+    updated = _iso_to_epoch(latest.get("ts"))
+    return _normalize_grok_billing(
+        latest["config"], plan=latest.get("plan"), source="log", updated=updated)
+
+
+def _cached_grok_quota(max_age):
+    cached = _load_json(GROK_QUOTA_CACHE, {})
+    if not isinstance(cached, dict):
+        return None
+    quota = cached.get("quota")
+    fetched_at = cached.get("fetched_at")
+    if not isinstance(quota, dict) or fetched_at is None:
+        return None
+    try:
+        age = datetime.now().timestamp() - float(fetched_at)
+    except (TypeError, ValueError):
+        return None
+    if age > max_age:
+        return None
+    out = dict(quota)
+    out.setdefault("source", cached.get("source") or out.get("source") or "cache")
+    return out
+
+
+def _save_grok_quota_cache(quota):
+    if not isinstance(quota, dict) or quota.get("pct") is None:
+        return
+    try:
+        os.makedirs(os.path.dirname(GROK_QUOTA_CACHE) or _USER_DIR, exist_ok=True)
+        _atomic_write_json(GROK_QUOTA_CACHE, {
+            "fetched_at": datetime.now().timestamp(),
+            "source": quota.get("source"),
+            "quota": quota,
+        })
+        try:
+            os.chmod(GROK_QUOTA_CACHE, 0o600)
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def fetch_grok_live_quota():
+    """仅在用户开启时请求 Grok billing API;失败回退到短缓存。"""
+    if not _grok_live_quota_enabled():
+        return None
+    cached = _cached_grok_quota(_GROK_QUOTA_TTL)
+    if cached and cached.get("source") == "live":
+        return cached
+    token = _grok_auth_token()
+    if not token:
+        return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            _GROK_LIVE_BILLING_URL,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Tokei",
+            },
+        )
+        # urllib copies regular headers to redirects. Keep the credential in the
+        # initial-request-only header set and reject any redirected response.
+        req.add_unredirected_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=3) as res:
+            final_url = res.geturl() if hasattr(res, "geturl") else _GROK_LIVE_BILLING_URL
+            if final_url != _GROK_LIVE_BILLING_URL:
+                return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+            payload = res.read(_GROK_BILLING_MAX_RESPONSE_BYTES + 1)
+            if len(payload) > _GROK_BILLING_MAX_RESPONSE_BYTES:
+                return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+            data = json.loads(payload)
+        config = data.get("config") if isinstance(data, dict) else None
+        plan = None
+        if isinstance(data, dict):
+            plan = data.get("subscriptionTier") or data.get("plan")
+        quota = _normalize_grok_billing(config, plan=plan, source="live")
+        if not quota:
+            return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+        _save_grok_quota_cache(quota)
+        return quota
+    except Exception:
+        return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+
+
+def scan_grok_quota():
+    """默认优先本地日志;仅显式开启时才走实时 API。"""
+    log_quota = _scan_grok_billing_from_log()
+    if log_quota and not log_quota.get("stale"):
+        _save_grok_quota_cache(log_quota)
+
+    if _grok_live_quota_enabled():
+        live = fetch_grok_live_quota()
+        if live and live.get("pct") is not None:
+            return live
+
+    if log_quota and log_quota.get("pct") is not None:
+        return log_quota
+
+    cached = _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL * 12)  # 本地缓存放宽到约 1 小时
+    if cached and cached.get("pct") is not None:
+        out = dict(cached)
+        out["source"] = "cache"
+        # 过期周期仍标 stale
+        reset = out.get("reset")
+        now = int(datetime.now().timestamp())
+        if reset is not None and int(reset) <= now:
+            out["stale"] = True
+            out["pct"] = 0.0
+            out["reset"] = None
+        return out
+    return {}
 
 
 def scan_grok(bounds, cache=None):
@@ -4433,6 +4702,7 @@ def compute():
     r5, rw = quota["r5"], quota["rw"]
 
     plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
+    grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
 
     result = {
         "claude": {
@@ -4456,6 +4726,14 @@ def compute():
         "grok": {
             "ranges": kranges,
             "model": gk["model"],
+            "pct": grok_quota.get("pct"),
+            "reset": grok_quota.get("reset"),
+            "plan": grok_quota.get("plan"),
+            "products": grok_quota.get("products") or [],
+            "window": grok_quota.get("window"),
+            "source": grok_quota.get("source"),
+            "q_updated": grok_quota.get("updated"),
+            "stale": grok_quota.get("stale"),
         },
         "qoderwork": {
             "ranges": qwranges,
@@ -4727,6 +5005,11 @@ def main():
     kt = gk["ranges"]["today"]
     print(f"Grok Build {HEAD}")
     print(f"今日 会话   {kt['sessions']:>6} {F}")
+    if gk.get("pct") is not None and not gk.get("stale"):
+        remaining = 100 - float(gk["pct"])
+        print(f"周剩余   {remaining:5.1f}%  reset {fmt_reset(gk.get('reset'))} {F}")
+        if gk.get("plan"):
+            print(f"plan: {gk['plan']} {F}")
     if kt.get("usage_available"):
         print(f"今日 输入   {human(kt['in']):>6} {F}")
         print(f"今日 缓存   {human(kt['cr']):>6} {F}")

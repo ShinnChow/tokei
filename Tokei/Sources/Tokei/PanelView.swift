@@ -43,6 +43,12 @@ struct PanelView: View {
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
+    /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
+    @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
+    /// 菜单栏额度来源（与显示卡片独立）。Grok 默认关，避免新额度源抢占状态栏。
+    @AppStorage(MenuBarQuotaSource.claude.defaultsKey) private var menuBarQuotaClaude = true
+    @AppStorage(MenuBarQuotaSource.codex.defaultsKey) private var menuBarQuotaCodex = true
+    @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
@@ -292,8 +298,8 @@ struct PanelView: View {
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini, active: gr.sessions > 0,
                          tint: Theme.gemini, content: AnyView(geminiBlock(gr))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
-                         active: kr.sessions > 0 || kr.usage_calls > 0,
-                         tint: Theme.grok, content: AnyView(grokBlock(kr, model: u.grok.model))),
+                         active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
+                         tint: Theme.grok, content: AnyView(grokBlock(u.grok, kr))),
             ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder, active: qr.calls > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
             ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
@@ -461,7 +467,7 @@ struct PanelView: View {
 
     // MARK: - Grok 卡片
     @ViewBuilder
-    func grokBlock(_ r: GrokRange, model: String?) -> some View {
+    func grokBlock(_ g: GrokStat, _ r: GrokRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Grok", tint: Theme.grok, sessions: r.sessions)
             if r.sessions > 0 || r.usage_calls > 0 {
@@ -505,7 +511,7 @@ struct PanelView: View {
                            extra: grokMetrics, tint: Theme.grok)
                 if r.usage_available && !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: $grokModelsOpen, tint: Theme.grok)
-                } else if let model, !model.isEmpty {
+                } else if let model = g.model, !model.isEmpty {
                     modelBadge(model, tint: Theme.grok)
                 }
                 Text(r.usage_available
@@ -514,10 +520,107 @@ struct PanelView: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            } else if g.pct == nil {
                 emptyHint
             }
+            if let pct = g.pct, g.stale != true {
+                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
+                let title = (g.window == "month") ? "月剩余" : "周剩余"
+                // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
+                quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
+                ForEach(g.products.filter { $0.pct != nil }) { product in
+                    if let used = product.pct {
+                        grokProductShareRow(
+                            name: Self.grokProductLabel(product.name),
+                            usedPct: used,
+                            tint: Theme.grok,
+                            help: Self.grokProductHelp(product.name)
+                        )
+                    }
+                }
+                if let plan = g.plan, !plan.isEmpty {
+                    HStack {
+                        Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                        Spacer()
+                        Text(plan)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.tSecondary)
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(Capsule().fill(Theme.grok.opacity(0.16)))
+                    }
+                }
+                grokQuotaStatus(g)
+            } else if g.stale == true {
+                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
+                Text("额度周期已结束，等待 Grok 写入新日志")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(Color.orange.opacity(0.88))
+            }
         }
+    }
+
+    func grokQuotaStatus(_ stat: GrokStat) -> some View {
+        let sourceLabel: String
+        switch stat.source {
+        case "live": sourceLabel = "实时接口"
+        case "cache": sourceLabel = "本地缓存"
+        default: sourceLabel = "本地日志"
+        }
+        let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: "clock")
+                .font(.system(size: 9))
+            Text("额度来源 \(sourceLabel) · \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(Theme.tTertiary)
+        .help(stat.source == "live"
+              ? "已开启 Grok 实时额度查询。Grok Build / API 等为同一周额度池内的占用拆分，共享上方重置时间。"
+              : "默认只读 ~/.grok 本地日志，不访问网络")
+    }
+
+    /// 账单 product 字段 → 更可读的名称。
+    static func grokProductLabel(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "grokbuild": return "Grok Build（本机 CLI）"
+        case "api": return "开放 API（api.x.ai）"
+        case "grokchat": return "Grok 网页聊天"
+        default: return raw
+        }
+    }
+
+    /// 分产品占用说明（悬停 / 辅助读屏）。
+    static func grokProductHelp(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "grokbuild":
+            return "Grok Build / 本机 CLI 编程消耗，占用本周统一额度池的比例。"
+        case "api":
+            return "通过 xAI 开放 API（api.x.ai / Console 密钥）调用模型的消耗，与 CLI 共用同一周额度池。"
+        case "grokchat":
+            return "grok.com 网页聊天消耗，与 CLI / 开放 API 共用同一周额度池。"
+        default:
+            return "该产品在本周统一额度池中的占用比例（与周剩余共用同一重置时间）。"
+        }
+    }
+
+    /// 分产品占用：显示该产品在统一周额度里占了多少，不展示独立重置时间。
+    func grokProductShareRow(name: String, usedPct: Double, tint: Color, help: String) -> some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(name)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                Spacer(minLength: 6)
+                Text(String(format: "占用 %.0f%%", usedPct))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+            }
+            MiniBar(value: max(0, min(100, 100 - usedPct)), tint: tint.opacity(0.75))
+        }
+        .help(help)
     }
 
     // MARK: - Qoder IDE 卡片
@@ -1123,9 +1226,12 @@ struct PanelView: View {
                 Text(String(format: "%.0f%%", pct))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(pct <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.tPrimary))
-                Text("· \(Fmt.reset(reset))")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(Theme.tTertiary)
+                // 无重置时间时不显示「· ?」，避免分产品行误导。
+                if reset != nil {
+                    Text("· \(Fmt.reset(reset))")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
             }
             MiniBar(value: pct, tint: pct <= 15 ? .red : tint)
         }
@@ -1267,6 +1373,7 @@ struct PanelView: View {
 
                 VStack(alignment: .leading, spacing: 11) {
                     settingsMenuBarSection
+                    settingsPrivacySection
                     settingsSystemSection
                     settingsReminderSection
                     settingsSyncSection
@@ -1339,6 +1446,20 @@ struct PanelView: View {
                 .frame(width: settingsMenuPickerWidth)
             }
 
+            settingsStackedValue("额度来源") {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 7),
+                                    GridItem(.flexible(), spacing: 7)], spacing: 7) {
+                    settingsRow("Claude", tint: Theme.claude, isOn: $menuBarQuotaClaude)
+                    settingsRow("Codex", tint: Theme.codex, isOn: $menuBarQuotaCodex)
+                    settingsRow("Grok", tint: Theme.grok, isOn: $menuBarQuotaGrok)
+                }
+            }
+
+            Text("只影响状态栏剩余额度，与「显示卡片」无关。双额度最多显示前两项；单额度只显示一项。全部关闭时状态栏只留图标，不再显示用量数字。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack {
                 Spacer()
                 MenuBarStylePreview(
@@ -1352,6 +1473,15 @@ struct PanelView: View {
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
         }
         .onChange(of: menuBarDensity) { _ in
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        }
+        .onChange(of: menuBarQuotaClaude) { _ in
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        }
+        .onChange(of: menuBarQuotaCodex) { _ in
+            (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        }
+        .onChange(of: menuBarQuotaGrok) { _ in
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
         }
     }
@@ -1411,8 +1541,26 @@ struct PanelView: View {
         }
     }
 
+    var settingsPrivacySection: some View {
+        settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("Grok 实时额度查询", isOn: $grokLiveQuotaEnabled)
+            Text("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: grokLiveQuotaEnabled) { enabled in
+            Self.setGrokLiveQuotaEnabled(enabled)
+            store.refresh()
+        }
+    }
+
     private static func setQoderIdeEnabled(_ enabled: Bool) {
         SyncManager.setQoderIdeEnabled(enabled)
+    }
+
+    private static func setGrokLiveQuotaEnabled(_ enabled: Bool) {
+        SyncManager.setGrokLiveQuotaEnabled(enabled)
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -1421,6 +1569,12 @@ struct PanelView: View {
     static func syncQoderIdeConfigOnLaunch() {
         let enabled = UserDefaults.standard.object(forKey: "showQoderIde") as? Bool ?? true
         setQoderIdeEnabled(enabled)
+    }
+
+    /// 启动时同步 Grok 实时额度开关（默认关）。
+    static func syncGrokLiveQuotaConfigOnLaunch() {
+        let enabled = UserDefaults.standard.object(forKey: "grokLiveQuotaEnabled") as? Bool ?? false
+        setGrokLiveQuotaEnabled(enabled)
     }
 
     var settingsPricingSection: some View {
