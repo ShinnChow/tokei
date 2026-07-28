@@ -18,6 +18,7 @@
 import os
 import sys
 import glob
+import hashlib
 import json
 import math
 import re
@@ -415,21 +416,35 @@ def human(n: float) -> str:
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
 _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_VERSION = 19
+_SCAN_CACHE_VERSION = 20
+_SCAN_CACHE_MIGRATABLE_VERSION = 19
+_CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
+
+
+def _remove_codex_event_cache_dir():
+    import shutil
+    shutil.rmtree(f"{_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}", ignore_errors=True)
 
 
 def _load_scan_cache():
     try:
         with open(_SCAN_CACHE_FILE, "r") as f:
             c = json.load(f)
-        if c.get("v") != _SCAN_CACHE_VERSION:
+        version = c.get("v")
+        if version not in (_SCAN_CACHE_VERSION, _SCAN_CACHE_MIGRATABLE_VERSION):
+            _remove_codex_event_cache_dir()
             return {"v": _SCAN_CACHE_VERSION, "_dirty": True}
+        if version == _SCAN_CACHE_MIGRATABLE_VERSION:
+            c["v"] = _SCAN_CACHE_VERSION
+            c["_dirty"] = True
+        else:
+            c["_dirty"] = False
         c["_keys"] = {k for k in c if not k.startswith("_")}
-        c["_dirty"] = False
         return c
     except Exception:
+        _remove_codex_event_cache_dir()
         return {"v": _SCAN_CACHE_VERSION, "_dirty": True}
 
 
@@ -455,6 +470,29 @@ def _save_scan_cache(cache):
             except OSError:
                 pass
         pass
+
+
+def _with_scan_cache_lock(fn):
+    def locked(*args, **kwargs):
+        try:
+            import fcntl
+        except ImportError:
+            return fn(*args, **kwargs)
+
+        lock_path = f"{_SCAN_CACHE_FILE}.lock"
+        lock_dir = os.path.dirname(lock_path)
+        if lock_dir:
+            os.makedirs(lock_dir, exist_ok=True)
+        lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+    return locked
 
 
 def _cache_dashboard_days(cache, key, days):
@@ -1005,6 +1043,244 @@ def _codex_event_key(event):
     return tuple(event[2:10])
 
 
+def _codex_event_cache_dir():
+    return f"{_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}"
+
+
+def _codex_event_cache_path(file_path):
+    normalized = os.path.normcase(os.path.realpath(file_path))
+    digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return os.path.join(_codex_event_cache_dir(), f"{digest}.jsonl")
+
+
+def _codex_event_cache_ready(file_path, entry):
+    if not isinstance(entry, dict) or entry.get("event_count") is None:
+        return False
+    try:
+        expected_size = int(entry.get("event_cache_size", -1))
+        return expected_size >= 0 and os.path.getsize(
+            _codex_event_cache_path(file_path)) >= expected_size
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _codex_write_event_cache(file_path, events):
+    directory = _codex_event_cache_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    destination = _codex_event_cache_path(file_path)
+    fd, tmp = _tempfile.mkstemp(prefix=".codex-events-", suffix=".jsonl", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+                handle.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, destination)
+        return os.path.getsize(destination)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _codex_append_event_cache(file_path, events, expected_size):
+    destination = _codex_event_cache_path(file_path)
+    with open(destination, "r+b") as handle:
+        current_size = os.fstat(handle.fileno()).st_size
+        if current_size < expected_size:
+            raise OSError("Codex event cache is shorter than its committed size")
+        handle.truncate(expected_size)
+        handle.seek(expected_size)
+        for event in events:
+            payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+            handle.write(payload.encode("utf-8"))
+            handle.write(b"\n")
+        return handle.tell()
+
+
+def _codex_remove_event_cache(file_path):
+    try:
+        os.remove(_codex_event_cache_path(file_path))
+    except OSError:
+        pass
+
+
+def _codex_clear_event_cache(file_cache):
+    for file_path in list(file_cache):
+        _codex_remove_event_cache(file_path)
+    file_cache.clear()
+
+
+def _iter_codex_cached_events(file_path, start_index=0, limit=None):
+    emitted = 0
+    with open(_codex_event_cache_path(file_path), "r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            if index < start_index:
+                continue
+            if limit is not None and emitted >= limit:
+                break
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                raise OSError("Codex event cache contains invalid JSON")
+            if not isinstance(event, list):
+                raise OSError("Codex event cache contains an invalid event")
+            emitted += 1
+            yield event
+
+
+def _codex_event_metadata(events):
+    keys = []
+    first_ts = None
+    last_ts = None
+    for event in events:
+        if first_ts is None and event:
+            first_ts = str(event[0])
+        if event:
+            last_ts = str(event[0])
+        if len(keys) < 2:
+            key = _codex_event_key(event)
+            if key is not None:
+                keys.append(list(key))
+    return {
+        "event_count": len(events),
+        "first_keys": keys,
+        "first_event_ts": first_ts,
+        "last_event_ts": last_ts,
+    }
+
+
+def _codex_days_from_cached_events(file_path, start_index=0, event_count=None):
+    days = {}
+    limit = None if event_count is None else max(int(event_count) - start_index, 0)
+    for event in _iter_codex_cached_events(
+            file_path, start_index=start_index, limit=limit):
+        _codex_add_event(days, event)
+    return days
+
+
+def _codex_entry_prefix_key(entry):
+    values = entry.get("first_keys") or []
+    if len(values) < 2:
+        return None
+    try:
+        return tuple(values[0]), tuple(values[1])
+    except TypeError:
+        return None
+
+
+def _codex_cached_prefix_match_count(
+        child_path, parent_path, child_count=None, parent_count=None):
+    count = 0
+    child_events = _iter_codex_cached_events(child_path, limit=child_count)
+    parent_events = _iter_codex_cached_events(parent_path, limit=parent_count)
+    for child, parent in zip(child_events, parent_events):
+        child_key = _codex_event_key(child)
+        parent_key = _codex_event_key(parent)
+        if child_key is None or child_key != parent_key:
+            break
+        count += 1
+    return count
+
+
+def _codex_cached_burst_count(file_path, start_index, event_count):
+    burst_second = None
+    count = 0
+    for event in _iter_codex_cached_events(
+            file_path, start_index=start_index,
+            limit=max(int(event_count) - start_index, 0)):
+        if not event:
+            break
+        event_second = str(event[0])[:19]
+        if burst_second is None:
+            burst_second = event_second
+        elif event_second != burst_second:
+            break
+        count += 1
+    return count if count >= 5 else 0
+
+
+def _codex_cached_drop_count(file_path, entry, file_cache):
+    by_sid = {
+        candidate.get("session_id"): (path, candidate)
+        for path, candidate in file_cache.items()
+        if candidate.get("session_id")
+    }
+    event_count = int(entry.get("event_count", 0) or 0)
+    drop_count = 0
+    prefix_open = False
+
+    parent = by_sid.get(entry.get("forked_from_id"))
+    if parent and parent[0] != file_path:
+        drop_count = _codex_cached_prefix_match_count(
+            file_path, parent[0], event_count, parent[1].get("event_count"))
+        prefix_open = drop_count > 0 and drop_count == event_count
+
+    prefix_key = _codex_entry_prefix_key(entry)
+    if drop_count == 0 and prefix_key is not None and event_count >= 2:
+        child_first_ts = str(entry.get("first_event_ts") or "")
+        best = 0
+        for parent_path, parent_entry in file_cache.items():
+            if parent_path == file_path or _codex_entry_prefix_key(parent_entry) != prefix_key:
+                continue
+            parent_first_ts = str(parent_entry.get("first_event_ts") or "")
+            if not parent_first_ts or parent_first_ts >= child_first_ts:
+                continue
+            best = max(best, _codex_cached_prefix_match_count(
+                file_path, parent_path, event_count, parent_entry.get("event_count")))
+        if best >= 2:
+            drop_count = best
+            prefix_open = drop_count == event_count
+
+    burst_count = _codex_cached_burst_count(file_path, drop_count, event_count)
+    if burst_count:
+        drop_count += burst_count
+
+    if event_count < 2 and not entry.get("forked_from_id"):
+        prefix_open = True
+    elif entry.get("forked_from_id") and parent is None:
+        prefix_open = True
+    return min(drop_count, event_count), prefix_open
+
+
+def _codex_migrate_event_cache(file_cache):
+    if not any(isinstance(entry, dict) and "events" in entry for entry in file_cache.values()):
+        return False
+
+    canonical = _codex_canonical_file_cache(file_cache)
+    drops = _codex_replayed_event_indexes(canonical)
+    days_by_file = _codex_deduped_days(canonical)
+    prepared = {}
+    for file_path, entry in file_cache.items():
+        events = entry.get("events") or []
+        cache_size = _codex_write_event_cache(file_path, events)
+        metadata = _codex_event_metadata(events)
+        skipped = drops.get(file_path, set())
+        drop_count = 0
+        while drop_count in skipped:
+            drop_count += 1
+        prepared[file_path] = {
+            **metadata,
+            "event_cache_size": cache_size,
+            "drop_count": drop_count,
+            "dedupe_open": bool(drop_count and drop_count == len(events)),
+            "deduped_days": days_by_file.get(file_path, {}),
+            "canonical": file_path in canonical,
+        }
+
+    for file_path, entry in file_cache.items():
+        entry.update(prepared[file_path])
+        entry["days"] = entry["deduped_days"] if entry["canonical"] else {}
+        entry.pop("events", None)
+    return True
+
+
 def _codex_add_event(days, event):
     dk = event[1]
     li, lc, lo, lr, cost = event[6:11]
@@ -1340,13 +1616,16 @@ def _codex_canonical_file_cache(file_cache):
             "rollout", os.path.basename(file_path))
         events = entry.get("events") or []
         events = events if isinstance(events, list) else []
+        event_count = int(entry.get("event_count", len(events)) or 0)
         event_timestamps = [str(event[0]) for event in events
                             if isinstance(event, list) and event]
+        last_event_ts = str(entry.get("last_event_ts") or
+                            max(event_timestamps, default=""))
         try:
             parsed_size = int(entry.get("parsed_size", 0) or 0)
         except (TypeError, ValueError):
             parsed_size = 0
-        score = (len(events), max(event_timestamps, default=""), parsed_size)
+        score = (event_count, last_event_ts, parsed_size)
         previous = selected.get(logical_id)
         if previous is not None and score <= previous[0]:
             continue
@@ -1359,13 +1638,15 @@ def _codex_canonical_file_cache(file_cache):
 
 def scan_codex(bounds, cache):
     fc = cache.setdefault("codex", {})
+    if _codex_migrate_event_cache(fc):
+        cache["_dirty"] = True
     B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0,
              "sessions": set(), "models": {}}
          for k in RANGE_KEYS}
     rollout_files = _codex_rollout_files()
     if not rollout_files:
         if fc:
-            fc.clear()
+            _codex_clear_event_cache(fc)
             cache["_dirty"] = True
         return {"ranges": B, "cur_total": None, "limits": None, "plan": None}
 
@@ -1379,6 +1660,7 @@ def scan_codex(bounds, cache):
 
     cur_file, cur_mtime = None, -1.0
     stale = set(fc.keys())
+    dedupe_paths = set()
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
 
     for f in rollout_files:
@@ -1397,14 +1679,16 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig or entry.get("model_version") != 2:
+        if (not entry or entry.get("sig") != sig or entry.get("model_version") != 2
+                or not _codex_event_cache_ready(f, entry)):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
             if isinstance(entry, dict) and entry.get("model_version") == 2:
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
-                        and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)):
+                        and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
+                        and _codex_event_cache_ready(f, entry)):
                     append_from = old_offset
 
             if append_from is None:
@@ -1417,7 +1701,7 @@ def scan_codex(bounds, cache):
                 file_model = None
                 parse_start = 0
             else:
-                events = list(entry.get("events") or [])
+                events = []
                 session_id = entry.get("session_id")
                 forked_from_id = entry.get("forked_from_id")
                 file_limits = entry.get("limits"); file_limits_ts = entry.get("limits_ts")
@@ -1486,26 +1770,101 @@ def scan_codex(bounds, cache):
                         events.append([ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model])
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "events": events, "days": {},
-                     "session_id": session_id, "forked_from_id": forked_from_id,
-                     "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
-                     "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
-                     "last_total": file_last_total, "prev_total_key": prev_total_key,
-                     "active_model": file_model, "model_version": 2,
-                     "file_id": file_id, "parsed_size": complete_offset,
-                     "parsed_guard": _codex_offset_guard(f, complete_offset)}
+
+            if append_from is None:
+                event_cache_size = _codex_write_event_cache(f, events)
+                metadata = _codex_event_metadata(events)
+                deduped_days = {}
+                drop_count = 0
+                dedupe_open = True
+                was_canonical = False
+                dedupe_paths.add(f)
+            else:
+                event_cache_size = _codex_append_event_cache(
+                    f, events, int(entry.get("event_cache_size", 0) or 0))
+                metadata = {
+                    "event_count": int(entry.get("event_count", 0) or 0) + len(events),
+                    "first_keys": entry.get("first_keys") or [],
+                    "first_event_ts": entry.get("first_event_ts"),
+                    "last_event_ts": (
+                        str(events[-1][0]) if events else entry.get("last_event_ts")
+                    ),
+                }
+                if len(metadata["first_keys"]) < 2 and metadata["event_count"]:
+                    prefix_events = list(_iter_codex_cached_events(f, limit=2))
+                    prefix_metadata = _codex_event_metadata(prefix_events)
+                    metadata["first_keys"] = prefix_metadata["first_keys"]
+                    metadata["first_event_ts"] = prefix_metadata["first_event_ts"]
+                deduped_days = entry.get("deduped_days")
+                if not isinstance(deduped_days, dict):
+                    deduped_days = dict(entry.get("days") or {})
+                drop_count = int(entry.get("drop_count", 0) or 0)
+                dedupe_open = bool(entry.get("dedupe_open"))
+                was_canonical = bool(entry.get("canonical"))
+                if dedupe_open:
+                    dedupe_paths.add(f)
+                else:
+                    for event in events:
+                        _codex_add_event(deduped_days, event)
+
+            fc[f] = {
+                "sig": sig, "days": entry.get("days", {}) if isinstance(entry, dict) else {},
+                "deduped_days": deduped_days,
+                "session_id": session_id, "forked_from_id": forked_from_id,
+                "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
+                "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
+                "last_total": file_last_total, "prev_total_key": prev_total_key,
+                "active_model": file_model, "model_version": 2,
+                "file_id": file_id, "parsed_size": complete_offset,
+                "parsed_guard": _codex_offset_guard(f, complete_offset),
+                "event_cache_size": event_cache_size,
+                "event_count": metadata["event_count"],
+                "first_keys": metadata["first_keys"],
+                "first_event_ts": metadata["first_event_ts"],
+                "last_event_ts": metadata["last_event_ts"],
+                "drop_count": drop_count, "dedupe_open": dedupe_open,
+                "canonical": was_canonical,
+            }
             cache["_dirty"] = True
 
     for p in stale:
         fc.pop(p, None)
+        _codex_remove_event_cache(p)
         cache["_dirty"] = True
 
     # A session can briefly exist in active and archived directories together.
     # Select the more complete copy before applying fork/replay deduplication.
     canonical_fc = _codex_canonical_file_cache(fc)
-    days_by_file = _codex_deduped_days(canonical_fc)
     for f, entry in fc.items():
-        days = days_by_file.get(f, {})
+        is_canonical = f in canonical_fc
+        if is_canonical and not entry.get("canonical"):
+            dedupe_paths.add(f)
+        if entry.get("canonical") != is_canonical:
+            entry["canonical"] = is_canonical
+            cache["_dirty"] = True
+
+    for f in dedupe_paths:
+        entry = canonical_fc.get(f)
+        if entry is None:
+            continue
+        try:
+            drop_count, dedupe_open = _codex_cached_drop_count(f, entry, canonical_fc)
+            deduped_days = _codex_days_from_cached_events(
+                f, start_index=drop_count, event_count=entry.get("event_count"))
+        except OSError:
+            _codex_clear_event_cache(fc)
+            cache["_dirty"] = True
+            raise
+        if (entry.get("drop_count") != drop_count or
+                entry.get("dedupe_open") != dedupe_open or
+                entry.get("deduped_days") != deduped_days):
+            entry["drop_count"] = drop_count
+            entry["dedupe_open"] = dedupe_open
+            entry["deduped_days"] = deduped_days
+            cache["_dirty"] = True
+
+    for f, entry in fc.items():
+        days = entry.get("deduped_days", {}) if f in canonical_fc else {}
         if entry.get("days") != days:
             entry["days"] = days
             cache["_dirty"] = True
@@ -4549,6 +4908,7 @@ def scan_claude_plan():
     return _scan_claude_plan_raw()
 
 
+@_with_scan_cache_lock
 def compute():
     bounds = range_bounds()
     cache = _load_scan_cache()
@@ -5266,6 +5626,7 @@ def update_unknown():
             os.remove(_SCAN_CACHE_FILE)
         except OSError:
             pass
+        _remove_codex_event_cache_dir()
 
     result = {"status": "ok", "count": len(added), "added": added}
     print(json.dumps(result, ensure_ascii=False))

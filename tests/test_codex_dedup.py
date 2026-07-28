@@ -301,8 +301,44 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(usage["in"], 150)
         self.assertEqual(usage["cached"], 120)
         self.assertEqual(usage["out"], 8)
-        self.assertEqual(len(cache["codex"][cache_path]["events"]), 2)
+        self.assertEqual(cache["codex"][cache_path]["event_count"], 2)
+        self.assertNotIn("events", cache["codex"][cache_path])
         self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 30)
+
+    def test_missing_event_sidecar_rebuilds_unchanged_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            path = sessions / "rollout-rebuild.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("rebuild"),
+                self.token_count(
+                    "2024-01-08T00:01:00Z",
+                    (100, 80, 5, 2),
+                    (100, 80, 5, 2),
+                ),
+            ]) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            cache_path = root / "scan-cache.json"
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(cache_path)), \
+                 mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                first = USAGE.scan_codex(self.bounds(), cache)
+                source_path = str(path.resolve())
+                Path(USAGE._codex_event_cache_path(source_path)).unlink()
+                original_iterator = USAGE._iter_codex_usage_records
+                with mock.patch.object(
+                    USAGE, "_iter_codex_usage_records", wraps=original_iterator,
+                ) as iterator:
+                    second = USAGE.scan_codex(self.bounds(), cache)
+
+        self.assertEqual(first["ranges"]["all"]["in"], 100)
+        self.assertEqual(second["ranges"]["all"]["in"], 100)
+        self.assertEqual(iterator.call_args.kwargs["start_offset"], 0)
+        self.assertTrue(cache["codex"][source_path]["event_cache_size"] > 0)
 
     def test_scan_keeps_child_increment_and_drops_replayed_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -467,7 +503,8 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(len(usage["sessions"]), 1)
         populated = [entry for entry in cache["codex"].values() if entry.get("days")]
         self.assertEqual(len(populated), 1)
-        self.assertEqual(len(populated[0]["events"]), 2)
+        self.assertEqual(populated[0]["event_count"], 2)
+        self.assertNotIn("events", populated[0])
 
     def test_moving_session_to_archive_preserves_total_without_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -500,6 +537,59 @@ class CodexScanDedupTests(unittest.TestCase):
 
 
 class ScanCacheMigrationTests(unittest.TestCase):
+    def test_v19_codex_events_move_to_sidecar_cache(self):
+        first = event(
+            "2026-07-10T00:00:00+00:00",
+            "2026-07-10",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            1.0,
+        )
+        second = event(
+            "2026-07-10T00:01:00+00:00",
+            "2026-07-10",
+            (150, 120, 8, 3),
+            (50, 40, 3, 1),
+            0.5,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "rollout-migrate.jsonl"
+            source.touch()
+            cache_path = root / "scan-cache.json"
+            cache_path.write_text(json.dumps({
+                "v": 19,
+                "codex": {
+                    str(source): {
+                        "sig": "legacy",
+                        "events": [first, second],
+                        "days": {},
+                        "session_id": "migrate",
+                        "model_version": 2,
+                        "parsed_size": 0,
+                    },
+                },
+            }), encoding="utf-8")
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(cache_path)):
+                cache = USAGE._load_scan_cache()
+                migrated = USAGE._codex_migrate_event_cache(cache["codex"])
+                cache["_dirty"] = True
+                USAGE._save_scan_cache(cache)
+                stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                sidecar = USAGE._codex_event_cache_path(str(source))
+                cached_events = list(USAGE._iter_codex_cached_events(str(source)))
+
+        entry = stored["codex"][str(source)]
+        self.assertTrue(migrated)
+        self.assertEqual(stored["v"], USAGE._SCAN_CACHE_VERSION)
+        self.assertNotIn("events", entry)
+        self.assertEqual(entry["event_count"], 2)
+        self.assertEqual(entry["drop_count"], 0)
+        self.assertEqual(entry["deduped_days"]["2026-07-10"]["in"], 150)
+        self.assertEqual(cached_events, [first, second])
+        self.assertTrue(sidecar.endswith(".jsonl"))
+
     def test_v13_cache_is_invalidated_for_session_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "scan-cache.json"
