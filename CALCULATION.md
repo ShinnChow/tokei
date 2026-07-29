@@ -17,7 +17,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
-| OpenCode | `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | JSON, `tokens` + `cost` |
+| OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 
 ---
@@ -221,7 +221,7 @@ cost = non_cached_input/1M × price_in
 
 ### Pi Coding Agent CLI / OpenCode 成本
 
-Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 直接使用消息 JSON 中的 `cost` 字段。若 Pi 成本字段缺失，则按统一价格表用 input/output/cache_read/cache_write 回退估算。
+Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQLite `message.data` 中的 `cost` 字段，旧版 JSON 文件同口径。若 Pi 成本字段缺失，或 OpenCode 成本为 0 且模型能匹配价格表，则按统一价格表用 input/output/cache_read/cache_write 回退估算。
 
 ### Grok Build / Qoder / OpenClaw
 
