@@ -227,9 +227,7 @@ struct PanelView: View {
             .buttonStyle(.plain)
             .tip("项目足迹")
             Button {
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    mode = mode == .quotaHistory ? .cards : .quotaHistory
-                }
+                mode = mode == .quotaHistory ? .cards : .quotaHistory
             } label: {
                 Image(systemName: "chart.xyaxis.line")
                     .font(.system(size: 11, weight: .medium))
