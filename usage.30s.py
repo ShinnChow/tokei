@@ -4244,6 +4244,9 @@ def scan_workbuddy(bounds, cache):
 # SQLite: ~/.local/share/opencode/opencode.db；旧版 JSON 作为补充来源。
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
+_OPENCODE_COST_CACHE_VERSION = 1
+
+
 def _opencode_db_paths():
     data_dirs = _path_candidates(
         "TOKEI_OPENCODE_DATA_DIR", OPENCODE_DATA_DIR, *OPENCODE_DATA_DIRS)
@@ -4366,12 +4369,20 @@ def scan_opencode(bounds, cache):
         stale.discard(cache_key)
         signature = _sqlite_signature(db_path)
         entry = fc.get(cache_key)
-        if not entry or entry.get("sig") != signature:
+        if (not entry or entry.get("sig") != signature
+                or entry.get("cost_version") != _OPENCODE_COST_CACHE_VERSION):
             try:
-                days, message_ids = _scan_opencode_database(db_path)
+                days, message_ids = _scan_opencode_database(
+                    db_path, estimate_missing_cost=True)
             except Exception:
                 continue
-            entry = {"sig": signature, "days": days, "message_ids": message_ids, "source": "sqlite"}
+            entry = {
+                "sig": signature,
+                "days": days,
+                "message_ids": message_ids,
+                "source": "sqlite",
+                "cost_version": _OPENCODE_COST_CACHE_VERSION,
+            }
             fc[cache_key] = entry
             changed = True
         db_message_ids.update(entry.get("message_ids", []))
@@ -4397,7 +4408,8 @@ def scan_opencode(bounds, cache):
                     continue
                 sig = f"{st.st_mtime}:{st.st_size}"
                 entry = fc.get(f)
-                if entry and entry.get("sig") == sig:
+                if (entry and entry.get("sig") == sig
+                        and entry.get("cost_version") == _OPENCODE_COST_CACHE_VERSION):
                     day_data = entry.get("day")
                     message_id = entry.get("message_id") or file_id
                 else:
@@ -4409,8 +4421,13 @@ def scan_opencode(bounds, cache):
                     message_id = str(d.get("id") or file_id)
                     if message_id in seen_message_ids:
                         continue
-                    day_data = _opencode_message_day(d)
-                    fc[f] = {"sig": sig, "day": day_data, "message_id": message_id}
+                    day_data = _opencode_message_day(d, estimate_missing_cost=True)
+                    fc[f] = {
+                        "sig": sig,
+                        "day": day_data,
+                        "message_id": message_id,
+                        "cost_version": _OPENCODE_COST_CACHE_VERSION,
+                    }
                     changed = True
                 if message_id in seen_message_ids:
                     continue

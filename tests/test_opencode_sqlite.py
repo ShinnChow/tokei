@@ -9,12 +9,13 @@ from unittest import mock
 from test_codex_limits import USAGE
 
 
-def assistant(message_id, session_id, created, input_tokens, output_tokens=0):
+def assistant(message_id, session_id, created, input_tokens, output_tokens=0,
+              cost=0.25, model_id="claude-sonnet-4.6"):
     return {
         "id": message_id,
         "sessionID": session_id,
         "role": "assistant",
-        "modelID": "claude-sonnet-4.6",
+        "modelID": model_id,
         "time": {"created": created},
         "tokens": {
             "input": input_tokens,
@@ -22,7 +23,7 @@ def assistant(message_id, session_id, created, input_tokens, output_tokens=0):
             "reasoning": 3,
             "cache": {"read": 4, "write": 5},
         },
-        "cost": 0.25,
+        "cost": cost,
     }
 
 
@@ -86,12 +87,75 @@ class OpenCodeSqliteTests(unittest.TestCase):
         self.assertEqual(usage["cr"], 8)
         self.assertEqual(usage["cw"], 10)
         self.assertEqual(usage["reason"], 6)
+        self.assertEqual(usage["cost"], 0.5)
         self.assertEqual(usage["sessions"], {"ses-db", "ses-legacy"})
         self.assertEqual(cached["ranges"]["all"]["in"], 150)
         self.assertEqual(len(daily["daily"]), 1)
         self.assertEqual(daily["daily"][0]["tokens"], 189)
         self.assertEqual(wrapped["total_tokens"], 189)
         self.assertEqual(sum(wrapped["hours"]), 189)
+
+    def test_zero_cost_uses_pricing_fallback_and_refreshes_old_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "opencode.db"
+            created = int(datetime.now().astimezone().timestamp() * 1000)
+            message = assistant(
+                "msg-zero-cost",
+                "ses-zero-cost",
+                created,
+                1_000_000,
+                100_000,
+                cost=0,
+                model_id="glm-5.2",
+            )
+
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?)",
+                ("msg-zero-cost", "ses-zero-cost", created, json.dumps(message)),
+            )
+            connection.commit()
+            connection.close()
+
+            cache_key = "db:" + str(db_path)
+            cache = {
+                "v": USAGE._SCAN_CACHE_VERSION,
+                "opencode": {
+                    cache_key: {
+                        "sig": USAGE._sqlite_signature(str(db_path)),
+                        "days": {},
+                        "message_ids": [],
+                        "source": "sqlite",
+                    },
+                },
+            }
+            with mock.patch.object(USAGE, "_opencode_db_paths", return_value=[str(db_path)]), \
+                 mock.patch.object(USAGE, "_opencode_json_dirs", return_value=[]):
+                result = USAGE.scan_opencode(USAGE.range_bounds(), cache)
+                with mock.patch.object(
+                    USAGE,
+                    "_scan_opencode_database",
+                    side_effect=AssertionError("repriced OpenCode cache was rescanned"),
+                ):
+                    cached = USAGE.scan_opencode(USAGE.range_bounds(), cache)
+
+        price = USAGE._raw_price(USAGE._pricing_id("glm-5.2"))
+        expected = (
+            1_000_000 / 1e6 * price["in"]
+            + (100_000 + 3) / 1e6 * price["out"]
+            + 4 / 1e6 * price["cache_read"]
+            + 5 / 1e6 * price["cache_write"]
+        )
+        self.assertGreater(expected, 0)
+        self.assertAlmostEqual(result["ranges"]["all"]["cost"], expected)
+        self.assertAlmostEqual(cached["ranges"]["all"]["cost"], expected)
+        self.assertEqual(
+            cache["opencode"][cache_key]["cost_version"],
+            USAGE._OPENCODE_COST_CACHE_VERSION,
+        )
 
     def test_signature_tracks_wal_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
