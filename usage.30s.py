@@ -327,7 +327,12 @@ def nice_model(m: str) -> str:
     if "gpt" in s:
         mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
         version = mt.group(1) if mt else ""
-        suffix = " Mini" if "mini" in s else ""
+        variant_labels = []
+        for token, label in (("sol", "Sol"), ("luna", "Luna"), ("terra", "Terra"),
+                             ("mini", "Mini"), ("pro", "Pro")):
+            if re.search(rf"(?:^|[-_/ ]){token}(?:$|[-_/ ])", s):
+                variant_labels.append(label)
+        suffix = f" {' '.join(variant_labels)}" if variant_labels else ""
         return f"GPT-{version}{suffix}" if version else "GPT"
     if "mimo" in s:
         name = m.split("/")[-1]
