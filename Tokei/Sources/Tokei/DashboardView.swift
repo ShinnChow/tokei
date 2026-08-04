@@ -4,6 +4,7 @@ struct DailyCost: Codable, Identifiable {
     var date: String
     var claude: Double
     var codex: Double
+    var grok: Double?
     var pi: Double = 0
     var workbuddy: Double?
     var qwencode: Double?
@@ -339,8 +340,9 @@ struct DashboardView: View {
                         }
                         Text("\(Fmt.human((d.g_in ?? 0) + (d.g_out ?? 0) + (d.g_cr ?? 0) + (d.g_reason ?? 0))) tok")
                             .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                        Text("成本未提供")
-                            .font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.tTertiary)
+                        Text(String(format: "$%.2f", d.grok ?? 0))
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.tSecondary)
                     }
                 }
             }
@@ -720,6 +722,7 @@ struct DashboardView: View {
         DailyCost(date: lhs.date,
                   claude: lhs.claude + rhs.claude,
                   codex: lhs.codex + rhs.codex,
+                  grok: (lhs.grok ?? 0) + (rhs.grok ?? 0),
                   pi: lhs.pi + rhs.pi,
                   workbuddy: (lhs.workbuddy ?? 0) + (rhs.workbuddy ?? 0),
                   qwencode: (lhs.qwencode ?? 0) + (rhs.qwencode ?? 0),

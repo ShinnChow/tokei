@@ -162,6 +162,7 @@ _DEFAULT_PRICES = {
     "deepseek/deepseek-v4-pro":      {"in": 0.435, "out": 0.87, "cache_read": 0.0036, "cache_write": 0.0},
     "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
     "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
+    "x-ai/grok-4.5":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.3,    "cache_write": 0.0},
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
@@ -2514,6 +2515,19 @@ def _grok_usage_record(obj):
             "out": completion - reasoning, "reason": reasoning}
 
 
+def _grok_usage_cost(record, model):
+    price_id = _pricing_id(model)
+    if not price_id:
+        return 0.0
+    price = _raw_price(price_id)
+    return (
+        int(record.get("in", 0) or 0) * price["in"]
+        + int(record.get("cr", 0) or 0) * price["cache_read"]
+        + (int(record.get("out", 0) or 0) + int(record.get("reason", 0) or 0))
+        * price["out"]
+    ) / 1_000_000
+
+
 def _load_grok_usage_records(cache):
     old = cache.get("grok_usage", {})
     if not isinstance(old, dict):
@@ -2594,8 +2608,9 @@ def _grok_usage_days(records, sessions, latest_model):
         meta = sessions.get(sid) or {}
         model = meta.get("model") or latest_model or "grok"
         amount = token_total(record)
+        cost = _grok_usage_cost(record, model)
         _add_token_usage(day, record.get("in", 0), record.get("out", 0),
-                         record.get("cr", 0), 0, record.get("reason", 0), 0.0, model)
+                         record.get("cr", 0), 0, record.get("reason", 0), cost, model)
         day["tokens"] += amount
         day["calls"] += 1
         if sid:
@@ -2605,8 +2620,9 @@ def _grok_usage_days(records, sessions, latest_model):
         project = meta.get("project") or ""
         if project:
             project_day = day["projects"].setdefault(
-                project, {"tokens": 0, "sessions": set(), "models": {}})
+                project, {"tokens": 0, "cost": 0.0, "sessions": set(), "models": {}})
             project_day["tokens"] += amount
+            project_day["cost"] += cost
             if sid:
                 project_day["sessions"].add(sid)
             project_day["models"][model] = project_day["models"].get(model, 0) + amount
@@ -2957,11 +2973,11 @@ def scan_grok(bounds, cache=None):
         for range_key in classify_date(day_date, bounds):
             bucket = B[range_key]
             _add_token_usage(bucket, day.get("in", 0), day.get("out", 0),
-                             day.get("cr", 0), 0, day.get("reason", 0), 0.0)
+                             day.get("cr", 0), 0, day.get("reason", 0), day.get("cost", 0))
             for model, usage in day.get("models", {}).items():
                 _add_model_usage(bucket["models"], model, usage.get("in", 0),
                                  usage.get("out", 0), usage.get("cr", 0), 0,
-                                 usage.get("reason", 0), 0.0)
+                                 usage.get("reason", 0), usage.get("cost", 0))
             bucket["usage_calls"] += int(day.get("calls", 0) or 0)
             bucket["usage_sessions"].update(day.get("sessions", set()))
             bucket["sessions"].update(day.get("sessions", set()))
@@ -5202,8 +5218,8 @@ def compute():
         return {"tokens": usage_total if usage_available else b.get("ctx_used", 0),
                 "hit": hit, "in": b.get("in", 0), "out": b.get("out", 0),
                 "cr": b.get("cr", 0), "reason": b.get("reason", 0),
-                "cost": 0.0,
-                "models": _format_token_models(b.get("models", {}), include_prices=False),
+                "cost": b.get("cost", 0.0),
+                "models": _format_token_models(b.get("models", {}), include_prices=True),
                 "usage_available": usage_available,
                 "usage_calls": b.get("usage_calls", 0),
                 "usage_sessions": len(b.get("usage_sessions", [])),
@@ -5370,7 +5386,7 @@ def compute():
 
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
-    for tool_key in ("gemini", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
+    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -5410,7 +5426,7 @@ def _recalc_costs(result):
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                             + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key == "qwencode":
+                elif tool_key in ("grok", "qwencode"):
                     cr = m.get("cr", 0)
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
@@ -5606,11 +5622,13 @@ def main():
         print(f"今日 输出   {human(kt['out']):>6} {F}")
         if kt.get("reason"):
             print(f"今日 推理   {human(kt['reason']):>6} {F}")
+        if kt.get("cost", 0) > 0:
+            print(f"今日 ≈成本  ${kt['cost']:.2f} {F}")
     else:
         print(f"上下文快照 {human(kt['ctx_used']):>6} {F}")
     if gk.get("model"):
         print(f"model: {gk['model']} {F}")
-    print(f"  (成本未提供) | font=Menlo size=11")
+    print(f"  (成本按 API 价估,订阅实付不按此) | font=Menlo size=11")
     print("---")
     # Pi 块
     pt = d["pi"]["ranges"]["today"]
@@ -5902,7 +5920,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
                        "workbuddy": 0.0, "opencode": 0.0, "qwencode": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
@@ -5971,6 +5989,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         if cutoff and dk < cutoff:
             continue
         d = days.setdefault(dk, _empty())
+        d["grok"] += day.get("cost", 0)
         d["g_in"] += day.get("in", 0); d["g_out"] += day.get("out", 0)
         d["g_cr"] += day.get("cr", 0); d["g_reason"] += day.get("reason", 0)
         d["tokens"] += token_total(day)
@@ -5979,6 +5998,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             model = models.setdefault(
                 name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
                        "reason": 0, "tool": "grok"})
+            model["cost"] += usage.get("cost", 0)
             for key in TOKEN_FIELDS:
                 model[key] += int(usage.get(key, 0) or 0)
 
@@ -6138,11 +6158,12 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                                       "reason": codex_reason, "tool": "codex"}
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
-              "gemini": round(v["gemini"], 2), "hermes": round(v["hermes"], 2),
+              "gemini": round(v["gemini"], 2), "grok": round(v["grok"], 2),
+              "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
-              "total": round(v["claude"] + v["codex"] + v["gemini"] + v["zcode"]
+              "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"]
                              + v["opencode"] + v["qwencode"] + v["hermes"]
                              + v["openclaw"], 2),
@@ -6297,6 +6318,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         tok = token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
         total_tokens += tok
+        total_cost += day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         add_hours(dk, day.get("hours"))
         for model, usage in day.get("models", {}).items():
@@ -6696,6 +6718,7 @@ def projects():
                                                  "last_active": "", "model_tok": {}, "tools": set()})
             p["tools"].add("grok")
             p["tokens"] += int(usage.get("tokens", 0) or 0)
+            p["cost"] += float(usage.get("cost", 0) or 0)
             if dk > p["last_active"]:
                 p["last_active"] = dk
             session_ids = {sid for sid in usage.get("sessions", []) if sid}

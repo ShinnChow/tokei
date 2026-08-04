@@ -552,6 +552,9 @@ struct PanelView: View {
                 let grokMetrics: [Metric] = {
                     var items: [Metric] = []
                     if r.usage_available {
+                        if r.cost > 0 {
+                            items.append(.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost)))
+                        }
                         items.append(.init("arrow.down", "输入", Fmt.human(r.in)))
                         items.append(.init("bolt.fill", "缓存读", Fmt.human(r.cr)))
                         items.append(.init("arrow.up", "输出", Fmt.human(r.out)))
@@ -590,7 +593,9 @@ struct PanelView: View {
                     modelBadge(model, tint: Theme.grok)
                 }
                 Text(r.usage_available
-                     ? "来自 Grok Build 本地推理日志；成本未提供。"
+                     ? (r.cost > 0
+                        ? "来自 Grok Build 本地推理日志；成本按 API 价估算，订阅实付不按此。"
+                        : "来自 Grok Build 本地推理日志；当前模型未匹配到公开价格。")
                      : "旧版日志未保存真实用量，当前仅展示上下文与执行指标。")
                     .font(.system(size: 8.5))
                     .foregroundStyle(Theme.tTertiary)
