@@ -118,6 +118,11 @@ OPENCLAW_STATE_DB = os.path.join(HOME, ".openclaw", "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+PRIME_AGENT_DIR = os.path.expanduser(os.environ.get(
+    "PRIME_AGENT_CODING_AGENT_DIR", os.path.join(HOME, ".prime", "agent")))
+PRIME_AGENT_SESSION_DIR = os.path.expanduser(os.environ.get(
+    "PRIME_AGENT_SESSION_DIR", os.environ.get(
+        "PRIME_AGENT_CODING_AGENT_SESSION_DIR", os.path.join(PRIME_AGENT_DIR, "sessions"))))
 OMP_SESSION_DIR = os.path.expanduser(os.environ.get(
     "OMP_CODING_AGENT_SESSION_DIR", os.path.join(HOME, ".omp", "agent", "sessions")))
 QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
@@ -586,6 +591,10 @@ def _empty_opencode():
 
 
 def _empty_pi():
+    return _empty_opencode()
+
+
+def _empty_prime_agent():
     return _empty_opencode()
 
 
@@ -4050,6 +4059,145 @@ def scan_pi(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Prime Agent ----------
+# JSONL 文件: ~/.prime/agent/sessions/*.jsonl plus session-artifacts/**/**/*.jsonl.
+# Prime Agent uses the Pi Coding Agent Usage shape; child attribution records are bookkeeping only.
+def _prime_agent_session_dirs():
+    explicit = os.environ.get("TOKEI_PRIME_AGENT_SESSION_DIR")
+    if explicit:
+        return _existing_dirs([explicit])
+    agent_dir = os.path.expanduser(os.environ.get(
+        "PRIME_AGENT_CODING_AGENT_DIR", PRIME_AGENT_DIR))
+    session_override = os.environ.get(
+        "PRIME_AGENT_SESSION_DIR", os.environ.get("PRIME_AGENT_CODING_AGENT_SESSION_DIR"))
+    return _existing_dirs([
+        session_override or os.path.join(agent_dir, "sessions"),
+        os.path.join(agent_dir, "session-artifacts"),
+    ])
+
+
+def _parse_prime_session_file(path):
+    days = {}
+    events = []
+    project = None
+    session_id = os.path.basename(path)
+    model = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line_no, line in enumerate(fh, 1):
+                if '"type"' not in line and '"usage"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") == "session":
+                    session_id = str(obj.get("id") or session_id)
+                    project = obj.get("cwd") or project
+                    continue
+                if obj.get("type") == "model_change":
+                    model = _pi_model_id({"provider": obj.get("provider"),
+                                           "model": obj.get("modelId")})
+                    continue
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                usage = msg.get("usage") or {}
+                if not usage:
+                    continue
+                dt = parse_ts(obj.get("timestamp") or msg.get("timestamp") or "")
+                if dt is None:
+                    continue
+                current_model = _pi_model_id(msg)
+                current_model = current_model if current_model != "unknown" else model
+                inp = _pi_usage_int(usage, "input")
+                out = _pi_usage_int(usage, "output")
+                cr = _pi_usage_int(usage, "cacheRead", "cache_read")
+                cw = _pi_usage_int(usage, "cacheWrite", "cache_write")
+                reason = _pi_usage_int(usage, "reasoning", "reason", "reasoningTokens")
+                cost = _pi_usage_cost(usage, current_model)
+                if inp + out + cr + cw + reason == 0 and cost <= 0:
+                    continue
+                event_id = obj.get("id") or msg.get("id") or msg.get("responseId")
+                key = f"{session_id}:{event_id}" if event_id else f"{session_id}:{line_no}"
+                events.append({"key": key, "date": dt.astimezone().date().isoformat(),
+                               "hour": dt.astimezone().hour, "in": inp, "out": out,
+                               "cr": cr, "cw": cw, "reason": reason, "cost": cost,
+                               "model": current_model})
+    except OSError:
+        return {"session": session_id, "proj": project, "events": [], "days": {}}
+    for event in events:
+        day = days.setdefault(event["date"], _empty_token_day())
+        _add_token_usage(day, event["in"], event["out"], event["cr"], event["cw"],
+                         event["reason"], event["cost"], event["model"])
+        day["hours"][event["hour"]] += token_total(event)
+    return {"session": session_id, "sid": session_id, "proj": project,
+            "events": events, "days": days}
+
+
+def scan_prime_agent(bounds, cache):
+    fc = cache.setdefault("prime_agent", {})
+    B = _empty_token_ranges()
+    roots = _prime_agent_session_dirs()
+    seen_files = set()
+    for root in roots:
+        seen_files.update(os.path.realpath(f) for f in glob.glob(
+            os.path.join(root, "**", "*.jsonl"), recursive=True))
+    stale = set(fc.keys()) - seen_files
+    changed = bool(stale)
+    for path in sorted(seen_files):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        entry = fc.get(path)
+        if not isinstance(entry, dict) or entry.get("sig") != sig:
+            parsed = _parse_prime_session_file(path)
+            parsed["sig"] = sig
+            fc[path] = parsed
+            changed = True
+    for path in stale:
+        fc.pop(path, None)
+    # Prefer one physical copy of a logical session, then dedupe message IDs globally.
+    canonical = {}
+    for path, entry in fc.items():
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("sid") or path
+        old = canonical.get(sid)
+        if old is None or len(entry.get("events", [])) > len(old[1].get("events", [])):
+            canonical[sid] = (path, entry)
+    canonical_paths = {path for path, _ in canonical.values()}
+    for path in list(fc):
+        if not path.startswith("_") and path not in canonical_paths:
+            fc.pop(path, None)
+            changed = True
+    used = set()
+    for path, entry in canonical.values():
+        for event in entry.get("events", []):
+            if event.get("key") in used:
+                continue
+            used.add(event.get("key"))
+            day = B["all"]
+            _add_token_usage(day, event.get("in", 0), event.get("out", 0),
+                             event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
+                             event.get("cost", 0), event.get("model"))
+            for key in classify_date(date.fromisoformat(event["date"]), bounds):
+                if key == "all":
+                    continue
+                _add_token_usage(B[key], event.get("in", 0), event.get("out", 0),
+                                 event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
+                                 event.get("cost", 0), event.get("model"))
+                B[key]["sessions"].add(entry.get("sid") or path)
+        B["all"]["sessions"].add(entry.get("sid") or path)
+    if changed:
+        cache["_dirty"] = True
+    return {"ranges": B}
+
+
 # ---------- WorkBuddy ----------
 # JSONL 文件: ~/.workbuddy/projects/<encoded-cwd>/<session>.jsonl
 # 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
@@ -5168,6 +5316,7 @@ def compute():
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
+    prime = _safe_scan("prime_agent", lambda: scan_prime_agent(bounds, cache), _empty_prime_agent, errors)
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
@@ -5291,6 +5440,7 @@ def compute():
                 "models": _format_token_models(b["models"])}
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
+    paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
@@ -5367,6 +5517,9 @@ def compute():
         },
         "pi": {
             "ranges": piranges,
+        },
+        "prime_agent": {
+            "ranges": paranges,
         },
         "workbuddy": {
             "ranges": wbranges,
@@ -5922,11 +6075,12 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
-                       "workbuddy": 0.0, "opencode": 0.0, "qwencode": 0.0,
+                       "workbuddy": 0.0, "prime_agent": 0.0, "opencode": 0.0, "qwencode": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
+                        "pa_in": 0, "pa_out": 0, "pa_cr": 0, "pa_cw": 0, "pa_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
                        "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "g_in": 0, "g_out": 0, "g_cr": 0, "g_reason": 0,
@@ -5984,6 +6138,27 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             model["out"] += int(usage.get("out", 0) or 0)
             model["cr"] += cached
             model["reason"] += int(usage.get("thoughts", 0) or 0)
+
+    for fp, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            d["prime_agent"] += day.get("cost", 0)
+            d["pa_in"] += day.get("in", 0); d["pa_out"] += day.get("out", 0)
+            d["pa_cr"] += day.get("cr", 0); d["pa_cw"] += day.get("cw", 0)
+            d["pa_reason"] += day.get("reason", 0)
+            d["tokens"] += token_total(day)
+            for model_name, usage in day.get("models", {}).items():
+                name = f"{nice_model(model_name)} (Prime Agent)"
+                model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
+                                                 "cr": 0, "cw": 0, "reason": 0,
+                                                 "tool": "prime_agent"})
+                model["cost"] += usage.get("cost", 0)
+                for key in TOKEN_FIELDS:
+                    model[key] += usage.get(key, 0)
 
     for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
         if cutoff and dk < cutoff:
@@ -6162,14 +6337,15 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
-              "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
+              "workbuddy": round(v["workbuddy"], 2), "prime_agent": round(v["prime_agent"], 2), "qwencode": round(v["qwencode"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
-                             + v["mimocode"] + v["pi"] + v["workbuddy"]
+                             + v["mimocode"] + v["pi"] + v["prime_agent"] + v["workbuddy"]
                              + v["opencode"] + v["qwencode"] + v["hermes"]
                              + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
+               "pa_in": v["pa_in"], "pa_out": v["pa_out"], "pa_cr": v["pa_cr"], "pa_cw": v["pa_cw"], "pa_reason": v["pa_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
               "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
               "g_in": v["g_in"], "g_out": v["g_out"], "g_cr": v["g_cr"], "g_reason": v["g_reason"],
@@ -6431,6 +6607,23 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 nm = f"{nice_model(mn)} (Pi)"
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
+    # --- Prime Agent (Pi-compatible persisted assistant usage) ---
+    for f, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = token_total(day)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            total_tokens += tok
+            total_cost += day.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Prime Agent)"
+                model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
+
     # --- WorkBuddy (逐次调用，output 已含 reasoning) ---
     for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
         dk = record.get("date", "")
@@ -6675,6 +6868,25 @@ def projects():
                 p["last_active"] = dk
             for mn, mv in day.get("models", {}).items():
                 nm = f"{nice_model(mn)} (Pi)"
+                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+
+    # Prime Agent sessions
+    for f, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["sessions"] += 1
+        p["tools"].add("prime_agent")
+        for dk, day in entry.get("days", {}).items():
+            tok = token_total(day)
+            p["tokens"] += tok; p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]: p["last_active"] = dk
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Prime Agent)"
                 p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
 
     # WorkBuddy sessions

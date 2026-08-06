@@ -41,6 +41,7 @@ enum Theme {
     static let mimocode = Color(red: 0.95, green: 0.50, blue: 0.26) // 暖橙
     static let openclaw = Color(red: 0.85, green: 0.45, blue: 0.68) // 玫红
     static let pi = Color(red: 0.74, green: 0.58, blue: 0.95)       // 柔紫
+    static let primeAgent = Color(red: 0.96, green: 0.58, blue: 0.28) // 活力橙
     static let workbuddy = Color(red: 0.25, green: 0.78, blue: 0.72) // 青绿
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝

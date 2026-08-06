@@ -14,6 +14,7 @@ struct PanelView: View {
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
+    @State private var primeAgentModelsOpen = false
     @State private var workBuddyModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
@@ -41,6 +42,7 @@ struct PanelView: View {
     @AppStorage("showMimoCode") private var showMimoCode = true
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
+    @AppStorage("showPrimeAgent") private var showPrimeAgent = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
@@ -53,7 +55,7 @@ struct PanelView: View {
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
-         showOpenClaw, showPi, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
+         showOpenClaw, showPi, showPrimeAgent, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -285,6 +287,7 @@ struct PanelView: View {
         let hr = u.hermes.ranges.get(sel)
         let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
+        let par = u.prime_agent.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         let qcr = u.qwencode.ranges.get(sel)
         return [
@@ -318,6 +321,8 @@ struct PanelView: View {
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
+            ToolCardItem(id: "prime_agent", name: "Prime Agent", visible: showPrimeAgent, active: par.sessions > 0,
+                         tint: Theme.primeAgent, content: AnyView(tokenUsageBlock(title: "Prime Agent", par, tint: Theme.primeAgent, modelsOpen: $primeAgentModelsOpen))),
             ToolCardItem(id: "workbuddy", name: "WorkBuddy", visible: showWorkBuddy, active: wr.sessions > 0,
                          tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
@@ -1611,6 +1616,7 @@ struct PanelView: View {
                 settingsRow("MiMoCode", tint: Theme.mimocode, isOn: $showMimoCode)
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
+                settingsRow("Prime Agent", tint: Theme.primeAgent, isOn: $showPrimeAgent)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
@@ -2278,7 +2284,7 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
-                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "opencode", "qwencode"]
+                         "zcode", "mimocode", "openclaw", "pi", "prime_agent", "workbuddy", "opencode", "qwencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

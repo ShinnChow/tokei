@@ -16,6 +16,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
+| Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` | JSONL, assistant `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
@@ -88,6 +89,16 @@ token 快照误删。
 - 缓存写 = `usage.cacheWrite`
 - 推理 = `usage.reasoning`(如果存在)
 - 成本 = `usage.cost.total`(优先使用)
+
+**Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
+- 输入 = `usage.input`
+- 输出 = `usage.output`
+- 缓存读 = `usage.cacheRead`
+- 缓存写 = `usage.cacheWrite`
+- 推理 = `usage.reasoning`（通常没有，按 0 处理）
+- 成本 = `usage.cost.total`，缺失时按价格表估算
+
+只读取 assistant message 的逐次 usage；`child_usage_attributed` 是父会话聚合 bookkeeping，不重复计入。RLM 子代理日志按独立 session 参与统计。
 
 **Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
 - 输入 = `inputTokens - cachedTokens`

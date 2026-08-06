@@ -6,6 +6,7 @@ struct DailyCost: Codable, Identifiable {
     var codex: Double
     var grok: Double?
     var pi: Double = 0
+    var prime_agent: Double?
     var workbuddy: Double?
     var qwencode: Double?
     var total: Double
@@ -22,6 +23,11 @@ struct DailyCost: Codable, Identifiable {
     var p_cr: Int = 0
     var p_cw: Int = 0
     var p_reason: Int = 0
+    var pa_in: Int = 0
+    var pa_out: Int = 0
+    var pa_cr: Int = 0
+    var pa_cw: Int = 0
+    var pa_reason: Int = 0
     var w_in: Int?
     var w_out: Int?
     var w_cr: Int?
@@ -200,6 +206,7 @@ struct DashboardView: View {
         case "mimocode": return Theme.mimocode
         case "openclaw": return Theme.openclaw
         case "pi": return Theme.pi
+        case "prime_agent": return Theme.primeAgent
         case "workbuddy": return Theme.workbuddy
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
@@ -310,6 +317,16 @@ struct DashboardView: View {
                     Text("\(Fmt.human(d.p_in + d.p_out + d.p_cr + d.p_cw + d.p_reason)) tok")
                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
                     Text(String(format: "$%.2f", d.pi))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Theme.primeAgent).frame(width: 6, height: 6)
+                        Text("Prime Agent").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.primeAgent)
+                    }
+                    Text("\(Fmt.human((d.pa_in) + d.pa_out + d.pa_cr + d.pa_cw + d.pa_reason)) tok")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
+                    Text(String(format: "$%.2f", d.prime_agent ?? 0))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
                 }
                 VStack(alignment: .leading, spacing: 3) {
@@ -740,6 +757,11 @@ struct DashboardView: View {
                   p_cr: lhs.p_cr + rhs.p_cr,
                   p_cw: lhs.p_cw + rhs.p_cw,
                   p_reason: lhs.p_reason + rhs.p_reason,
+                  pa_in: lhs.pa_in + rhs.pa_in,
+                  pa_out: lhs.pa_out + rhs.pa_out,
+                  pa_cr: lhs.pa_cr + rhs.pa_cr,
+                  pa_cw: lhs.pa_cw + rhs.pa_cw,
+                  pa_reason: lhs.pa_reason + rhs.pa_reason,
                   w_in: (lhs.w_in ?? 0) + (rhs.w_in ?? 0),
                   w_out: (lhs.w_out ?? 0) + (rhs.w_out ?? 0),
                   w_cr: (lhs.w_cr ?? 0) + (rhs.w_cr ?? 0),
@@ -881,6 +903,7 @@ struct DashboardView: View {
         appendTokenModels(usage.mimocode.ranges.get(key).models, tool: "mimocode", suffix: "MiMoCode", to: &out)
         appendTokenModels(usage.openclaw.ranges.get(key).models, tool: "openclaw", suffix: "OpenClaw", to: &out)
         appendTokenModels(usage.pi.ranges.get(key).models, tool: "pi", suffix: "Pi", to: &out)
+        appendTokenModels(usage.prime_agent.ranges.get(key).models, tool: "prime_agent", suffix: "Prime Agent", to: &out)
         appendTokenModels(usage.workbuddy.ranges.get(key).models, tool: "workbuddy", suffix: "WorkBuddy", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
@@ -950,6 +973,7 @@ struct DashboardView: View {
             + usage.mimocode.ranges.get(key).cost
             + usage.openclaw.ranges.get(key).cost
             + usage.pi.ranges.get(key).cost
+             + usage.prime_agent.ranges.get(key).cost
             + usage.workbuddy.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost

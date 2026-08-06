@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
 
 ### 支持的工具
 
@@ -32,6 +32,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 | **Hermes** | Token、成本、缓存命中率、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
+| **Prime Agent** | Token、成本、缓存命中率、模型、项目（含 RLM 子代理） |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
@@ -159,6 +160,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
+| Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
@@ -318,7 +320,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **12 AI coding tools** in real-time — all from local log files, with zero network traffic.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **13 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
