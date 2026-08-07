@@ -21,15 +21,24 @@ struct UsageToolVisibility: Equatable {
     static let allVisible = UsageToolVisibility()
 }
 
-/// Pure text builder for copying the current-period usage summary.
-/// Keeps pasteboard/UI out of the unit under test.
+/// Pure summary builder for copy/share payloads.
 enum UsageSummaryBuilder {
-    struct Line: Equatable {
+    /// One tool's usage for a selected range (mirrors card-level metrics).
+    struct Line: Equatable, Identifiable {
+        var id: String
         var name: String
         var cost: Double?
+        /// Primary total tokens shown as headline (same basis as cards when possible).
         var tokens: Int?
         var sessions: Int?
         var calls: Int?
+        var input: Int?
+        var output: Int?
+        var cacheRead: Int?
+        var cacheWrite: Int?
+        var reason: Int?
+        /// Cache hit percent 0–100 when available.
+        var hit: Double?
         var extra: String?
 
         var isEmpty: Bool {
@@ -37,8 +46,38 @@ enum UsageSummaryBuilder {
             let ses = sessions ?? 0
             let cal = calls ?? 0
             let cst = cost ?? 0
-            return tok <= 0 && ses <= 0 && cal <= 0 && cst <= 0 && (extra == nil || extra?.isEmpty == true)
+            let parts = (input ?? 0) + (output ?? 0) + (cacheRead ?? 0) + (cacheWrite ?? 0) + (reason ?? 0)
+            return tok <= 0 && ses <= 0 && cal <= 0 && cst <= 0 && parts <= 0
+                && (extra == nil || extra?.isEmpty == true)
         }
+    }
+
+    struct Totals: Equatable {
+        var cost: Double
+        var tokens: Int
+        var sessions: Int
+        var calls: Int
+        var tools: Int
+        var input: Int
+        var output: Int
+        var cacheRead: Int
+        var cacheWrite: Int
+        var reason: Int
+    }
+
+    static func totals(for lines: [Line]) -> Totals {
+        Totals(
+            cost: lines.compactMap(\.cost).reduce(0, +),
+            tokens: lines.compactMap(\.tokens).reduce(0, +),
+            sessions: lines.compactMap(\.sessions).reduce(0, +),
+            calls: lines.compactMap(\.calls).reduce(0, +),
+            tools: lines.count,
+            input: lines.compactMap(\.input).reduce(0, +),
+            output: lines.compactMap(\.output).reduce(0, +),
+            cacheRead: lines.compactMap(\.cacheRead).reduce(0, +),
+            cacheWrite: lines.compactMap(\.cacheWrite).reduce(0, +),
+            reason: lines.compactMap(\.reason).reduce(0, +)
+        )
     }
 
     /// Human-readable plain-text summary for the selected range and visible tools.
@@ -56,17 +95,24 @@ enum UsageSummaryBuilder {
             for line in lines {
                 out.append(formatLine(line))
             }
-            let totalCost = lines.compactMap(\.cost).reduce(0, +)
-            let totalTokens = lines.compactMap(\.tokens).reduce(0, +)
+            let t = totals(for: lines)
             var totalParts: [String] = []
-            if totalCost > 0 {
-                totalParts.append(String(format: "$%.2f", totalCost))
-            }
-            if totalTokens > 0 {
-                totalParts.append("\(Fmt.human(totalTokens)) tok")
-            }
+            if t.cost > 0 { totalParts.append(String(format: "$%.2f", t.cost)) }
+            if t.tokens > 0 { totalParts.append("\(Fmt.human(t.tokens)) tok") }
+            if t.sessions > 0 { totalParts.append("\(t.sessions) 会话") }
+            if t.tools > 0 { totalParts.append("\(t.tools) 工具") }
             if !totalParts.isEmpty {
                 out.append("合计  " + totalParts.joined(separator: " · "))
+            }
+            var detail: [String] = []
+            if t.input > 0 { detail.append("输入 \(Fmt.human(t.input))") }
+            if t.output > 0 { detail.append("输出 \(Fmt.human(t.output))") }
+            if t.cacheRead > 0 { detail.append("缓存读 \(Fmt.human(t.cacheRead))") }
+            if t.cacheWrite > 0 { detail.append("缓存写 \(Fmt.human(t.cacheWrite))") }
+            if t.reason > 0 { detail.append("推理 \(Fmt.human(t.reason))") }
+            if t.calls > 0 { detail.append("调用 \(t.calls)") }
+            if !detail.isEmpty {
+                out.append(detail.joined(separator: " · "))
             }
         }
         if let line = formatUpdatedLine(updated) {
@@ -103,94 +149,148 @@ enum UsageSummaryBuilder {
 
         if visibility.claude {
             let r = usage.claude.ranges.get(range)
-            let tokens = r.in + r.out + r.cr + r.cw
-            let line = Line(name: "Claude Code", cost: r.cost, tokens: tokens,
-                            sessions: r.sessions, calls: nil, extra: nil)
+            let line = Line(
+                id: "claude", name: "Claude Code", cost: r.cost,
+                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions, calls: nil,
+                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw, reason: nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.codex {
             let r = usage.codex.ranges.get(range)
-            let tokens = r.in + r.cached + r.out
-            let line = Line(name: "Codex", cost: r.cost, tokens: tokens,
-                            sessions: r.sessions, calls: nil, extra: nil)
+            let line = Line(
+                id: "codex", name: "Codex", cost: r.cost,
+                tokens: r.in + r.cached + r.out, sessions: r.sessions, calls: nil,
+                input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.gemini {
             let r = usage.gemini.ranges.get(range)
-            let tokens = r.in + r.cached + r.out + r.thoughts
-            let line = Line(name: "Gemini", cost: r.cost, tokens: tokens,
-                            sessions: r.sessions, calls: nil, extra: nil)
+            let line = Line(
+                id: "gemini", name: "Gemini", cost: r.cost,
+                tokens: r.in + r.cached + r.out + r.thoughts, sessions: r.sessions, calls: nil,
+                input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
+                reason: r.thoughts > 0 ? r.thoughts : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.grok {
             let r = usage.grok.ranges.get(range)
-            let tokens = r.usage_available
-                ? (r.in + r.out + r.cr + r.reason)
-                : r.tokens
+            let tokens = r.usage_available ? (r.in + r.out + r.cr + r.reason) : r.tokens
             let sessions = max(r.sessions, r.usage_sessions)
-            let line = Line(name: "Grok", cost: r.cost > 0 ? r.cost : nil, tokens: tokens,
-                            sessions: sessions, calls: r.usage_calls > 0 ? r.usage_calls : nil,
-                            extra: nil)
+            let line = Line(
+                id: "grok", name: "Grok",
+                cost: r.cost > 0 ? r.cost : nil,
+                tokens: tokens, sessions: sessions,
+                calls: r.usage_calls > 0 ? r.usage_calls : nil,
+                input: r.usage_available ? r.in : nil,
+                output: r.usage_available ? r.out : nil,
+                cacheRead: r.usage_available ? r.cr : nil,
+                cacheWrite: nil,
+                reason: r.usage_available && r.reason > 0 ? r.reason : nil,
+                hit: r.usage_available && r.hit > 0 ? r.hit : nil,
+                extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.qoder {
             let r = usage.qoder.ranges.get(range)
-            let tokens = r.in + r.cached + r.out
-            let line = Line(name: "Qoder Desktop", cost: nil, tokens: tokens,
-                            sessions: r.sessions, calls: r.calls, extra: nil)
+            let line = Line(
+                id: "qoder", name: "Qoder Desktop", cost: nil,
+                tokens: r.in + r.cached + r.out, sessions: r.sessions, calls: r.calls,
+                input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
+                reason: nil, hit: r.ctx > 0 ? r.ctx : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.qoderwork {
             let r = usage.qoderwork.ranges.get(range)
-            let line = Line(name: "QoderWork", cost: nil, tokens: r.in + r.out,
-                            sessions: r.sessions, calls: r.calls, extra: nil)
+            let line = Line(
+                id: "qoderwork", name: "QoderWork", cost: nil,
+                tokens: r.in + r.out, sessions: r.sessions, calls: r.calls,
+                input: r.in, output: r.out, cacheRead: nil, cacheWrite: nil,
+                reason: nil, hit: nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.qodercli {
             let r = usage.qodercli.ranges.get(range)
-            let line = Line(name: "Qoder CLI", cost: nil, tokens: nil,
-                            sessions: r.sessions, calls: r.calls, extra: nil)
+            let line = Line(
+                id: "qodercli", name: "Qoder CLI", cost: nil,
+                tokens: nil, sessions: r.sessions, calls: r.calls,
+                input: nil, output: nil, cacheRead: nil, cacheWrite: nil,
+                reason: nil, hit: nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.hermes {
             let r = usage.hermes.ranges.get(range)
-            let tokens = r.in + r.out + r.cr + r.cw + r.reason
-            let line = Line(name: "Hermes", cost: r.cost, tokens: tokens,
-                            sessions: r.sessions, calls: nil, extra: nil)
+            let line = Line(
+                id: "hermes", name: "Hermes", cost: r.cost,
+                tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.zcode {
-            appendTokenTool(&lines, name: "ZCode", range: usage.zcode.ranges.get(range))
+            appendTokenTool(&lines, id: "zcode", name: "ZCode", range: usage.zcode.ranges.get(range))
         }
         if visibility.mimocode {
-            appendTokenTool(&lines, name: "MiMoCode", range: usage.mimocode.ranges.get(range))
+            appendTokenTool(&lines, id: "mimocode", name: "MiMoCode", range: usage.mimocode.ranges.get(range))
         }
         if visibility.openclaw {
             let r = usage.openclaw.ranges.get(range)
-            let tokens = r.in + r.out + r.cr + r.cw
-            let line = Line(name: "OpenClaw", cost: r.cost, tokens: tokens,
-                            sessions: r.sessions, calls: r.tasks > 0 ? r.tasks : nil, extra: nil)
+            let line = Line(
+                id: "openclaw", name: "OpenClaw", cost: r.cost,
+                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions,
+                calls: r.tasks > 0 ? r.tasks : nil,
+                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+                reason: nil, hit: r.hit > 0 ? r.hit : nil, extra: nil
+            )
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.pi {
-            appendTokenTool(&lines, name: "Pi", range: usage.pi.ranges.get(range))
+            appendTokenTool(&lines, id: "pi", name: "Pi", range: usage.pi.ranges.get(range))
         }
         if visibility.workbuddy {
-            appendTokenTool(&lines, name: "WorkBuddy", range: usage.workbuddy.ranges.get(range))
+            appendTokenTool(&lines, id: "workbuddy", name: "WorkBuddy", range: usage.workbuddy.ranges.get(range))
         }
         if visibility.opencode {
-            appendTokenTool(&lines, name: "OpenCode", range: usage.opencode.ranges.get(range))
+            appendTokenTool(&lines, id: "opencode", name: "OpenCode", range: usage.opencode.ranges.get(range))
         }
         if visibility.qwencode {
-            appendTokenTool(&lines, name: "Qwen Code", range: usage.qwencode.ranges.get(range))
+            appendTokenTool(&lines, id: "qwencode", name: "Qwen Code", range: usage.qwencode.ranges.get(range))
         }
         return lines
     }
 
-    private static func appendTokenTool(_ lines: inout [Line], name: String, range r: TokenUsageRange) {
-        let tokens = r.in + r.out + r.cr + r.cw + r.reason
-        let line = Line(name: name, cost: r.cost, tokens: tokens,
-                        sessions: r.sessions, calls: nil, extra: nil)
+    static func line(
+        forToolID id: String,
+        usage: Usage,
+        range: RangeKey,
+        visibility: UsageToolVisibility
+    ) -> Line? {
+        toolLines(usage: usage, range: range, visibility: visibility)
+            .first { $0.id == id }
+    }
+
+    private static func appendTokenTool(
+        _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange
+    ) {
+        let line = Line(
+            id: id, name: name, cost: r.cost,
+            tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+            input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+            reason: r.reason > 0 ? r.reason : nil,
+            hit: r.hit > 0 ? r.hit : nil, extra: nil
+        )
         if !line.isEmpty { lines.append(line) }
     }
 

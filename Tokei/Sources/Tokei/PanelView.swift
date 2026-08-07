@@ -51,6 +51,7 @@ struct PanelView: View {
     @AppStorage(MenuBarQuotaSource.codex.defaultsKey) private var menuBarQuotaCodex = true
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
     @State private var copyFeedback = false
+    @State private var copiedToolID: String?
 
     private var toolVisibility: UsageToolVisibility {
         UsageToolVisibility(
@@ -321,20 +322,20 @@ struct PanelView: View {
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr))),
             ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
-                         tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen))),
+                         tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen, toolID: "zcode"))),
             ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
-                         tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen))),
+                         tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen, toolID: "mimocode"))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw,
                          active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
-                         tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
+                         tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen, toolID: "pi"))),
             ToolCardItem(id: "workbuddy", name: "WorkBuddy", visible: showWorkBuddy, active: wr.sessions > 0,
-                         tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen))),
+                         tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen, toolID: "workbuddy"))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
-                         tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
+                         tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen, toolID: "opencode"))),
             ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
-                         tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen))),
+                         tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen, toolID: "qwencode"))),
         ]
     }
 
@@ -363,7 +364,7 @@ struct PanelView: View {
     @ViewBuilder
     func claudeBlock(_ c: ClaudeStat, _ r: ClaudeRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Claude Code", tint: Theme.claude, sessions: r.sessions)
+            cardHead("Claude Code", tint: Theme.claude, sessions: r.sessions, toolID: "claude")
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.claude)
                 metricGrid([
@@ -406,7 +407,7 @@ struct PanelView: View {
     @ViewBuilder
     func codexBlock(_ x: CodexStat, _ r: CodexRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Codex", tint: Theme.codex, sessions: r.sessions)
+            cardHead("Codex", tint: Theme.codex, sessions: r.sessions, toolID: "codex")
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.cached + r.out), caption: "\(sel.label) 总量", tint: Theme.codex)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -522,7 +523,7 @@ struct PanelView: View {
     @ViewBuilder
     func geminiBlock(_ r: GeminiRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Gemini CLI", tint: Theme.gemini, sessions: r.sessions)
+            cardHead("Gemini CLI", tint: Theme.gemini, sessions: r.sessions, toolID: "gemini")
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.cached + r.out + r.thoughts), caption: "\(sel.label) 总量", tint: Theme.gemini)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -555,7 +556,7 @@ struct PanelView: View {
     @ViewBuilder
     func grokBlock(_ g: GrokStat, _ r: GrokRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Grok", tint: Theme.grok, sessions: r.sessions)
+            cardHead("Grok", tint: Theme.grok, sessions: r.sessions, toolID: "grok")
             if r.sessions > 0 || r.usage_calls > 0 {
                 CostHeadline(value: Fmt.human(r.tokens),
                              caption: r.usage_available ? "\(sel.label) 真实用量" : "\(sel.label) 上下文快照",
@@ -718,7 +719,7 @@ struct PanelView: View {
     @ViewBuilder
     func qoderIdeBlock(_ q: QoderIdeStat, _ r: QoderIdeRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain("Qoder Desktop", tint: Theme.qoder)
+            cardHeadPlain("Qoder Desktop", tint: Theme.qoder, toolID: "qoder")
             if r.calls > 0 {
                 let total = r.in + r.cached + r.out
                 if total > 0 {
@@ -765,7 +766,7 @@ struct PanelView: View {
     @ViewBuilder
     func qoderworkBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain("QoderWork", tint: Theme.qoderwork)
+            cardHeadPlain("QoderWork", tint: Theme.qoderwork, toolID: "qoderwork")
             if r.calls > 0 {
                 metricGrid({
                     var items: [Metric] = [
@@ -797,7 +798,7 @@ struct PanelView: View {
     @ViewBuilder
     func qodercliBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain("Qoder CLI", tint: Theme.qodercli)
+            cardHeadPlain("Qoder CLI", tint: Theme.qodercli, toolID: "qodercli")
             if r.calls > 0 {
                 metricGrid({
                     var items: [Metric] = [
@@ -827,7 +828,7 @@ struct PanelView: View {
     @ViewBuilder
     func hermesBlock(_ r: HermesRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Hermes", tint: Theme.hermes, sessions: r.sessions)
+            cardHead("Hermes", tint: Theme.hermes, sessions: r.sessions, toolID: "hermes")
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: Theme.hermes)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -850,7 +851,7 @@ struct PanelView: View {
     @ViewBuilder
     func openclawBlock(_ r: OpenClawRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions)
+            cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions, toolID: "openclaw")
             if r.in + r.out + r.cr + r.cw > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.openclaw)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -897,9 +898,10 @@ struct PanelView: View {
 
     // MARK: - Token usage cards
     @ViewBuilder
-    func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color, modelsOpen: Binding<Bool>) -> some View {
+    func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color, modelsOpen: Binding<Bool>,
+                         toolID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead(title, tint: tint, sessions: r.sessions)
+            cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -981,7 +983,7 @@ struct PanelView: View {
         return denom > 0 ? Double(m.cr) / Double(denom) * 100 : 0
     }
 
-    func cardHead(_ title: String, tint: Color, sessions: Int = 0) -> some View {
+    func cardHead(_ title: String, tint: Color, sessions: Int = 0, toolID: String? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
@@ -994,17 +996,40 @@ struct PanelView: View {
                     .background(Capsule().fill(tint.opacity(0.12)))
             }
             Spacer()
+            if let toolID {
+                cardCopyButton(toolID: toolID, tint: tint)
+            }
         }
     }
 
     // 无命中环的卡头(Grok 无缓存命中数据)。
-    func cardHeadPlain(_ title: String, tint: Color) -> some View {
+    func cardHeadPlain(_ title: String, tint: Color, toolID: String? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
             Text(title).font(.system(size: 14, weight: .bold))
             Spacer()
+            if let toolID {
+                cardCopyButton(toolID: toolID, tint: tint)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func cardCopyButton(toolID: String, tint: Color) -> some View {
+        let done = copiedToolID == toolID
+        Button {
+            copySingleToolImage(id: toolID)
+        } label: {
+            Image(systemName: done ? "checkmark" : "photo.on.rectangle")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(done ? tint : Theme.tTertiary)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.primary.opacity(done ? 0.10 : 0.06)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .tip(done ? "已复制图片" : "复制此工具用量图")
     }
 
     @ViewBuilder
@@ -1369,7 +1394,7 @@ struct PanelView: View {
         }
     }
 
-    /// Generate a share card image for the current range and put it on the pasteboard.
+    /// Generate a multi-tool share card image for the current range.
     private func copyUsageImage() {
         guard let usage = store.usage else { return }
         let ok = UsageShareImage.copyToPasteboard(
@@ -1379,9 +1404,27 @@ struct PanelView: View {
             updated: store.lastUpdated
         )
         guard ok else { return }
+        copiedToolID = nil
         copyFeedback = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
             copyFeedback = false
+        }
+    }
+
+    /// Generate a single-tool share card (native-style) for one agent/card.
+    private func copySingleToolImage(id: String) {
+        guard let usage = store.usage,
+              let line = UsageSummaryBuilder.line(
+                forToolID: id, usage: usage, range: sel, visibility: toolVisibility
+              ) else { return }
+        let ok = UsageShareImage.copyToPasteboard(
+            line: line, range: sel, updated: store.lastUpdated
+        )
+        guard ok else { return }
+        copyFeedback = false
+        copiedToolID = id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            if copiedToolID == id { copiedToolID = nil }
         }
     }
 

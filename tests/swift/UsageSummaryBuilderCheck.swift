@@ -78,12 +78,25 @@ struct UsageSummaryBuilderCheck {
         )
         try expect(lines.map(\.name) == ["Claude Code", "Codex"],
                    "tool order/names: \(lines.map(\.name))")
+        try expect(lines.map(\.id) == ["claude", "codex"], "tool ids: \(lines.map(\.id))")
         try expect(lines[0].cost == 1.25, "claude cost value")
         try expect(lines[0].tokens == 1350, "claude tokens 1000+200+100+50")
+        try expect(lines[0].input == 1000, "claude input detail")
+        try expect(lines[0].output == 200, "claude output detail")
+        try expect(lines[0].cacheRead == 100, "claude cache read")
         try expect(lines[1].cost == 0.50, "codex cost value")
         try expect(lines[1].tokens == 350, "codex tokens 100+50+200")
 
-        // Generated share image (what the Copy button puts on the pasteboard).
+        let totals = UsageSummaryBuilder.totals(for: lines)
+        try expect(totals.tools == 2, "totals tools")
+        try expect(abs(totals.cost - 1.75) < 0.001, "totals cost")
+        try expect(totals.input == 1100, "totals input")
+        try expect(totals.output == 400, "totals output")
+        try expect(hiddenText.contains("输入") || UsageSummaryBuilder.text(
+            usage: usage, range: .today, visibility: hideGemini
+        ).contains("输入"), "text totals include input detail")
+
+        // Generated share images (footer + per-tool).
         try MainActor.assumeIsolated {
             guard let png = UsageShareImage.pngData(
                 usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
@@ -91,7 +104,6 @@ struct UsageSummaryBuilderCheck {
                 throw TestFailure.assertion("pngData returned nil")
             }
             try expect(png.count > 800, "png too small: \(png.count)")
-            // PNG signature
             try expect(png.starts(with: [0x89, 0x50, 0x4E, 0x47]), "not a PNG")
 
             guard let hiddenPng = UsageShareImage.pngData(
@@ -100,13 +112,25 @@ struct UsageSummaryBuilderCheck {
                 throw TestFailure.assertion("hidden png nil")
             }
             try expect(hiddenPng.count > 800, "hidden png too small")
-            // Different visibility should change the rendered card size/content.
             try expect(hiddenPng != png, "hidden vs all-visible images should differ")
 
+            guard let codexLine = UsageSummaryBuilder.line(
+                forToolID: "codex", usage: usage, range: .today, visibility: allVisible
+            ) else {
+                throw TestFailure.assertion("codex line missing")
+            }
+            guard let singlePng = UsageShareImage.pngData(
+                line: codexLine, range: .today, updated: "更新 12:00:00"
+            ) else {
+                throw TestFailure.assertion("single-tool png nil")
+            }
+            try expect(singlePng.count > 800, "single png too small")
+            try expect(singlePng != png, "single-tool image should differ from overview")
+
             let wrote = UsageShareImage.copyToPasteboard(
-                usage: usage, range: .today, visibility: allVisible, updated: "更新 12:00:00"
+                line: codexLine, range: .today, updated: "更新 12:00:00"
             )
-            try expect(wrote, "copyToPasteboard failed")
+            try expect(wrote, "single-tool copyToPasteboard failed")
             let pb = NSPasteboard.general
             let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
                 || pb.data(forType: .png) != nil
