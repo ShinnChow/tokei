@@ -1359,26 +1359,26 @@ struct PanelView: View {
             Spacer()
             KeepAwakeMenu(ka: store.keepAwake)
             IconButton(
-                icon: copyFeedback ? "checkmark" : "doc.on.doc",
+                icon: copyFeedback ? "checkmark" : "photo.on.rectangle",
                 label: copyFeedback ? "已复制" : "复制"
             ) {
-                copyUsageSummary()
+                copyUsageImage()
             }
             IconButton(icon: "arrow.clockwise", label: "刷新") { store.refresh() }
             IconButton(icon: "power", label: "退出") { NSApp.terminate(nil) }
         }
     }
 
-    private func copyUsageSummary() {
+    /// Generate a share card image for the current range and put it on the pasteboard.
+    private func copyUsageImage() {
         guard let usage = store.usage else { return }
-        let text = UsageSummaryBuilder.text(
+        let ok = UsageShareImage.copyToPasteboard(
             usage: usage,
             range: sel,
             visibility: toolVisibility,
             updated: store.lastUpdated
         )
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        guard ok else { return }
         copyFeedback = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
             copyFeedback = false

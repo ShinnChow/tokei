@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 private enum TestFailure: Error {
     case assertion(String)
@@ -11,6 +12,9 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 @main
 struct UsageSummaryBuilderCheck {
     static func main() throws {
+        // ImageRenderer needs an AppKit app instance (same as --shot).
+        _ = NSApplication.shared
+
         let usage = try decodeFixture(Self.fixtureJSON)
         let allVisible = UsageToolVisibility.allVisible
 
@@ -78,6 +82,36 @@ struct UsageSummaryBuilderCheck {
         try expect(lines[0].tokens == 1350, "claude tokens 1000+200+100+50")
         try expect(lines[1].cost == 0.50, "codex cost value")
         try expect(lines[1].tokens == 350, "codex tokens 100+50+200")
+
+        // Generated share image (what the Copy button puts on the pasteboard).
+        try MainActor.assumeIsolated {
+            guard let png = UsageShareImage.pngData(
+                usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
+            ) else {
+                throw TestFailure.assertion("pngData returned nil")
+            }
+            try expect(png.count > 800, "png too small: \(png.count)")
+            // PNG signature
+            try expect(png.starts(with: [0x89, 0x50, 0x4E, 0x47]), "not a PNG")
+
+            guard let hiddenPng = UsageShareImage.pngData(
+                usage: usage, range: .today, visibility: hideGemini, updated: nil
+            ) else {
+                throw TestFailure.assertion("hidden png nil")
+            }
+            try expect(hiddenPng.count > 800, "hidden png too small")
+            // Different visibility should change the rendered card size/content.
+            try expect(hiddenPng != png, "hidden vs all-visible images should differ")
+
+            let wrote = UsageShareImage.copyToPasteboard(
+                usage: usage, range: .today, visibility: allVisible, updated: "更新 12:00:00"
+            )
+            try expect(wrote, "copyToPasteboard failed")
+            let pb = NSPasteboard.general
+            let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
+                || pb.data(forType: .png) != nil
+            try expect(hasImage, "pasteboard should contain image/png")
+        }
 
         print("usage summary builder checks passed")
     }
