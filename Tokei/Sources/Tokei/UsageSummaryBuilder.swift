@@ -69,10 +69,29 @@ enum UsageSummaryBuilder {
                 out.append("合计  " + totalParts.joined(separator: " · "))
             }
         }
-        if let updated, !updated.isEmpty, updated != "加载中…" {
-            out.append("更新于 \(updated)")
+        if let line = formatUpdatedLine(updated) {
+            out.append(line)
         }
         return out.joined(separator: "\n")
+    }
+
+    /// Normalize store timestamps like `"更新 HH:mm:ss"` so we never emit `"更新于 更新 …"`.
+    static func formatUpdatedLine(_ updated: String?) -> String? {
+        guard let updated else { return nil }
+        let trimmed = updated.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed == "加载中…" || trimmed.hasPrefix("加载中")
+            || trimmed == "加载失败" || trimmed == "预览" {
+            return nil
+        }
+        var body = trimmed
+        if body.hasPrefix("更新于") {
+            body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+        } else if body.hasPrefix("更新") {
+            body = String(body.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        }
+        guard !body.isEmpty else { return nil }
+        return "更新于 \(body)"
     }
 
     static func toolLines(

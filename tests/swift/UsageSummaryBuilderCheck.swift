@@ -26,9 +26,25 @@ struct UsageSummaryBuilderCheck {
         // Claude 1.25 + Codex 0.50 + Gemini 0.10
         try expect(todayText.contains("$1.85"), "total cost wrong: \(todayText)")
         try expect(todayText.contains("更新于 12:34"), "updated missing: \(todayText)")
+        try expect(!todayText.contains("更新于 更新"), "must not double-prefix bare time: \(todayText)")
         try expect(todayText.contains("Gemini"), "gemini should appear when visible: \(todayText)")
         try expect(todayText.contains("$0.10") || todayText.contains("$0.1"),
                    "gemini cost missing: \(todayText)")
+
+        // Store path uses lastUpdated = "更新 HH:mm:ss" (main.swift); strip, don't nest.
+        let storeStampText = UsageSummaryBuilder.text(
+            usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
+        )
+        try expect(storeStampText.contains("更新于 21:51:18"),
+                   "store stamp should normalize: \(storeStampText)")
+        try expect(!storeStampText.contains("更新于 更新"),
+                   "must not double-prefix store lastUpdated: \(storeStampText)")
+        try expect(UsageSummaryBuilder.formatUpdatedLine("更新 21:51:18") == "更新于 21:51:18",
+                   "formatUpdatedLine store stamp")
+        try expect(UsageSummaryBuilder.formatUpdatedLine("更新于 09:00") == "更新于 09:00",
+                   "formatUpdatedLine already-prefixed")
+        try expect(UsageSummaryBuilder.formatUpdatedLine("加载中…") == nil,
+                   "loading stamp omitted")
 
         var hideGemini = allVisible
         hideGemini.gemini = false
