@@ -210,6 +210,7 @@ struct DashboardView: View {
         case "deepseek_harness": return Theme.deepseekHarness
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
+        case "kimicode": return Theme.kimicode
         default: return Theme.claude
         }
     }
@@ -988,6 +989,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.deepseekHarness.ranges.get(key))
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
+            + tokenUsageTotal(usage.kimicode.ranges.get(key))
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -1003,6 +1005,7 @@ struct DashboardView: View {
             + usage.deepseekHarness.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost
+            + usage.kimicode.ranges.get(key).cost
     }
 
     static func tokenUsageTotal(_ r: TokenUsageRange) -> Int {

@@ -375,6 +375,7 @@ final class SyncManager {
             mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
+            mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
         }
         return u
     }

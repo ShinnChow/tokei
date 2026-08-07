@@ -40,6 +40,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 - Pi Coding Agent CLI (`~/.pi/agent/sessions/`)
 - OpenCode (`~/.local/share/opencode/`)
 - Qwen Code (`~/.qwen/`)
+- Kimi Code (`${KIMI_SHARE_DIR:-~/.kimi}/`)
 
 ## 卸载
 

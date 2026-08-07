@@ -20,6 +20,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
+| Kimi Code | `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, `StatusUpdate.token_usage`（含嵌套子 Agent 事件） |
 
 ---
 
@@ -98,6 +99,16 @@ token 快照误删。
 - `deepseek-official` 路由固定采用 DeepSeek 官方直连价，不受 OpenRouter 价格更新影响
 - V4 Pro 缓存未命中输入、缓存命中输入、输出：`$0.435 / $0.003625 / $0.87` 每百万 Token
 - V4 Flash 缓存未命中输入、缓存命中输入、输出：`$0.14 / $0.0028 / $0.28` 每百万 Token
+
+**Kimi Code** — 官方 wire 日志字段独立:
+- 输入 = `token_usage.input_other`
+- 输出 = `token_usage.output`
+- 缓存读 = `token_usage.input_cache_read`
+- 缓存写 = `token_usage.input_cache_creation`
+
+Tokei 递归展开主会话 `wire.jsonl` 中的 `SubagentEvent`，因此子 Agent 用量会计入，且不会再次扫描
+`session/subagents` 造成重复。`message_id` 在同一 Agent 作用域内去重。当前 wire 不持久化每次调用的模型名
+和成本，因此 Kimi Code 卡片不展示推测的模型明细或 API 成本。
 
 **Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
 - 输入 = `inputTokens - cachedTokens`

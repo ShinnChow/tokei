@@ -1,0 +1,148 @@
+import hashlib
+import json
+import os
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from unittest import mock
+
+from test_codex_limits import USAGE
+
+
+def status(timestamp, message_id, usage):
+    return {
+        "timestamp": timestamp,
+        "message": {
+            "type": "StatusUpdate",
+            "payload": {"message_id": message_id, "token_usage": usage},
+        },
+    }
+
+
+def subagent(timestamp, agent_id, message_id, usage):
+    return {
+        "timestamp": timestamp,
+        "message": {
+            "type": "SubagentEvent",
+            "payload": {
+                "agent_id": agent_id,
+                "event": status(timestamp, message_id, usage)["message"],
+            },
+        },
+    }
+
+
+class KimiCodeScanTests(unittest.TestCase):
+    def create_session(self, root):
+        project = "/tmp/kimi-project"
+        project_hash = hashlib.md5(project.encode("utf-8")).hexdigest()
+        session_dir = Path(root) / "sessions" / project_hash / "session-1"
+        session_dir.mkdir(parents=True)
+        now = datetime.now().astimezone().replace(minute=0, second=0, microsecond=0)
+        timestamp = now.timestamp()
+        records = [
+            {"type": "metadata", "protocol_version": "1"},
+            status(timestamp, "message-1", {
+                "input_other": 100,
+                "output": 20,
+                "input_cache_read": 30,
+                "input_cache_creation": 5,
+            }),
+            # Same Agent scope and message ID is a duplicate replay.
+            status(timestamp, "message-1", {"input_other": 999, "output": 999}),
+            # A subagent may legitimately receive the same provider message ID.
+            subagent(timestamp, "agent-1", "message-1", {
+                "input_other": 40,
+                "output": 8,
+                "input_cache_read": 10,
+                "input_cache_creation": 2,
+            }),
+            {"timestamp": timestamp, "message": {"type": "StatusUpdate", "payload": {
+                "token_usage": {"input_other": 10, "output": 5},
+            }}},
+        ]
+        wire = session_dir / "wire.jsonl"
+        wire.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n{broken\n",
+            encoding="utf-8",
+        )
+        (Path(root) / "kimi.json").write_text(json.dumps({
+            "work_dirs": [{"path": project, "kaos": "local"}],
+        }), encoding="utf-8")
+        return wire, now, project
+
+    def scan(self, root, cache=None):
+        old_root = USAGE.KIMI_CODE_DIR
+        USAGE.KIMI_CODE_DIR = str(root)
+        scan_cache = cache if cache is not None else {"v": USAGE._SCAN_CACHE_VERSION}
+        try:
+            result = USAGE.scan_kimicode(USAGE.range_bounds(), scan_cache)
+        finally:
+            USAGE.KIMI_CODE_DIR = old_root
+        return result, scan_cache
+
+    def test_wire_usage_includes_scoped_subagents_and_splits_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wire, now, project = self.create_session(tmp)
+            result, cache = self.scan(tmp)
+
+            with mock.patch.object(
+                USAGE, "_scan_kimi_wire", side_effect=AssertionError("unchanged wire was rescanned")
+            ):
+                self.scan(tmp, cache=cache)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["out"], 33)
+        self.assertEqual(usage["cr"], 40)
+        self.assertEqual(usage["cw"], 7)
+        self.assertEqual(USAGE.token_total(usage), 230)
+        self.assertEqual(usage["sessions"], {"session-1"})
+        self.assertEqual(usage["models"], {})
+        self.assertEqual(usage["cost"], 0)
+        entry = cache["kimicode"][str(wire)]
+        self.assertEqual(entry["proj"], project)
+        self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour], 230)
+
+    def test_missing_source_clears_stale_cache(self):
+        stale = {
+            "v": USAGE._SCAN_CACHE_VERSION,
+            "kimicode": {"/old/wire.jsonl": {"sig": "old", "days": {}}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            result, cache = self.scan(tmp, cache=stale)
+
+        self.assertEqual(result["ranges"]["all"]["in"], 0)
+        self.assertEqual(cache["kimicode"], {})
+        self.assertTrue(cache["_dirty"])
+
+    def test_daily_and_wrapped_include_kimi_tokens_hours_and_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, now, _ = self.create_session(tmp)
+            result, cache = self.scan(tmp)
+            self.assertEqual(USAGE.token_total(result["ranges"]["all"]), 230)
+
+            cache_path = Path(tmp) / "scan-cache.json"
+            cache_path.write_text(json.dumps({
+                "v": USAGE._SCAN_CACHE_VERSION,
+                "kimicode": cache["kimicode"],
+            }), encoding="utf-8")
+            old_cache = USAGE._SCAN_CACHE_FILE
+            USAGE._SCAN_CACHE_FILE = str(cache_path)
+            try:
+                daily = USAGE.build_daily_costs("30d", refresh=False)
+                wrapped = USAGE.build_wrapped("30d", refresh=False)
+            finally:
+                USAGE._SCAN_CACHE_FILE = old_cache
+
+        self.assertEqual(daily["daily"][0]["tokens"], 230)
+        self.assertEqual(daily["daily"][0]["kimicode"], 0)
+        self.assertEqual(wrapped["total_tokens"], 230)
+        self.assertEqual(wrapped["hours"][now.hour], 230)
+        self.assertEqual(wrapped["projects"][0]["name"], "kimi-project")
+        self.assertEqual(wrapped["projects"][0]["tokens"], 230)
+
+
+if __name__ == "__main__":
+    unittest.main()
