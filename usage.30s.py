@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import re
+import tomllib
 from datetime import datetime, timedelta, date
 from pathlib import Path
 
@@ -78,6 +79,7 @@ CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_ARCHIVED_DIR = os.path.join(HOME, ".codex", "archived_sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
+CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 GEMINI_DIRS = _path_candidates(
     "TOKEI_GEMINI_DIR", GEMINI_DIR,
@@ -1022,6 +1024,29 @@ def _decode_jwt_claims(token):
         return {}
 
 
+def _codex_config():
+    """Read Codex CLI config.toml; return empty dict on any error."""
+    try:
+        with open(CODEX_CONFIG, "rb") as f:
+            return tomllib.load(f) or {}
+    except Exception:
+        return {}
+
+
+def _codex_is_custom_provider():
+    """True when Codex is pointed at a non-OpenAI provider (cc Switch, etc.)."""
+    cfg = _codex_config()
+    provider = cfg.get("model_provider")
+    # Explicit custom provider
+    if provider and provider != "openai":
+        return True
+    # No provider declared but a custom block exists without openai
+    providers = cfg.get("model_providers") or {}
+    if providers and "openai" not in providers:
+        return True
+    return False
+
+
 def _codex_auth_context(auth):
     if not isinstance(auth, dict):
         return {}
@@ -1060,6 +1085,17 @@ def _codex_auth_context(auth):
 
 def fetch_codex_live_limits():
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
+        return None
+    # When the user has switched to a third-party provider (cc Switch, etc.),
+    # the official OpenAI quota endpoint is no longer relevant. Skip it and
+    # clear any stale cached official quota so the dashboard falls back to
+    # showing only token usage/cost.
+    if _codex_is_custom_provider():
+        try:
+            if os.path.exists(CODEX_QUOTA_CACHE):
+                os.remove(CODEX_QUOTA_CACHE)
+        except Exception:
+            pass
         return None
     cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
     if cached:
@@ -1168,6 +1204,14 @@ def _save_codex_reset_cards_state(state):
 def fetch_codex_reset_cards(now_epoch=None):
     """Return available reset-card expirations with a persistent low-frequency cache."""
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
+        return {}
+    # Reset cards are an OpenAI-account concept; ignore them for third-party providers.
+    if _codex_is_custom_provider():
+        try:
+            if os.path.exists(CODEX_RESET_CARDS_CACHE):
+                os.remove(CODEX_RESET_CARDS_CACHE)
+        except Exception:
+            pass
         return {}
     now_epoch = int(datetime.now().timestamp()) if now_epoch is None else int(now_epoch)
     auth = _load_json(CODEX_AUTH, {})
@@ -1620,13 +1664,15 @@ def _codex_deduped_days(file_cache):
 
 
 _CODEX_TOKEN_EVENT_HEADER = re.compile(
-    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"\s*,\s*'
-    rb'"type"\s*:\s*"event_msg"\s*,\s*'
+    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"'
+    rb'(?:\s*,\s*"[^"]+"\s*:\s*[^,]+)*'
+    rb'\s*,\s*"type"\s*:\s*"event_msg"\s*,\s*'
     rb'"payload"\s*:\s*\{\s*"type"\s*:\s*"token_count"'
 )
 _CODEX_MODEL_RECORD_HEADER = re.compile(
-    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"\s*,\s*'
-    rb'"type"\s*:\s*"(?:turn_context|session_meta)"'
+    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"'
+    rb'(?:\s*,\s*"[^"]+"\s*:\s*[^,]+)*'
+    rb'\s*,\s*"type"\s*:\s*"(?:turn_context|session_meta)"'
 )
 _CODEX_MODEL_FIELD = re.compile(rb'"model"\s*:\s*"((?:\\.|[^"\\])*)"')
 
@@ -1888,12 +1934,12 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
-        if (not entry or entry.get("sig") != sig or entry.get("model_version") != 2
+        if (not entry or entry.get("sig") != sig or entry.get("model_version") != 3
                 or not _codex_event_cache_ready(f, entry)):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
-            if isinstance(entry, dict) and entry.get("model_version") == 2:
+            if isinstance(entry, dict) and entry.get("model_version") == 3:
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
                         and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
@@ -2025,7 +2071,7 @@ def scan_codex(bounds, cache):
                 "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                 "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
                 "last_total": file_last_total, "prev_total_key": prev_total_key,
-                "active_model": file_model, "model_version": 2,
+                "active_model": file_model, "model_version": 3,
                 "file_id": file_id, "parsed_size": complete_offset,
                 "parsed_guard": _codex_offset_guard(f, complete_offset),
                 "event_cache_size": event_cache_size,
@@ -2125,6 +2171,12 @@ def scan_codex(bounds, cache):
     if live:
         latest_limits, live_plan = live
         plan_type = live_plan or (latest_limits or {}).get("plan_type") or plan_type
+
+    # For third-party providers the official OpenAI quota is not meaningful,
+    # and stale limits from older sessions must not be shown.
+    if _codex_is_custom_provider():
+        latest_limits = None
+        plan_type = None
 
     cur_total = None
     if cur_file:
