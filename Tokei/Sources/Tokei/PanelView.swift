@@ -50,6 +50,17 @@ struct PanelView: View {
     @AppStorage(MenuBarQuotaSource.claude.defaultsKey) private var menuBarQuotaClaude = true
     @AppStorage(MenuBarQuotaSource.codex.defaultsKey) private var menuBarQuotaCodex = true
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
+    @State private var copyFeedback = false
+
+    private var toolVisibility: UsageToolVisibility {
+        UsageToolVisibility(
+            claude: showClaude, codex: showCodex, gemini: showGemini, grok: showGrok,
+            qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
+            hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
+            openclaw: showOpenClaw, pi: showPi, workbuddy: showWorkBuddy,
+            opencode: showOpenCode, qwencode: showQwenCode
+        )
+    }
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
@@ -1347,8 +1358,30 @@ struct PanelView: View {
             disclaimer
             Spacer()
             KeepAwakeMenu(ka: store.keepAwake)
+            IconButton(
+                icon: copyFeedback ? "checkmark" : "doc.on.doc",
+                label: copyFeedback ? "已复制" : "复制"
+            ) {
+                copyUsageSummary()
+            }
             IconButton(icon: "arrow.clockwise", label: "刷新") { store.refresh() }
             IconButton(icon: "power", label: "退出") { NSApp.terminate(nil) }
+        }
+    }
+
+    private func copyUsageSummary() {
+        guard let usage = store.usage else { return }
+        let text = UsageSummaryBuilder.text(
+            usage: usage,
+            range: sel,
+            visibility: toolVisibility,
+            updated: store.lastUpdated
+        )
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copyFeedback = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+            copyFeedback = false
         }
     }
 
