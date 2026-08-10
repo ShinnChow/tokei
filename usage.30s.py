@@ -1962,8 +1962,17 @@ def scan_codex(bounds, cache):
     stale = set(fc.keys())
     dedupe_paths = set()
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
+    # 解析器升级触发全量重扫时,若超时被杀会丢掉全部进度并从零重来(表现为无限"加载中")。
+    # 每 15s 把已完成的文件缓存落盘一次,被杀后下次运行从断点续扫。
+    import time as _time
+    last_checkpoint = _time.monotonic()
 
     for f in rollout_files:
+        if cache.get("_dirty") and _time.monotonic() - last_checkpoint > 15:
+            _save_scan_cache(cache)
+            cache["_keys"] = {k for k in cache if not k.startswith("_")}
+            cache["_dirty"] = False
+            last_checkpoint = _time.monotonic()
         stale.discard(f)
         try:
             st = os.stat(f)
