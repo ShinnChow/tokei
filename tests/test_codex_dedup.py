@@ -418,6 +418,65 @@ class CodexScanDedupTests(unittest.TestCase):
             USAGE._CODEX_PARSER_VERSION,
         )
 
+    def test_parser_upgrade_reuses_nonempty_model_v2_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            path = sessions / "rollout-cached.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
+            source_path = str(path.resolve())
+            st = path.stat()
+            cached_event = event(
+                "2024-01-08T00:01:00+00:00",
+                "2024-01-08",
+                (100, 80, 5, 2),
+                (100, 80, 5, 2),
+                0.5,
+            ) + ["openai/gpt-5.4"]
+            days = {}
+            USAGE._codex_add_event(days, cached_event)
+            cache = {"v": USAGE._SCAN_CACHE_VERSION, "codex": {}}
+            scan_cache_path = root / "scan-cache.json"
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache_path)), \
+                 mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
+                 mock.patch.object(
+                     USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived_sessions")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                cache_size = USAGE._codex_write_event_cache(source_path, [cached_event])
+                cache["codex"][source_path] = {
+                    "sig": f"{st.st_mtime_ns}:{st.st_size}",
+                    "days": days,
+                    "deduped_days": days,
+                    "session_id": "cached",
+                    "forked_from_id": None,
+                    "active_model": "openai/gpt-5.4",
+                    "model_version": 2,
+                    "file_id": f"{st.st_dev}:{st.st_ino}",
+                    "parsed_size": st.st_size,
+                    "parsed_guard": USAGE._codex_offset_guard(source_path, st.st_size),
+                    "event_cache_size": cache_size,
+                    "event_count": 1,
+                    "first_keys": [list(USAGE._codex_event_key(cached_event))],
+                    "first_event_ts": cached_event[0],
+                    "last_event_ts": cached_event[0],
+                    "drop_count": 0,
+                    "dedupe_open": True,
+                    "canonical": True,
+                }
+                with mock.patch.object(USAGE, "_iter_codex_usage_records") as iterator:
+                    result = USAGE.scan_codex(self.bounds(), cache)
+
+        iterator.assert_not_called()
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 100)
+        self.assertEqual(usage["cached"], 80)
+        self.assertEqual(usage["out"], 5)
+        entry = cache["codex"][source_path]
+        self.assertEqual(entry["parser_version"], USAGE._CODEX_PARSER_VERSION)
+        self.assertNotIn("model_version", entry)
+
     def test_scan_parses_only_appended_codex_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-growing.jsonl"

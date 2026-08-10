@@ -424,11 +424,19 @@ def human(n: float) -> str:
 
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
-_SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json")
+import time as _time
+_LEGACY_SCAN_CACHE_FILE = os.path.join(
+    _tempfile.gettempdir(), "_tokei_scan_cache.json")
+_SCAN_CACHE_DIR = os.environ.get("TOKEI_CACHE_DIR") or os.path.join(
+    HOME, ".tokei", "cache")
+_DEFAULT_SCAN_CACHE_FILE = os.path.join(
+    _SCAN_CACHE_DIR, "scan_cache.json")
+_SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 20
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
 _CODEX_PARSER_VERSION = 3
+_CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
 
@@ -438,7 +446,43 @@ def _remove_codex_event_cache_dir():
     shutil.rmtree(f"{_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}", ignore_errors=True)
 
 
+def _migrate_legacy_scan_cache():
+    if (_SCAN_CACHE_FILE != _DEFAULT_SCAN_CACHE_FILE
+            or os.path.exists(_SCAN_CACHE_FILE)
+            or not os.path.isfile(_LEGACY_SCAN_CACHE_FILE)):
+        return
+
+    import shutil
+    directory = os.path.dirname(_SCAN_CACHE_FILE)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+    fd, tmp = _tempfile.mkstemp(prefix=".scan-cache-", suffix=".json", dir=directory)
+    try:
+        os.close(fd)
+        shutil.copyfile(_LEGACY_SCAN_CACHE_FILE, tmp)
+        os.chmod(tmp, 0o600)
+        legacy_events = f"{_LEGACY_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}"
+        current_events = _codex_event_cache_dir()
+        if os.path.isdir(legacy_events) and not os.path.exists(current_events):
+            shutil.copytree(legacy_events, current_events)
+            try:
+                os.chmod(current_events, 0o700)
+            except OSError:
+                pass
+        os.replace(tmp, _SCAN_CACHE_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _load_scan_cache():
+    _migrate_legacy_scan_cache()
     try:
         with open(_SCAN_CACHE_FILE, "r") as f:
             c = json.load(f)
@@ -467,11 +511,19 @@ def _save_scan_cache(cache):
     cache["v"] = _SCAN_CACHE_VERSION
     tmp = None
     try:
+        directory = os.path.dirname(_SCAN_CACHE_FILE)
+        if directory:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(directory, 0o700)
+            except OSError:
+                pass
         fd, tmp = _tempfile.mkstemp(prefix="_tokei_scan_cache.", suffix=".json",
-                                    dir=os.path.dirname(_SCAN_CACHE_FILE))
+                                    dir=directory or None)
         payload = json.dumps(cache, separators=(',', ':')).encode("utf-8")
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, _SCAN_CACHE_FILE)
     except Exception:
         if tmp:
@@ -1962,17 +2014,9 @@ def scan_codex(bounds, cache):
     stale = set(fc.keys())
     dedupe_paths = set()
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
-    # 解析器升级触发全量重扫时,若超时被杀会丢掉全部进度并从零重来(表现为无限"加载中")。
-    # 每 15s 把已完成的文件缓存落盘一次,被杀后下次运行从断点续扫。
-    import time as _time
-    last_checkpoint = _time.monotonic()
+    next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
 
     for f in rollout_files:
-        if cache.get("_dirty") and _time.monotonic() - last_checkpoint > 15:
-            _save_scan_cache(cache)
-            cache["_keys"] = {k for k in cache if not k.startswith("_")}
-            cache["_dirty"] = False
-            last_checkpoint = _time.monotonic()
         stale.discard(f)
         try:
             st = os.stat(f)
@@ -1988,18 +2032,33 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
+        event_cache_ready = _codex_event_cache_ready(f, entry)
+        legacy_parser_cache = (
+            isinstance(entry, dict)
+            and entry.get("parser_version") is None
+            and entry.get("model_version") == 2
+            and event_cache_ready
+        )
+        legacy_cache_usable = legacy_parser_cache and (
+            int(entry.get("event_count", 0) or 0) > 0 or size == 0)
+        if legacy_cache_usable and entry.get("sig") == sig:
+            entry["parser_version"] = _CODEX_PARSER_VERSION
+            entry.pop("model_version", None)
+            cache["_dirty"] = True
+            continue
         if (not entry or entry.get("sig") != sig
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
-                or not _codex_event_cache_ready(f, entry)):
+                or not event_cache_ready):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
             if (isinstance(entry, dict)
-                    and entry.get("parser_version") == _CODEX_PARSER_VERSION):
+                    and (entry.get("parser_version") == _CODEX_PARSER_VERSION
+                         or legacy_cache_usable)):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
                         and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
-                        and _codex_event_cache_ready(f, entry)):
+                        and event_cache_ready):
                     append_from = old_offset
 
             if append_from is None:
@@ -2141,6 +2200,9 @@ def scan_codex(bounds, cache):
                 "canonical": was_canonical,
             }
             cache["_dirty"] = True
+            if _time.monotonic() >= next_checkpoint:
+                _save_scan_cache(cache)
+                next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
 
     for p in stale:
         fc.pop(p, None)

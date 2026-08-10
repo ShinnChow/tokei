@@ -23,6 +23,9 @@ final class DataLoader {
         return userScript
     }()
 
+    private static let lastUsageURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".tokei/last_usage.json")
+
     private static func syncToUserDir(from resourceDir: String) {
         let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tokei")
         try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
@@ -347,6 +350,40 @@ final class DataLoader {
 
     static func loadSync() -> Usage? { runScript() }
 
+    static func loadCachedUsage() -> Usage? {
+        var candidates = [lastUsageURL]
+        if let config = SyncManager.loadConfig() {
+            let deviceID = SyncManager.normalizedDeviceID(config.device_id)
+            let isSafeDeviceID = !deviceID.isEmpty && deviceID != "." && deviceID != ".." &&
+                deviceID.count <= 128 && !deviceID.unicodeScalars.contains {
+                    $0.value < 32 || $0.value == 47 || $0.value == 92 || $0.value == 0
+                }
+            if isSafeDeviceID {
+                candidates.append(
+                    URL(fileURLWithPath: SyncManager.resolvedSyncDir(config), isDirectory: true)
+                        .appendingPathComponent(deviceID)
+                        .appendingPathExtension("json")
+                )
+            }
+        }
+
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  var raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            for key in raw.keys where key.hasPrefix("_") { raw.removeValue(forKey: key) }
+            if var claude = raw["claude"] as? [String: Any] {
+                normalizeClaudeQuota(&claude)
+                raw["claude"] = claude
+            }
+            guard let cleaned = try? JSONSerialization.data(withJSONObject: raw),
+                  let usage = try? JSONDecoder().decode(Usage.self, from: cleaned)
+            else { continue }
+            return usage
+        }
+        return nil
+    }
+
     static func load(_ completion: @escaping (Usage?) -> Void) {
         DispatchQueue.global(qos: .utility).async {
             let usage = runScript()
@@ -355,8 +392,8 @@ final class DataLoader {
     }
 
     static func runScript(args: [String] = ["--json", "--no-sync-snapshot"]) -> Usage? {
-        // Parser schema upgrades can require a one-time full historical rescan.
-        let result = runScriptRaw(args: args, timeout: 180)
+        // Large first-time indexes may need several minutes; cached UI remains available.
+        let result = runScriptRaw(args: args, timeout: 600)
         guard !result.timedOut, result.exitCode == 0 else {
             fputs("Tokei script failed: exit=\(result.exitCode) timeout=\(result.timedOut)\n\(result.stderr)\n", stderr)
             return nil
@@ -392,10 +429,28 @@ final class DataLoader {
                 raw["claude"] = claude
             }
             let cleaned = try JSONSerialization.data(withJSONObject: raw)
-            return try JSONDecoder().decode(Usage.self, from: cleaned)
+            let usage = try JSONDecoder().decode(Usage.self, from: cleaned)
+            persistCachedUsage(cleaned)
+            return usage
         } catch {
             fputs("Tokei decode error: \(error)\n", stderr)
             return nil
+        }
+    }
+
+    private static func persistCachedUsage(_ data: Data) {
+        do {
+            try FileManager.default.createDirectory(
+                at: lastUsageURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: lastUsageURL, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: lastUsageURL.path
+            )
+        } catch {
+            fputs("Tokei usage cache write failed: \(error)\n", stderr)
         }
     }
 
