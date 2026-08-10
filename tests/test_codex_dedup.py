@@ -175,9 +175,11 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(session_id, "child")
         self.assertEqual(parent_id, "parent")
 
-    def token_count(self, ts, total, last):
-        return json.dumps({
-            "timestamp": ts,
+    def token_count(self, ts, total, last, ordinal=None):
+        record = {"timestamp": ts}
+        if ordinal is not None:
+            record["ordinal"] = ordinal
+        record.update({
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
@@ -197,13 +199,17 @@ class CodexScanDedupTests(unittest.TestCase):
                 },
             },
         })
+        return json.dumps(record)
 
-    def turn_context(self, ts, model):
-        return json.dumps({
-            "timestamp": ts,
+    def turn_context(self, ts, model, ordinal=None):
+        record = {"timestamp": ts}
+        if ordinal is not None:
+            record["ordinal"] = ordinal
+        record.update({
             "type": "turn_context",
             "payload": {"model": model, "cwd": "/tmp/project"},
         })
+        return json.dumps(record)
 
     def bounds(self):
         day = datetime(2024, 1, 8, tzinfo=timezone.utc)
@@ -251,6 +257,166 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
+    def test_scan_mixes_legacy_and_ordinal_records_with_model_attribution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-mixed-formats.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("mixed-formats"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.4"),
+                self.token_count(
+                    "2024-01-08T00:01:00Z",
+                    (100, 80, 10, 4),
+                    (100, 80, 10, 4),
+                    ordinal=1,
+                ),
+                self.turn_context(
+                    "2024-01-08T00:02:00Z", "gpt-5.5", ordinal=2),
+                self.token_count(
+                    "2024-01-08T00:03:00Z",
+                    (150, 120, 15, 6),
+                    (50, 40, 5, 2),
+                ),
+            ]) + "\n", encoding="utf-8")
+
+            with mock.patch.object(USAGE, "CODEX_DIR", tmp), \
+                 mock.patch.object(
+                     USAGE, "CODEX_ARCHIVED_DIR", str(Path(tmp) / "archived_sessions")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                result = USAGE.scan_codex(
+                    self.bounds(), {"v": USAGE._SCAN_CACHE_VERSION})
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["cached"], 120)
+        self.assertEqual(usage["out"], 15)
+        self.assertEqual(usage["reason"], 6)
+        self.assertEqual(len(usage["sessions"]), 1)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 20)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["cr"], 80)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["out"], 10)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["reason"], 4)
+        self.assertEqual(usage["models"]["openai/gpt-5.5"]["in"], 10)
+        self.assertEqual(usage["models"]["openai/gpt-5.5"]["cr"], 40)
+        self.assertEqual(usage["models"]["openai/gpt-5.5"]["out"], 5)
+        self.assertEqual(usage["models"]["openai/gpt-5.5"]["reason"], 2)
+
+    def test_records_without_timestamp_do_not_poison_dedup_or_model(self):
+        missing_timestamp_model = json.dumps({
+            "ordinal": 1,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.5", "cwd": "/tmp/project"},
+        })
+        missing_timestamp_token = json.loads(self.token_count(
+            "2024-01-08T00:01:00Z",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            ordinal=2,
+        ))
+        missing_timestamp_token.pop("timestamp")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-missing-timestamp.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("missing-timestamp"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.4"),
+                missing_timestamp_model,
+                json.dumps(missing_timestamp_token),
+                self.token_count(
+                    "2024-01-08T00:02:00Z",
+                    (100, 80, 5, 2),
+                    (100, 80, 5, 2),
+                    ordinal=3,
+                ),
+            ]) + "\n", encoding="utf-8")
+
+            with mock.patch.object(USAGE, "CODEX_DIR", tmp), \
+                 mock.patch.object(
+                     USAGE, "CODEX_ARCHIVED_DIR", str(Path(tmp) / "archived_sessions")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                result = USAGE.scan_codex(
+                    self.bounds(), {"v": USAGE._SCAN_CACHE_VERSION})
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 100)
+        self.assertEqual(usage["cached"], 80)
+        self.assertEqual(usage["out"], 5)
+        self.assertEqual(usage["reason"], 2)
+        self.assertEqual(set(usage["models"]), {"openai/gpt-5.4"})
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 20)
+
+    def test_ordinal_parser_upgrade_rescans_model_v2_cache_from_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            path = sessions / "rollout-ordinal-cache.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("ordinal-cache"),
+                self.turn_context(
+                    "2024-01-08T00:00:00Z", "gpt-5.4", ordinal=1),
+                self.token_count(
+                    "2024-01-08T00:01:00Z",
+                    (100, 80, 5, 2),
+                    (100, 80, 5, 2),
+                    ordinal=2,
+                ),
+            ]) + "\n", encoding="utf-8")
+            source_path = str(path.resolve())
+            st = path.stat()
+            complete_offset = st.st_size
+            cache = {
+                "v": USAGE._SCAN_CACHE_VERSION,
+                "codex": {
+                    source_path: {
+                        "sig": f"{st.st_mtime_ns}:{st.st_size}",
+                        "days": {},
+                        "deduped_days": {},
+                        "session_id": "ordinal-cache",
+                        "forked_from_id": None,
+                        "active_model": None,
+                        "model_version": 2,
+                        "file_id": f"{st.st_dev}:{st.st_ino}",
+                        "parsed_size": complete_offset,
+                        "parsed_guard": USAGE._codex_offset_guard(
+                            source_path, complete_offset),
+                        "event_cache_size": 0,
+                        "event_count": 0,
+                        "first_keys": [],
+                        "first_event_ts": None,
+                        "last_event_ts": None,
+                        "drop_count": 0,
+                        "dedupe_open": True,
+                        "canonical": True,
+                    },
+                },
+            }
+            scan_cache_path = root / "scan-cache.json"
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache_path)), \
+                 mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
+                 mock.patch.object(
+                     USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived_sessions")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                USAGE._codex_write_event_cache(source_path, [])
+                original_iterator = USAGE._iter_codex_usage_records
+                with mock.patch.object(
+                    USAGE, "_iter_codex_usage_records", wraps=original_iterator,
+                ) as iterator:
+                    result = USAGE.scan_codex(self.bounds(), cache)
+
+        iterator.assert_called_once()
+        self.assertEqual(iterator.call_args.kwargs["start_offset"], 0)
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 100)
+        self.assertEqual(usage["cached"], 80)
+        self.assertEqual(usage["out"], 5)
+        self.assertEqual(usage["reason"], 2)
+        self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 20)
+        self.assertEqual(
+            cache["codex"][source_path]["parser_version"],
+            USAGE._CODEX_PARSER_VERSION,
+        )
 
     def test_scan_parses_only_appended_codex_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -607,6 +773,77 @@ class ScanCacheMigrationTests(unittest.TestCase):
 
 
 class CodexTokenLineReaderTests(unittest.TestCase):
+    def test_accepts_reordered_top_level_fields_and_ignores_nested_type_decoys(self):
+        model = json.dumps({
+            "payload": {"model": "gpt-5.5"},
+            "ordinal": 4,
+            "metadata": {"type": "event_msg"},
+            "type": "turn_context",
+            "timestamp": "2026-07-13T01:02:02Z",
+        }, separators=(",", ":")).encode()
+        token = json.dumps({
+            "payload": {"type": "token_count", "info": {}},
+            "ordinal": 5,
+            "type": "event_msg",
+            "timestamp": "2026-07-13T01:02:03Z",
+        }, separators=(",", ":")).encode()
+        decoy = json.dumps({
+            "timestamp": "2026-07-13T01:02:04Z",
+            "ordinal": 6,
+            "type": "response_item",
+            "payload": {
+                "content": {
+                    "type": "event_msg",
+                    "payload": {"type": "token_count"},
+                },
+            },
+        }, separators=(",", ":")).encode()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-reordered-records.jsonl"
+            path.write_bytes(b"\n".join([model, token, decoy]) + b"\n")
+            records = list(USAGE._iter_codex_usage_records(path, chunk_size=7))
+
+        self.assertEqual(records, [("model", "gpt-5.5"), ("token", token)])
+
+    def test_accepts_mixed_legacy_and_ordinal_token_and_model_records(self):
+        legacy_model = json.dumps({
+            "timestamp": "2026-07-13T01:02:00Z",
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.4"},
+        }).encode()
+        legacy_token = json.dumps({
+            "timestamp": "2026-07-13T01:02:01Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {}},
+        }).encode()
+        ordinal_model = json.dumps({
+            "timestamp": "2026-07-13T01:02:02Z",
+            "ordinal": 2,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.5"},
+        }).encode()
+        ordinal_token = json.dumps({
+            "timestamp": "2026-07-13T01:02:03Z",
+            "ordinal": 3,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": {}},
+        }).encode()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-mixed-records.jsonl"
+            path.write_bytes(b"\n".join([
+                legacy_model, legacy_token, ordinal_model, ordinal_token,
+            ]) + b"\n")
+            records = list(USAGE._iter_codex_usage_records(path, chunk_size=13))
+
+        self.assertEqual(records, [
+            ("model", "gpt-5.4"),
+            ("token", legacy_token),
+            ("model", "gpt-5.5"),
+            ("token", ordinal_token),
+        ])
+
     def test_skips_large_unrelated_record_and_handles_chunk_boundaries(self):
         token = json.dumps({
             "timestamp": "2026-07-13T01:02:03Z",
@@ -643,9 +880,9 @@ class CodexTokenLineReaderTests(unittest.TestCase):
 
         self.assertEqual(lines, [token])
 
-    def test_extracts_model_without_buffering_following_large_content(self):
+    def test_extracts_model_from_large_ordinal_context_without_buffering_full_line(self):
         context = (
-            b'{"timestamp":"2026-07-13T01:02:02Z","type":"turn_context",'
+            b'{"timestamp":"2026-07-13T01:02:02Z","ordinal":2,"type":"turn_context",'
             b'"payload":{"model":"gpt-5.4","instructions":"' + b"x" * (2 * 1024 * 1024) + b'"}}\n'
         )
         token = json.dumps({

@@ -428,6 +428,7 @@ _SCAN_CACHE_FILE = os.path.join(_tempfile.gettempdir(), "_tokei_scan_cache.json"
 _SCAN_CACHE_VERSION = 20
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
+_CODEX_PARSER_VERSION = 3
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
 
@@ -1619,16 +1620,107 @@ def _codex_deduped_days(file_cache):
     return days_by_file
 
 
-_CODEX_TOKEN_EVENT_HEADER = re.compile(
-    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"\s*,\s*'
-    rb'"type"\s*:\s*"event_msg"\s*,\s*'
-    rb'"payload"\s*:\s*\{\s*"type"\s*:\s*"token_count"'
+_CODEX_MODEL_RECORD_TYPES = {"turn_context", "session_meta"}
+_CODEX_USAGE_RECORD_MARKERS = (
+    b'"token_count"', b'"turn_context"', b'"session_meta"',
 )
-_CODEX_MODEL_RECORD_HEADER = re.compile(
-    rb'^\s*\{\s*"timestamp"\s*:\s*"[^"]+"\s*,\s*'
-    rb'"type"\s*:\s*"(?:turn_context|session_meta)"'
-)
-_CODEX_MODEL_FIELD = re.compile(rb'"model"\s*:\s*"((?:\\.|[^"\\])*)"')
+
+
+def _codex_decode_json_string(raw):
+    try:
+        if b"\\" not in raw:
+            return raw.decode("utf-8")
+        return json.loads(b'"' + raw + b'"')
+    except Exception:
+        return raw.decode("utf-8", errors="ignore")
+
+
+def _codex_probe_record_header(data):
+    """Read selected JSON fields from a bounded record prefix.
+
+    Codex adds top-level metadata fields over time. This structural probe tracks
+    object depth instead of depending on serialized key order, while leaving
+    large unrelated JSONL records bounded by the caller's prefix limits.
+    """
+    timestamp = None
+    root_type = None
+    payload_type = None
+    model = None
+    pending_keys = {}
+    containers = []
+    payload_depth = None
+    depth = 0
+    i = 0
+    size = len(data)
+
+    while i < size:
+        ch = data[i]
+        if ch in b" \t\r\n":
+            i += 1
+            continue
+
+        if ch == 0x22:  # JSON string
+            start = i + 1
+            i = start
+            while i < size:
+                if data[i] == 0x5C:  # escape
+                    i += 2
+                    continue
+                if data[i] == 0x22:
+                    break
+                i += 1
+            if i >= size:
+                break
+
+            value = _codex_decode_json_string(bytes(data[start:i]))
+            i += 1
+            lookahead = i
+            while lookahead < size and data[lookahead] in b" \t\r\n":
+                lookahead += 1
+            if lookahead < size and data[lookahead] == 0x3A:  # colon
+                pending_keys[depth] = value
+                i = lookahead + 1
+                continue
+
+            key = pending_keys.pop(depth, None)
+            if depth == 1:
+                if key == "timestamp":
+                    timestamp = value
+                elif key == "type":
+                    root_type = value
+            elif payload_depth is not None and depth == payload_depth:
+                if key == "type":
+                    payload_type = value
+                elif key == "model":
+                    model = value
+            i = lookahead
+            continue
+
+        if ch in (0x7B, 0x5B):  # object or array open
+            parent_depth = depth
+            key = pending_keys.pop(parent_depth, None)
+            containers.append(ch)
+            depth += 1
+            if ch == 0x7B and parent_depth == 1 and key == "payload":
+                payload_depth = depth
+            i += 1
+            continue
+
+        if ch in (0x7D, 0x5D):  # object or array close
+            pending_keys.pop(depth, None)
+            if payload_depth == depth:
+                payload_depth = None
+            if containers:
+                containers.pop()
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+
+        if ch == 0x2C:  # comma
+            pending_keys.pop(depth, None)
+        i += 1
+
+    return timestamp, root_type, payload_type, model
 
 
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
@@ -1663,16 +1755,9 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
                 elif kind == "model":
                     take = min(len(piece), model_limit - len(prefix))
                     prefix.extend(piece[:take])
-                    match = _CODEX_MODEL_FIELD.search(prefix) if b'"model"' in prefix else None
-                    if match:
-                        raw_model = match.group(1)
-                        try:
-                            model = (raw_model.decode("utf-8") if b"\\" not in raw_model
-                                     else json.loads(b'"' + raw_model + b'"'))
-                        except Exception:
-                            model = raw_model.decode("utf-8", errors="ignore")
-                        if model:
-                            yield "model", model
+                    _, _, _, model = _codex_probe_record_header(prefix)
+                    if model:
+                        yield "model", model
                         prefix = bytearray()
                         kind = "ignore"
                     elif len(prefix) >= model_limit:
@@ -1681,30 +1766,36 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
                 elif kind is None and len(prefix) < header_limit:
                     take = min(len(piece), header_limit - len(prefix))
                     prefix.extend(piece[:take])
-                    if b'"token_count"' in prefix and _CODEX_TOKEN_EVENT_HEADER.search(prefix):
+                    if any(marker in prefix for marker in _CODEX_USAGE_RECORD_MARKERS):
+                        timestamp, root_type, payload_type, model = (
+                            _codex_probe_record_header(prefix)
+                        )
+                    else:
+                        timestamp = root_type = payload_type = model = None
+                    if (timestamp and root_type == "event_msg"
+                            and payload_type == "token_count"):
                         candidate = prefix
                         prefix = bytearray()
                         kind = "token"
                         if take < len(piece):
                             candidate.extend(piece[take:])
-                    elif ((b'"turn_context"' in prefix or b'"session_meta"' in prefix)
-                          and _CODEX_MODEL_RECORD_HEADER.search(prefix)):
+                    elif timestamp and root_type in _CODEX_MODEL_RECORD_TYPES:
                         kind = "model"
                         if take < len(piece):
                             extra = min(len(piece) - take, model_limit - len(prefix))
                             prefix.extend(piece[take:take + extra])
-                        match = _CODEX_MODEL_FIELD.search(prefix) if b'"model"' in prefix else None
-                        if match:
-                            raw_model = match.group(1)
-                            try:
-                                model = (raw_model.decode("utf-8") if b"\\" not in raw_model
-                                         else json.loads(b'"' + raw_model + b'"'))
-                            except Exception:
-                                model = raw_model.decode("utf-8", errors="ignore")
-                            if model:
-                                yield "model", model
+                        _, _, _, model = _codex_probe_record_header(prefix)
+                        if model:
+                            yield "model", model
                             prefix = bytearray()
                             kind = "ignore"
+                    elif (root_type is not None
+                          and root_type not in _CODEX_MODEL_RECORD_TYPES
+                          and (root_type != "event_msg"
+                               or (payload_type is not None
+                                   and payload_type != "token_count"))):
+                        prefix = bytearray()
+                        kind = "ignore"
                     elif len(prefix) >= header_limit:
                         prefix = bytearray()
                         kind = "ignore"
@@ -1888,12 +1979,14 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
-        if (not entry or entry.get("sig") != sig or entry.get("model_version") != 2
+        if (not entry or entry.get("sig") != sig
+                or entry.get("parser_version") != _CODEX_PARSER_VERSION
                 or not _codex_event_cache_ready(f, entry)):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
-            if isinstance(entry, dict) and entry.get("model_version") == 2:
+            if (isinstance(entry, dict)
+                    and entry.get("parser_version") == _CODEX_PARSER_VERSION):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
                         and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
@@ -1933,6 +2026,9 @@ def scan_codex(bounds, cache):
                         o = json.loads(record.decode("utf-8", errors="ignore"))
                     except Exception:
                         continue
+                    ts = parse_ts(o.get("timestamp", ""))
+                    if not ts:
+                        continue
                     info = (o.get("payload") or {}).get("info") or {}
                     last = info.get("last_token_usage") or {}
                     total = info.get("total_token_usage") or {}
@@ -1946,7 +2042,6 @@ def scan_codex(bounds, cache):
                         duplicate_total = total_key == prev_total_key
                         prev_total_key = total_key
                         file_last_total = total
-                    ts = parse_ts(o.get("timestamp", ""))
                     rl = (o.get("payload") or {}).get("rate_limits")
                     if ts and rl:
                         ts_iso = ts.isoformat()
@@ -2025,7 +2120,7 @@ def scan_codex(bounds, cache):
                 "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                 "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
                 "last_total": file_last_total, "prev_total_key": prev_total_key,
-                "active_model": file_model, "model_version": 2,
+                "active_model": file_model, "parser_version": _CODEX_PARSER_VERSION,
                 "file_id": file_id, "parsed_size": complete_offset,
                 "parsed_guard": _codex_offset_guard(f, complete_offset),
                 "event_cache_size": event_cache_size,
