@@ -884,7 +884,8 @@ final class SyncManager {
           audited_branch=$(sync_git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
           [ "$audited_branch" = "main" ] \
             || fail 23 "审计后 main 分支发生变化，已停止"
-          push_changes=$(sync_git status --porcelain=v1 --untracked-files=all) \
+          push_changes=$(sync_git status --porcelain=v1 --untracked-files=all \
+            -- . "$junk_pathspec") \
             || fail 23 "无法检查 push 前的工作区状态"
           [ -z "$push_changes" ] \
             || fail 23 "push 前工作区出现改动，已停止"

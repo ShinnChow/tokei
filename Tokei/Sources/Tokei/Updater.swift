@@ -16,7 +16,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.25"
+    static let releaseTag = "v1.0.26"
     static let automaticCheckInterval: TimeInterval = 6 * 3600
     @Published var state: State = .idle
 
