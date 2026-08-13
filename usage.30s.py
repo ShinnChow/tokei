@@ -543,7 +543,17 @@ _LEDGER_VERSION = 1
 _LEDGER_FIELDS = ("in", "out", "cr", "cw", "reason", "cached", "cost")
 
 
+_LEDGER_CACHE = {"data": None, "dirty": False}
+
+
 def _load_ledger():
+    if _LEDGER_CACHE["data"] is not None:
+        return _LEDGER_CACHE["data"]
+    _LEDGER_CACHE["data"] = _load_ledger_from_disk()
+    return _LEDGER_CACHE["data"]
+
+
+def _load_ledger_from_disk():
     try:
         with open(_LEDGER_FILE, "r") as f:
             ledger = json.load(f)
@@ -567,6 +577,41 @@ def _load_ledger():
     except Exception:
         pass
     return {"v": _LEDGER_VERSION, "tools": {}}
+
+
+def ledger_flush():
+    """把内存账本变更落盘:短锁内与磁盘最新状态做天级高水位合并后原子写。
+    每轮扫描只调一次,替代此前每工具一次的 15 轮锁+读+写(性能回归根因)。"""
+    if not _LEDGER_CACHE["dirty"] or _LEDGER_CACHE["data"] is None:
+        return
+    lock_fd = None
+    try:
+        import fcntl
+        os.makedirs(os.path.dirname(_LEDGER_FILE), mode=0o700, exist_ok=True)
+        lock_fd = os.open(f"{_LEDGER_FILE}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except OSError:
+        lock_fd = None
+    try:
+        fresh = _load_ledger_from_disk()
+        memo = _LEDGER_CACHE["data"]
+        for tool, days in memo.get("tools", {}).items():
+            stored = fresh["tools"].setdefault(tool, {})
+            for dk, day in days.items():
+                kept = stored.get(dk)
+                if kept is None or _ledger_day_total(day) > _ledger_day_total(kept):
+                    stored[dk] = day
+        _save_ledger(fresh)
+        _LEDGER_CACHE["data"] = fresh
+        _LEDGER_CACHE["dirty"] = False
+    finally:
+        if lock_fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 
 def _save_ledger(ledger):
@@ -593,6 +638,22 @@ def _ledger_day_total(day):
                if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "cost")
 
 
+# 账本天的 token 口径:白名单直加字段。cached 不单独相加——所有记录 cached 的工具
+# (codex/gemini/qoder_ide)其 cached 均为 in 的子集,计完整 in 即已"含 cached",
+# 再加一次会重复计数。est/calls/duration/tools/turns/sessions 等计数字段永远不算 token。
+# 该口径与主页各工具卡片的总量一致(如 Codex 卡片 = 非缓存输入+cached+out+reason = in+out+reason)。
+_LEDGER_TOKEN_FIELDS = ("in", "out", "cr", "cw", "reason", "thoughts")
+
+
+def _ledger_token_sum(day):
+    tok = 0
+    for field in _LEDGER_TOKEN_FIELDS:
+        value = day.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            tok += int(value)
+    return tok
+
+
 def ledger_reconcile(tool, live_days):
     """对账:live_days={day: day_dict}(现存日志实时聚合,任意字段结构)。
 
@@ -600,17 +661,22 @@ def ledger_reconcile(tool, live_days):
     - 实时值 >= 账本值的天:以实时为准,并把账本刷新到实时(高水位上移)
     - 实时值 < 账本值的天(日志被部分/全部清理):返回账本存档值
     - 账本独有的天(日志已整体消失):账本兜底
-    天级整取整用,不做字段级混合,天然避免重复计数。"""
+    天级整取整用,不做字段级混合,天然避免重复计数。
+    纯内存操作;落盘由 compute() 末尾的 ledger_flush() 统一完成(锁内高水位合并)。"""
     ledger = _load_ledger()
     stored = ledger["tools"].setdefault(tool, {})
     dirty = False
     merged = {}
+    # 日志中偶发的坏时间戳(如 2024-01-08)不入账本,防止污染永久数据
+    max_day = (date.today() + timedelta(days=1)).isoformat()
     for dk, live in live_days.items():
         kept = stored.get(dk)
         if kept and _ledger_day_total(kept) > _ledger_day_total(live):
             merged[dk] = kept
         else:
             merged[dk] = live
+            if not ("2025-01-01" <= dk <= max_day):
+                continue
             snapshot = {k: v for k, v in live.items()
                         if not isinstance(v, set)}
             if kept != snapshot:
@@ -620,7 +686,7 @@ def ledger_reconcile(tool, live_days):
         if dk not in merged:
             merged[dk] = kept          # 日志已整体消失的天:账本兜底
     if dirty:
-        _save_ledger(ledger)
+        _LEDGER_CACHE["dirty"] = True
     return merged
 
 
@@ -630,7 +696,7 @@ def ledger_touch(tool):
         ledger = _load_ledger()
         if tool not in ledger.get("tools", {}):
             ledger.setdefault("tools", {})[tool] = {}
-            _save_ledger(ledger)
+            _LEDGER_CACHE["dirty"] = True
     except Exception:
         pass
 
@@ -1037,12 +1103,16 @@ def scan_claude(bounds, cache):
         return ks
 
     live_days = {}
+    day_projects = {}
     for f, entry in fc.items():
+        proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         for dk, day in entry.get("days", {}).items():
             agg = live_days.setdefault(
                 dk, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
             agg["in"] += day["in"]; agg["out"] += day["out"]
             agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
+            if proj_name:
+                day_projects.setdefault(dk, set()).add(proj_name)
             for mn, mv in day["models"].items():
                 mm = agg["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
                 mm["in"] += mv["in"]; mm["out"] += mv["out"]
@@ -1054,6 +1124,10 @@ def scan_claude(bounds, cache):
                 continue
             for k in classify(d):
                 B[k]["sessions"].add(f)
+    # 项目名随天入账本(list 会被 snapshot 原样存档;_ledger_day_total 只加数值,不受影响),
+    # 日志被清理后回顾页仍能回答"那天在干什么"。
+    for dk, names in day_projects.items():
+        live_days[dk]["projects"] = sorted(names)[:3]
 
     for dk, day in ledger_reconcile("claude", live_days).items():
         try:
@@ -1255,6 +1329,12 @@ def fetch_codex_live_limits():
     cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
     if cached:
         return cached
+    # 失败退避:网络不可达(如公司代理拦截)时 5 分钟内不再联网重试,
+    # 否则每轮 30s 刷新都会白等约 6s 超时
+    cache_state = _load_json(CODEX_QUOTA_CACHE, {})
+    last_failure = cache_state.get("last_failure_at", 0)
+    if last_failure and datetime.now().timestamp() - last_failure < 300:
+        return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
     access_token = auth_context.get("access_token")
@@ -1289,6 +1369,12 @@ def fetch_codex_live_limits():
         })
         return limits, plan
     except Exception:
+        try:
+            state = _load_json(CODEX_QUOTA_CACHE, {})
+            state["last_failure_at"] = datetime.now().timestamp()
+            _atomic_write_json(CODEX_QUOTA_CACHE, state)
+        except Exception:
+            pass
         return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
 
 
@@ -4684,11 +4770,18 @@ def scan_workbuddy(bounds, cache):
 
     days = {}
     sessions = {}
-    for _, _, record in _iter_workbuddy_records(fc):
+    day_projects = {}
+    for _, entry, record in _iter_workbuddy_records(fc):
         day = days.setdefault(record["date"], _empty_token_day())
         _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                          0, record["cost"], record["model"])
         sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
+        proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
+        if proj_name:
+            day_projects.setdefault(record["date"], set()).add(proj_name)
+    # 项目名随天入账本(同 scan_claude):日志被清理后仍能回答"那天在干什么"。
+    for day_key, names in day_projects.items():
+        days[day_key]["projects"] = sorted(names)[:3]
 
     # 会话数只能来自现存日志(被清日志无从归属)
     for day_key, day in days.items():
@@ -5661,6 +5754,7 @@ def compute():
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     _save_scan_cache(cache)
+    ledger_flush()
 
     def claude_range(b):
         denom = b["cr"] + b["cw"] + b["in"]
@@ -6410,6 +6504,12 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     cache = _cache if _cache is not None else _load_scan_cache()
     days = {}
     models = {}
+    live_tool_tokens = {}   # {day: {ledger工具名: 实时token}},供账本逐工具高水位合并
+
+    def _add_day_tokens(d, dk, tool, amount):
+        d["tokens"] += amount
+        per_tool = live_tool_tokens.setdefault(dk, {})
+        per_tool[tool] = per_tool.get(tool, 0) + amount
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
@@ -6431,7 +6531,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             d["claude"] += day.get("cost", 0)
             d["c_in"] += day.get("in", 0); d["c_out"] += day.get("out", 0)
             d["c_cr"] += day.get("cr", 0); d["c_cw"] += day.get("cw", 0)
-            d["tokens"] += day.get("in", 0) + day.get("out", 0) + day.get("cr", 0) + day.get("cw", 0)
+            _add_day_tokens(d, dk, "claude",
+                            day.get("in", 0) + day.get("out", 0) + day.get("cr", 0) + day.get("cw", 0))
             d["sessions"] += 1
             for mn, mv in day.get("models", {}).items():
                 nm = nice_model(mn)
@@ -6448,7 +6549,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             d["codex"] += day.get("cost", 0)
             d["x_in"] += day.get("in", 0); d["x_out"] += day.get("out", 0)
             d["x_cached"] += day.get("cached", 0); d["x_reason"] += day.get("reason", 0)
-            d["tokens"] += day.get("in", 0) + day.get("out", 0)
+            _add_day_tokens(d, dk, "codex",
+                            day.get("in", 0) + day.get("out", 0) + day.get("reason", 0))
             for mn, mv in day.get("models", {}).items():
                 name = f"{nice_model(mn)} (Codex)"
                 model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
@@ -6463,7 +6565,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             continue
         d = days.setdefault(dk, _empty())
         d["gemini"] += day.get("cost", 0)
-        d["tokens"] += _gemini_token_total(day)
+        _add_day_tokens(d, dk, "gemini", _gemini_token_total(day))
         for model_name, usage in day.get("models", {}).items():
             cached = min(int(usage.get("cached", 0) or 0), int(usage.get("in", 0) or 0))
             name = f"{nice_model(model_name)} (Gemini)"
@@ -6483,7 +6585,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         d["grok"] += day.get("cost", 0)
         d["g_in"] += day.get("in", 0); d["g_out"] += day.get("out", 0)
         d["g_cr"] += day.get("cr", 0); d["g_reason"] += day.get("reason", 0)
-        d["tokens"] += token_total(day)
+        _add_day_tokens(d, dk, "grok", token_total(day))
         for model_name, usage in day.get("models", {}).items():
             name = f"{nice_model(model_name)} (Grok Build)"
             model = models.setdefault(
@@ -6502,7 +6604,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             d["p_in"] += day.get("in", 0); d["p_out"] += day.get("out", 0)
             d["p_cr"] += day.get("cr", 0); d["p_cw"] += day.get("cw", 0)
             d["p_reason"] += day.get("reason", 0)
-            d["tokens"] += token_total(day)
+            _add_day_tokens(d, dk, "pi", token_total(day))
             for mn, mv in day.get("models", {}).items():
                 nm = f"{nice_model(mn)} (Pi)"
                 m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "pi"})
@@ -6515,7 +6617,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             continue
         d = days.setdefault(dk, _empty())
         d["opencode"] += day_data.get("cost", 0)
-        d["tokens"] += token_total(day_data)
+        _add_day_tokens(d, dk, "opencode", token_total(day_data))
         for mn, mv in day_data.get("models", {}).items():
             nm = f"{nice_model(mn)} (OpenCode)"
             m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "opencode"})
@@ -6529,7 +6631,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 continue
             d = days.setdefault(dk, _empty())
             d[tool_key] += day_data.get("cost", 0)
-            d["tokens"] += token_total(day_data)
+            _add_day_tokens(d, dk, tool_key, token_total(day_data))
             for mn, mv in day_data.get("models", {}).items():
                 name = f"{nice_model(mn)} ({suffix})"
                 model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
@@ -6547,7 +6649,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         d["workbuddy"] += record.get("cost", 0)
         d["w_in"] += record.get("in", 0); d["w_out"] += record.get("out", 0)
         d["w_cr"] += record.get("cr", 0); d["w_cw"] += record.get("cw", 0)
-        d["tokens"] += token_total(record)
+        _add_day_tokens(d, dk, "workbuddy", token_total(record))
         name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
         m = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0,
                                      "cw": 0, "reason": 0, "tool": "workbuddy"})
@@ -6566,7 +6668,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         d["qwencode"] += entry.get("cost", 0)
         d["q_in"] += entry.get("in", 0); d["q_out"] += entry.get("out", 0)
         d["q_cr"] += entry.get("cr", 0); d["q_reason"] += entry.get("reason", 0)
-        d["tokens"] += token_total(entry)
+        _add_day_tokens(d, dk, "qwencode", token_total(entry))
         for mn, mv in entry.get("models", {}).items():
             nm = f"{nice_model(mn)} (Qwen Code)"
             m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "qwencode"})
@@ -6580,7 +6682,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 continue
             d = days.setdefault(dk, _empty())
             d["hermes"] += day.get("cost", 0)
-            d["tokens"] += token_total(day)
+            _add_day_tokens(d, dk, "hermes", token_total(day))
             for mn, mv in day.get("models", {}).items():
                 name = f"{nice_model(mn)} (Hermes)"
                 model = models.setdefault(
@@ -6598,7 +6700,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 continue
             d = days.setdefault(dk, _empty())
             d["openclaw"] += day.get("cost", 0)
-            d["tokens"] += token_total(day)
+            _add_day_tokens(d, dk, "openclaw", token_total(day))
             for mn, mv in day.get("models", {}).items():
                 name = f"{nice_model(mn)} (OpenClaw)"
                 model = models.setdefault(
@@ -6616,7 +6718,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             d = days.setdefault(dk, _empty())
             input_tokens = day.get("in", 0)
             output_tokens = day.get("out", 0)
-            d["tokens"] += input_tokens + output_tokens
+            _add_day_tokens(d, dk, "qoderwork", input_tokens + output_tokens)
             name = f"{nice_model(model_name)} (QoderWork)"
             model = models.setdefault(
                 name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
@@ -6633,12 +6735,41 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             input_total = day.get("in", 0)
             cached = day.get("cached", 0)
             output = day.get("out", 0)
-            d["tokens"] += input_total + output
+            _add_day_tokens(d, dk, "qoder_ide", input_total + output)
             nm = f"{nice_model(model_name)} (Qoder)"
             m = models.setdefault(nm, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "tool": "qoder"})
             m["in"] += max(input_total - cached, 0)
             m["out"] += output
             m["cr"] += cached
+
+    # --- 持久账本高水位合并:逐工具逐日取 max,被清理的历史天由账本兜底补进序列 ---
+    # 同一份数据的存档与实时绝不相加:cost 直接与该工具当日成本列取 max;
+    # tokens 列只补"账本白名单token(_ledger_token_sum) 超出该工具当日实时token"的差额。
+    # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
+    _LEDGER_COST_COLUMNS = frozenset((
+        "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
+        "mimocode", "pi", "workbuddy", "opencode", "qwencode"))
+    for tool, tool_days in _load_ledger().get("tools", {}).items():
+        if not isinstance(tool_days, dict):
+            continue
+        column = tool if tool in _LEDGER_COST_COLUMNS else None
+        for dk, day in tool_days.items():
+            if not isinstance(day, dict):
+                continue
+            if cutoff and dk < cutoff:
+                continue
+            ledger_tok = _ledger_token_sum(day)
+            cost = day.get("cost")
+            ledger_cost = (float(cost) if isinstance(cost, (int, float))
+                           and not isinstance(cost, bool) else 0.0)
+            if ledger_tok <= 0 and ledger_cost <= 0:
+                continue
+            d = days.setdefault(dk, _empty())
+            live_tok = live_tool_tokens.get(dk, {}).get(tool, 0)
+            if ledger_tok > live_tok:
+                d["tokens"] += ledger_tok - live_tok
+            if column and ledger_cost > d[column]:
+                d[column] = ledger_cost
 
     codex_total = sum(d["codex"] for d in days.values())
     codex_in = sum(d["x_in"] for d in days.values())
@@ -6725,12 +6856,11 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     hours = [0] * 24
     weekday = [0] * 7
     day_tokens = {}
+    day_cost = {}
     proj_tok = {}
     day_projs = {}
     model_tok = {}
     all_day_hours = set()
-    total_tokens = 0
-    total_cost = 0.0
 
     def add_hours(day_key, values):
         if not isinstance(values, list) or len(values) != 24:
@@ -6756,8 +6886,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             pt = proj_tok.setdefault(proj, [0, 0.0])
             pt[0] += tok; pt[1] += day.get("cost", 0)
             day_projs.setdefault(dk, set()).add(proj)
@@ -6766,17 +6895,16 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 nm = nice_model(mn)
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- Codex (in + out; in 已含 cached, out 已含 reason) ---
+    # --- Codex (in + out + reason; in 已含 cached。与账本白名单/主页卡片总量同口径) ---
     for f, entry in cache.get("codex", {}).items():
         if not isinstance(entry, dict):
             continue
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
                 continue
-            tok = day.get("in", 0) + day.get("out", 0)
+            tok = day.get("in", 0) + day.get("out", 0) + day.get("reason", 0)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             for hour, amount in enumerate(day.get("hours", [])):
                 hours[hour] += amount
@@ -6793,8 +6921,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             continue
         tok = _gemini_token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        total_tokens += tok
-        total_cost += day.get("cost", 0)
+        day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         add_hours(dk, day.get("hours"))
         for model, usage in day.get("models", {}).items():
@@ -6808,8 +6935,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             continue
         tok = token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        total_tokens += tok
-        total_cost += day.get("cost", 0)
+        day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         add_hours(dk, day.get("hours"))
         for model, usage in day.get("models", {}).items():
@@ -6825,8 +6951,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             for model, usage in day.get("models", {}).items():
@@ -6842,8 +6967,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             for model, usage in day.get("models", {}).items():
@@ -6856,8 +6980,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             continue
         tok = token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        total_tokens += tok
-        total_cost += day.get("cost", 0)
+        day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         for hour, amount in enumerate(day.get("hours", [])):
             hours[hour] += amount
@@ -6874,8 +6997,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             for hour, amount in enumerate(day.get("hours", [])):
                 hours[hour] += amount
@@ -6894,8 +7016,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             continue
         tok = token_total(entry)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        total_tokens += tok
-        total_cost += entry.get("cost", 0)
+        day_cost[dk] = day_cost.get(dk, 0.0) + entry.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         hour = entry.get("hour")
         if isinstance(hour, int) and 0 <= hour < 24:
@@ -6914,8 +7035,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             for mn, mv in day.get("models", {}).items():
@@ -6929,8 +7049,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             continue
         tok = token_total(record)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        total_tokens += tok
-        total_cost += record.get("cost", 0)
+        day_cost[dk] = day_cost.get(dk, 0.0) + record.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         hour = record.get("hour")
         if isinstance(hour, int) and 0 <= hour < 24:
@@ -6954,7 +7073,6 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = day.get("in", 0) + day.get("out", 0)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             name = f"{nice_model(model_name)} (QoderWork)"
@@ -6970,16 +7088,58 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = day.get("in", 0) + day.get("out", 0)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             nm = f"{nice_model(model_name)} (Qoder)"
             model_tok[nm] = model_tok.get(nm, 0) + tok
 
+    # --- 持久账本合并:全部指标统一账本口径 ---
+    # 账本是同一份数据的高水位存档:同一天取 max(账本合计, 实时值),绝不相加以免重复计数
+    # (天级整取整用;账本理论上 ≥ 实时,max 只是保险)。token 按白名单口径求和(含 cached/thoughts,
+    # 见 _ledger_token_sum),cost 同理逐日取 max。被清理日志的历史天由账本兜底补回,
+    # 让 total/active/streak/busiest/peak 与 peak_days 同口径,避免同页口径分裂。
+    ledger_day_tokens = {}
+    ledger_day_cost = {}
+    for tool_days in _load_ledger().get("tools", {}).values():
+        if not isinstance(tool_days, dict):
+            continue
+        for dk, day in tool_days.items():
+            if not isinstance(day, dict):
+                continue
+            if cutoff and dk < cutoff:
+                continue
+            tok = _ledger_token_sum(day)
+            if tok:
+                ledger_day_tokens[dk] = ledger_day_tokens.get(dk, 0) + tok
+            cost = day.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+                ledger_day_cost[dk] = ledger_day_cost.get(dk, 0.0) + float(cost)
+            projects = day.get("projects")
+            if isinstance(projects, list):  # 账本存档的项目名:日志被清后"那天在干什么"的记忆
+                names = {p for p in projects if isinstance(p, str) and p}
+                if names:
+                    day_projs.setdefault(dk, set()).update(names)
+    for dk, tok in ledger_day_tokens.items():
+        day_tokens[dk] = max(day_tokens.get(dk, 0), tok)
+    for dk, cost in ledger_day_cost.items():
+        day_cost[dk] = max(day_cost.get(dk, 0.0), cost)
+    total_tokens = sum(day_tokens.values())
+    total_cost = sum(day_cost.values())
+
     active = sorted(day_tokens.keys())
     streak_max, streak_cur = _streak_info(active)
-    busiest_dk, busiest_tok = (max(day_tokens.items(), key=lambda kv: kv[1])
-                               if day_tokens else ("", 0))
+
+    # --- 巅峰日 Top 3:直接取合并后的 day_tokens,与 total_tokens/active_days 同一份数据 ---
+    peak_days = [
+        {"date": dk, "tokens": tok,
+         "projects": sorted(day_projs.get(dk) or ())[:3]}  # 账本天的项目名同样能命中
+        for dk, tok in sorted(day_tokens.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        if tok > 0
+    ]
+    # busiest 向后兼容保留,取值 = peak_days[0],保证两者一致;成就计算同样用合并后的冠军值。
+    busiest_merged = ({"date": peak_days[0]["date"], "tokens": peak_days[0]["tokens"]}
+                      if peak_days else {"date": "", "tokens": 0})
+    busiest_tok = busiest_merged["tokens"]
     top_model_name, top_model_tok = (max(model_tok.items(), key=lambda kv: kv[1])
                                      if model_tok else ("-", 0))
     projects = sorted(
@@ -7080,7 +7240,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         "active_days": len(active),
         "streak_max": streak_max,
         "streak_cur": streak_cur,
-        "busiest": {"date": busiest_dk, "tokens": busiest_tok},
+        "busiest": busiest_merged,
+        "peak_days": peak_days,
+        "day_projects": {dk: sorted(projs)[:3] for dk, projs in day_projs.items() if projs},
         "top_model": {"name": top_model_name, "tokens": top_model_tok},
         "hours": hours,
         "weekday": weekday,

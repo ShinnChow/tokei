@@ -619,6 +619,25 @@ struct DashboardView: View {
         if let busiest = scopedDaily.max(by: { $0.tokens < $1.tokens }) {
             data.busiest = WrappedBusiest(date: busiest.date, tokens: busiest.tokens)
         }
+        // 巅峰日 Top 3 按设备维度从 scopedDaily 重算;项目名按日期从本机/peer 原始数据回填
+        var peakProjects: [String: [String]] = [:]
+        for payload in [baseWrapped] + peerWrapped.map { Optional($0) } {
+            for (date, projs) in payload?.day_projects ?? [:] where !projs.isEmpty {
+                peakProjects[date, default: []].append(contentsOf: projs)
+            }
+            for peak in payload?.peak_days ?? [] {
+                guard let projs = peak.projects, !projs.isEmpty else { continue }
+                peakProjects[peak.date, default: []].append(contentsOf: projs)
+            }
+        }
+        data.peak_days = scopedDaily
+            .filter { $0.tokens > 0 }
+            .sorted { $0.tokens == $1.tokens ? $0.date < $1.date : $0.tokens > $1.tokens }
+            .prefix(3)
+            .map { day in
+                let projs = peakProjects[day.date].map { Array(Set($0)).sorted().prefix(3).map { $0 } }
+                return WrappedPeakDay(date: day.date, tokens: day.tokens, projects: projs)
+            }
 
         let firstCandidates = ([baseWrapped?.first_day ?? ""] + peerWrapped.map(\.first_day) + activeDays)
             .filter { !$0.isEmpty }
