@@ -17,6 +17,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 
@@ -88,6 +89,15 @@ token 快照误删。
 - 缓存写 = `usage.cacheWrite`
 - 推理 = `usage.reasoning`(如果存在)
 - 成本 = `usage.cost.total`(优先使用)
+
+**DeepSeek Harness** — 底层字段互斥保存，卡片主口径与 Harness 自身一致:
+- 输入 = `inputTokens + cacheReadTokens + cacheWriteTokens`
+- 输出 = `outputTokens`（已包含 `reasoningTokens`）
+- 缓存读、缓存写、推理作为输入/输出的组成明细展示
+- 总量 = 输入 + 输出
+- `deepseek-official` 路由固定采用 DeepSeek 官方直连价，不受 OpenRouter 价格更新影响
+- V4 Pro 缓存未命中输入、缓存命中输入、输出：`$0.435 / $0.003625 / $0.87` 每百万 Token
+- V4 Flash 缓存未命中输入、缓存命中输入、输出：`$0.14 / $0.0028 / $0.28` 每百万 Token
 
 **Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
 - 输入 = `inputTokens - cachedTokens`

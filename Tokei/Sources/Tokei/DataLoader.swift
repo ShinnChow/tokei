@@ -94,6 +94,13 @@ final class DataLoader {
     private static let claudeQuotaRetryScanInterval = 5 * 60
     private static let claudeCacheFileLimit = 16 * 1024 * 1024
     private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
+    private static let deepSeekPreparationLock = NSLock()
+    private static let deepSeekMaxDecompressedSize = 2 * 1024 * 1024 * 1024
+
+    private struct DeepSeekSourceSignature: Codable, Equatable {
+        var modified: TimeInterval
+        var size: Int
+    }
 
     private static var claudeQuotaStateURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -338,6 +345,123 @@ final class DataLoader {
         return Data(dst.prefix(ret))
     }
 
+    private static func zstdDecompressFrames(_ src: Data) -> Data? {
+        guard !src.isEmpty else { return Data() }
+        var output = Data()
+        var offset = 0
+        let succeeded = src.withUnsafeBytes { srcPtr -> Bool in
+            guard let base = srcPtr.baseAddress else { return false }
+            while offset < src.count {
+                let frame = base.advanced(by: offset)
+                let remaining = src.count - offset
+                let frameSize = ZSTD_findFrameCompressedSize(frame, remaining)
+                guard ZSTD_isError(frameSize) == 0, frameSize > 0, frameSize <= remaining else {
+                    return false
+                }
+                let contentSize = ZSTD_getFrameContentSize(frame, frameSize)
+                let destinationSize: Int
+                if contentSize == ZSTD_CONTENTSIZE_ERROR {
+                    return false
+                } else if contentSize == ZSTD_CONTENTSIZE_UNKNOWN {
+                    destinationSize = min(max(frameSize * 64, 64 * 1024), 64 * 1024 * 1024)
+                } else {
+                    guard contentSize <= UInt64(deepSeekMaxDecompressedSize) else { return false }
+                    destinationSize = max(Int(contentSize), 1)
+                }
+                guard output.count <= deepSeekMaxDecompressedSize - destinationSize else { return false }
+                var destination = [UInt8](repeating: 0, count: destinationSize)
+                let written = ZSTD_decompress(&destination, destinationSize, frame, frameSize)
+                guard ZSTD_isError(written) == 0 else { return false }
+                output.append(contentsOf: destination.prefix(written))
+                offset += frameSize
+            }
+            return offset == src.count
+        }
+        return succeeded ? output : nil
+    }
+
+    private static var deepSeekCacheURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tokei/cache/dsh-sessions", isDirectory: true)
+    }
+
+    @discardableResult
+    private static func prepareDeepSeekHarnessSessions() -> URL {
+        deepSeekPreparationLock.lock()
+        defer { deepSeekPreparationLock.unlock() }
+
+        let fm = FileManager.default
+        let sourceRoot: URL
+        if let configured = ProcessInfo.processInfo.environment["TOKEI_DSH_DIR"],
+           !configured.isEmpty {
+            sourceRoot = URL(fileURLWithPath: NSString(string: configured).expandingTildeInPath,
+                             isDirectory: true).standardizedFileURL
+        } else {
+            sourceRoot = fm.homeDirectoryForCurrentUser
+                .appendingPathComponent(".dsh/sessions", isDirectory: true).standardizedFileURL
+        }
+        let outputRoot = deepSeekCacheURL
+        try? fm.createDirectory(at: outputRoot, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        let manifestURL = outputRoot.appendingPathComponent("manifest.json")
+        let decoder = JSONDecoder()
+        let oldManifest = (try? Data(contentsOf: manifestURL)).flatMap {
+            try? decoder.decode([String: DeepSeekSourceSignature].self, from: $0)
+        } ?? [:]
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
+        guard let enumerator = fm.enumerator(at: sourceRoot, includingPropertiesForKeys: Array(keys),
+                                             options: [.skipsHiddenFiles]) else {
+            return outputRoot
+        }
+        var manifest: [String: DeepSeekSourceSignature] = [:]
+        let sourcePrefix = sourceRoot.path.hasSuffix("/") ? sourceRoot.path : sourceRoot.path + "/"
+        for case let source as URL in enumerator {
+            guard source.path.hasSuffix(".jsonl.zstd"),
+                  source.standardizedFileURL.path.hasPrefix(sourcePrefix),
+                  let values = try? source.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let modified = values.contentModificationDate,
+                  let size = values.fileSize else { continue }
+            let relative = String(source.standardizedFileURL.path.dropFirst(sourcePrefix.count))
+            let outputRelative = String(relative.dropLast(".zstd".count))
+            let output = outputRoot.appendingPathComponent(outputRelative).standardizedFileURL
+            guard output.path.hasPrefix(outputRoot.path + "/") else { continue }
+            let signature = DeepSeekSourceSignature(modified: modified.timeIntervalSince1970, size: size)
+            if oldManifest[relative] == signature, fm.fileExists(atPath: output.path) {
+                manifest[relative] = signature
+                continue
+            }
+            guard let compressed = try? Data(contentsOf: source, options: .mappedIfSafe),
+                  let decompressed = zstdDecompressFrames(compressed) else {
+                continue
+            }
+            do {
+                try fm.createDirectory(at: output.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true,
+                                       attributes: [.posixPermissions: 0o700])
+                try decompressed.write(to: output, options: .atomic)
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+                manifest[relative] = signature
+            } catch {
+                continue
+            }
+        }
+
+        for relative in oldManifest.keys where manifest[relative] == nil {
+            let outputRelative = String(relative.dropLast(".zstd".count))
+            let output = outputRoot.appendingPathComponent(outputRelative).standardizedFileURL
+            if output.path.hasPrefix(outputRoot.path + "/") {
+                try? fm.removeItem(at: output)
+            }
+        }
+        if manifest != oldManifest, let data = try? JSONEncoder().encode(manifest) {
+            try? data.write(to: manifestURL, options: .atomic)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestURL.path)
+        }
+        return outputRoot
+    }
+
     private static func isoToEpoch(_ s: String?) -> Int? {
         guard let s = s else { return nil }
         let fmt = ISO8601DateFormatter()
@@ -534,6 +658,7 @@ final class DataLoader {
     }
 
     static func runScriptRaw(args: [String] = ["--json", "--no-sync-snapshot"], timeout: TimeInterval = 8) -> ScriptResult {
+        let deepSeekSessions = prepareDeepSeekHarnessSessions()
         let proc = Process()
         if pythonPath == "/usr/bin/env" {
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -542,6 +667,9 @@ final class DataLoader {
             proc.executableURL = URL(fileURLWithPath: pythonPath)
             proc.arguments = [scriptPath] + args
         }
+        var environment = ProcessInfo.processInfo.environment
+        environment["TOKEI_DSH_DECOMPRESSED_DIR"] = deepSeekSessions.path
+        proc.environment = environment
         let outPipe = Pipe()
         let errPipe = Pipe()
         proc.standardOutput = outPipe

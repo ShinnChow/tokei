@@ -329,6 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let showX = ud.object(forKey: "showCodex") as? Bool ?? true
                     let showP = ud.object(forKey: "showPi") as? Bool ?? true
                     let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
+                    let showD = ud.object(forKey: "showDeepSeekHarness") as? Bool ?? true
                     let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                     let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
                     let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
@@ -339,6 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                     if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showD { let r = u.deepseekHarness.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
                     if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }

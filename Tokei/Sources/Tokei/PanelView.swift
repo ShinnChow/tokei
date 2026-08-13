@@ -15,6 +15,7 @@ struct PanelView: View {
     @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
     @State private var workBuddyModelsOpen = false
+    @State private var deepSeekHarnessModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
@@ -42,6 +43,7 @@ struct PanelView: View {
     @AppStorage("showOpenClaw") private var showOpenClaw = true
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
+    @AppStorage("showDeepSeekHarness") private var showDeepSeekHarness = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
@@ -53,7 +55,7 @@ struct PanelView: View {
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
-         showOpenClaw, showPi, showWorkBuddy, showOpenCode, showQwenCode].filter { $0 }.count
+         showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -286,6 +288,7 @@ struct PanelView: View {
         let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
+        let dshr = u.deepseekHarness.ranges.get(sel)
         let qcr = u.qwencode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
@@ -320,6 +323,12 @@ struct PanelView: View {
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen))),
             ToolCardItem(id: "workbuddy", name: "WorkBuddy", visible: showWorkBuddy, active: wr.sessions > 0,
                          tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen))),
+            ToolCardItem(id: "deepseek_harness", name: "DeepSeek Harness", visible: showDeepSeekHarness,
+                         active: dshr.sessions > 0, tint: Theme.deepseekHarness,
+                         content: AnyView(tokenUsageBlock(title: "DeepSeek Harness", dshr,
+                                                          tint: Theme.deepseekHarness,
+                                                          modelsOpen: $deepSeekHarnessModelsOpen,
+                                                          inclusiveIO: true))),
             ToolCardItem(id: "opencode", name: "OpenCode", visible: showOpenCode, active: or.sessions > 0,
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
             ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
@@ -886,15 +895,17 @@ struct PanelView: View {
 
     // MARK: - Token usage cards
     @ViewBuilder
-    func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color, modelsOpen: Binding<Bool>) -> some View {
+    func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
+                         modelsOpen: Binding<Bool>, inclusiveIO: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
-                    hit: r.hit, extra: tokenUsageMetrics(r), tint: tint)
+                    hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: modelsOpen, tint: tint)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
+                                         inclusiveIO: inclusiveIO)
                 }
             } else {
                 emptyHint
@@ -902,7 +913,17 @@ struct PanelView: View {
         }
     }
 
-    func tokenUsageMetrics(_ r: TokenUsageRange) -> [Metric] {
+    func tokenUsageMetrics(_ r: TokenUsageRange, inclusiveIO: Bool = false) -> [Metric] {
+        if inclusiveIO {
+            var items: [Metric] = [
+                .init("arrow.down", "输入", Fmt.human(r.in + r.cr + r.cw)),
+                .init("arrow.up", "输出", Fmt.human(r.out + r.reason)),
+            ]
+            if r.cr > 0 { items.append(.init("bolt.fill", "其中缓存读", Fmt.human(r.cr))) }
+            if r.reason > 0 { items.append(.init("brain", "其中推理", Fmt.human(r.reason))) }
+            if r.cw > 0 { items.append(.init("square.stack.3d.up.fill", "其中缓存写", Fmt.human(r.cw))) }
+            return items
+        }
         var items: [Metric] = [
             .init("arrow.down", "输入", Fmt.human(r.in)),
             .init("arrow.up", "输出", Fmt.human(r.out)),
@@ -1041,7 +1062,8 @@ struct PanelView: View {
 
     @ViewBuilder
     func tokenModelDisclosure(_ models: [TokenModelStat], open: Binding<Bool>, tint: Color,
-                              reasonIncludedInOutput: Bool = false) -> some View {
+                              reasonIncludedInOutput: Bool = false,
+                              inclusiveIO: Bool = false) -> some View {
         Button {
             open.wrappedValue.toggle()
         } label: {
@@ -1104,9 +1126,12 @@ struct PanelView: View {
                         }
                         .buttonStyle(.plain)
                         if isExpanded {
-                            modelDetailRow(tokIn: m.in, tokOut: m.out, tokCR: m.cr, tokCW: m.cw,
+                            modelDetailRow(tokIn: inclusiveIO ? m.in + m.cr + m.cw : m.in,
+                                           tokOut: inclusiveIO ? m.out + m.reason : m.out,
+                                           tokCR: m.cr, tokCW: m.cw,
                                            tokReason: m.reason,
-                                           pin: m.pin, pout: m.pout, hit: hit, tint: tint)
+                                           pin: m.pin, pout: m.pout, hit: hit, tint: tint,
+                                           componentsAreSubtotals: inclusiveIO)
                         }
                     }
                 }
@@ -1193,7 +1218,8 @@ struct PanelView: View {
 
     @ViewBuilder
     func modelDetailRow(tokIn: Int, tokOut: Int, tokCR: Int, tokCW: Int, tokReason: Int = 0,
-                         pin: Double, pout: Double, hit: Double = 0, tint: Color) -> some View {
+                         pin: Double, pout: Double, hit: Double = 0, tint: Color,
+                         componentsAreSubtotals: Bool = false) -> some View {
         let tagFont = Font.system(size: 9, weight: .medium, design: .monospaced)
         let labelFont = Font.system(size: 8.5)
         let bg = tint.opacity(0.08)
@@ -1204,13 +1230,16 @@ struct PanelView: View {
                 detailTag("↓ \(Fmt.human(tokIn))", label: "输入", tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
                 detailTag("↑ \(Fmt.human(tokOut))", label: "输出", tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
                 if tokCR > 0 {
-                    detailTag("⚡ \(Fmt.human(tokCR))", label: "缓存读", tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
+                    detailTag("⚡ \(Fmt.human(tokCR))", label: componentsAreSubtotals ? "其中缓存读" : "缓存读",
+                              tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
                 }
                 if tokCW > 0 {
-                    detailTag("✎ \(Fmt.human(tokCW))", label: "缓存写", tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
+                    detailTag("✎ \(Fmt.human(tokCW))", label: componentsAreSubtotals ? "其中缓存写" : "缓存写",
+                              tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
                 }
                 if tokReason > 0 {
-                    detailTag("◉ \(Fmt.human(tokReason))", label: "推理", tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
+                    detailTag("◉ \(Fmt.human(tokReason))", label: componentsAreSubtotals ? "其中推理" : "推理",
+                              tagFont: tagFont, labelFont: labelFont, bg: bg, border: border)
                 }
                 if hit > 0 {
                     HStack(spacing: 2) {
@@ -1612,6 +1641,7 @@ struct PanelView: View {
                 settingsRow("OpenClaw", tint: Theme.openclaw, isOn: $showOpenClaw)
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
+                settingsRow("DeepSeek Harness", tint: Theme.deepseekHarness, isOn: $showDeepSeekHarness)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
             }
@@ -2278,7 +2308,8 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
-                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "opencode", "qwencode"]
+                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "deepseek_harness",
+                         "opencode", "qwencode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

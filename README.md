@@ -160,6 +160,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |

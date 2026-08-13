@@ -13,6 +13,7 @@
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
+#   DeepSeek:    ~/.dsh/sessions/**/*.jsonl.zstd (由 App 原生解压后增量扫描)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 
 import os
@@ -88,6 +89,8 @@ GROK_DIR = os.path.join(GROK_HOME, "sessions")
 GROK_LOG = os.path.join(GROK_HOME, "logs", "unified.jsonl")
 GROK_AUTH = os.path.join(GROK_HOME, "auth.json")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
+DEEPSEEK_HARNESS_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "TOKEI_DSH_DECOMPRESSED_DIR", os.path.join(HOME, ".tokei", "cache", "dsh-sessions"))))
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
                             "SharedClientCache", "cache", "db", "local.db")
 QODER_IDE_DB_PATHS = _path_candidates(
@@ -166,6 +169,24 @@ _DEFAULT_PRICES = {
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
+
+# DeepSeek Harness 的 deepseek-official 路由按官方直连价计算，不能套用
+# OpenRouter 同名模型的渠道价。单位均为 USD / 1M tokens。
+_DEEPSEEK_OFFICIAL_PRICES = {
+    "deepseek-v4-pro": {
+        "in": 0.435, "out": 0.87, "cache_read": 0.003625, "cache_write": 0.0,
+    },
+    "deepseek-v4-flash": {
+        "in": 0.14, "out": 0.28, "cache_read": 0.0028, "cache_write": 0.0,
+    },
+}
+
+
+def _deepseek_official_price(model):
+    normalized = _normalize(model) or ""
+    model_id = normalized.rsplit("/", 1)[-1]
+    price = _DEEPSEEK_OFFICIAL_PRICES.get(model_id)
+    return dict(price) if price else None
 
 
 def _load_json(path, default):
@@ -599,7 +620,10 @@ def ledger_flush():
             stored = fresh["tools"].setdefault(tool, {})
             for dk, day in days.items():
                 kept = stored.get(dk)
-                if kept is None or _ledger_day_total(day) > _ledger_day_total(kept):
+                if (kept is None
+                        or _ledger_cost_version(day) > _ledger_cost_version(kept)
+                        or (_ledger_cost_version(day) == _ledger_cost_version(kept)
+                            and _ledger_day_total(day) > _ledger_day_total(kept))):
                     stored[dk] = day
         _save_ledger(fresh)
         _LEDGER_CACHE["data"] = fresh
@@ -635,7 +659,13 @@ def _save_ledger(ledger):
 def _ledger_day_total(day):
     """字段无关的当日体量:累加所有数值字段(cost 除外),适配任意工具的 day 结构。"""
     return sum(float(v) for k, v in day.items()
-               if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "cost")
+               if isinstance(v, (int, float)) and not isinstance(v, bool)
+               and k != "cost" and not k.startswith("_"))
+
+
+def _ledger_cost_version(day):
+    value = day.get("_cost_version", 0) if isinstance(day, dict) else 0
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
 # 账本天的 token 口径:白名单直加字段。cached 不单独相加——所有记录 cached 的工具
@@ -671,7 +701,11 @@ def ledger_reconcile(tool, live_days):
     max_day = (date.today() + timedelta(days=1)).isoformat()
     for dk, live in live_days.items():
         kept = stored.get(dk)
-        if kept and _ledger_day_total(kept) > _ledger_day_total(live):
+        kept_version = _ledger_cost_version(kept)
+        live_version = _ledger_cost_version(live)
+        if (kept and kept_version > live_version
+                or (kept and kept_version == live_version
+                    and _ledger_day_total(kept) > _ledger_day_total(live))):
             merged[dk] = kept
         else:
             merged[dk] = live
@@ -810,6 +844,10 @@ def _empty_pi():
 
 
 def _empty_workbuddy():
+    return _empty_opencode()
+
+
+def _empty_deepseek_harness():
     return _empty_opencode()
 
 
@@ -4802,6 +4840,205 @@ def scan_workbuddy(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- DeepSeek Harness ----------
+# Harness 会为同一次调用写 usage chunk 和最终 message。按 session/turn/step
+# 只保留最终 message；异常中断时再用 usage chunk 兜底。
+_DEEPSEEK_HARNESS_COST_VERSION = 2
+
+
+def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="deepseek-official"):
+    if not isinstance(item, dict):
+        return None
+    event_type = item.get("type")
+    data = item.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+
+    priority = 0
+    usage = None
+    model = fallback_model
+    provider = fallback_provider
+    if event_type == "assistant/message":
+        usage = data.get("usage")
+        message = data.get("message") or {}
+        source = message.get("source") or {} if isinstance(message, dict) else {}
+        if isinstance(source, dict):
+            model = source.get("model") or model
+            provider = source.get("provider") or provider
+        priority = 2
+    elif event_type == "assistant/chunk":
+        chunk = data.get("chunk") or {}
+        if isinstance(chunk, dict) and chunk.get("type") == "usage":
+            usage = chunk.get("usage")
+            priority = 1
+    if not isinstance(usage, dict):
+        return None
+
+    timestamp = item.get("time")
+    try:
+        dt = datetime.fromtimestamp(int(timestamp) / 1000).astimezone()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    try:
+        turn = int(data.get("turn"))
+        step = int(data.get("step"))
+    except (TypeError, ValueError):
+        return None
+
+    inp = max(int(usage.get("inputTokens", 0) or 0), 0)
+    raw_out = max(int(usage.get("outputTokens", 0) or 0), 0)
+    cr = max(int(usage.get("cacheReadTokens", 0) or 0), 0)
+    cw = max(int(usage.get("cacheWriteTokens", 0) or 0), 0)
+    reason = min(max(int(usage.get("reasoningTokens", 0) or 0), 0), raw_out)
+    out = raw_out - reason
+    if inp + raw_out + cr + cw <= 0:
+        return None
+    model = str(model or "deepseek-v4-pro")
+    provider = str(provider or "")
+    cost = 0.0
+    price = (_deepseek_official_price(model) if provider == "deepseek-official" else None)
+    if price is None:
+        price_id = _pricing_id(model)
+        price = _raw_price(price_id) if price_id else None
+    if price:
+        cost = (inp / 1e6 * price["in"] + raw_out / 1e6 * price["out"]
+                + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
+    return {
+        "date": dt.strftime("%Y-%m-%d"), "hour": dt.hour, "ts": int(timestamp),
+        "turn": turn, "step": step, "priority": priority, "model": model,
+        "provider": provider,
+        "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
+        "cost": cost,
+    }
+
+
+def _iter_deepseek_harness_records(file_cache):
+    records = []
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        session = str(entry.get("sid") or path)
+        for record in entry.get("records", []):
+            if isinstance(record, dict):
+                records.append((record.get("ts", 0), path, entry, session, record))
+    records.sort(key=lambda value: (value[0], value[1]))
+    seen = set()
+    for _, path, entry, session, record in records:
+        key = (session, record.get("turn"), record.get("step"))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield path, entry, record
+
+
+def scan_deepseek_harness(bounds, cache):
+    ledger_touch("deepseek_harness")
+    fc = cache.setdefault("deepseek_harness", {})
+    B = _empty_token_ranges()
+    if not os.path.isdir(DEEPSEEK_HARNESS_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    files = set(glob.glob(os.path.join(DEEPSEEK_HARNESS_DIR, "**", "*.jsonl"), recursive=True))
+    stale = set(fc.keys())
+    for path in sorted(files):
+        stale.discard(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        if (isinstance(fc.get(path), dict) and fc[path].get("sig") == sig
+                and fc[path].get("cost_version") == _DEEPSEEK_HARNESS_COST_VERSION):
+            continue
+
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        project = ""
+        current_model = "deepseek-v4-pro"
+        current_provider = "deepseek-official"
+        candidates = {}
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if '"type"' not in line or not any(value in line for value in (
+                            '"session"', '"request/header"',
+                            '"assistant/chunk"', '"assistant/message"')):
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    event_type = item.get("type")
+                    if event_type == "session":
+                        session_id = str(item.get("id") or session_id)
+                        project = item.get("cwd") or project
+                        continue
+                    if event_type == "request/header":
+                        data = item.get("data") or {}
+                        header = data.get("header") or {} if isinstance(data, dict) else {}
+                        config = header.get("config") or {} if isinstance(header, dict) else {}
+                        if isinstance(config, dict):
+                            current_model = config.get("model") or current_model
+                            current_provider = config.get("provider") or current_provider
+                        continue
+                    record = _deepseek_harness_usage_record(
+                        item, current_model, current_provider)
+                    if record is None:
+                        continue
+                    key = (record["turn"], record["step"])
+                    previous = candidates.get(key)
+                    if previous is None or record["priority"] >= previous["priority"]:
+                        candidates[key] = record
+        except OSError:
+            continue
+        records = sorted(candidates.values(), key=lambda record: record["ts"])
+        fc[path] = {"sig": sig, "records": records, "proj": project, "sid": session_id,
+                    "cost_version": _DEEPSEEK_HARNESS_COST_VERSION}
+        cache["_dirty"] = True
+
+    for path in stale:
+        fc.pop(path, None)
+        cache["_dirty"] = True
+
+    days = {}
+    sessions = {}
+    day_projects = {}
+    for _, entry, record in _iter_deepseek_harness_records(fc):
+        day = days.setdefault(record["date"], _empty_token_day())
+        _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
+                         record["reason"], record["cost"], record["model"])
+        day["hours"][record["hour"]] += token_total(record)
+        session = str(entry.get("sid") or "unknown")
+        sessions.setdefault(record["date"], set()).add(session)
+        project = entry.get("proj") or ""
+        project_name = os.path.basename(project.rstrip("/"))
+        if project_name:
+            day_projects.setdefault(record["date"], set()).add(project_name)
+    for day_key, names in day_projects.items():
+        days[day_key]["projects"] = sorted(names)[:3]
+    for day in days.values():
+        day["_cost_version"] = _DEEPSEEK_HARNESS_COST_VERSION
+
+    for day_key, day in days.items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            B[range_key]["sessions"].update(sessions.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("deepseek_harness", days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+    return {"ranges": B}
+
+
 # ---------- OpenCode ----------
 # SQLite: ~/.local/share/opencode/opencode.db；旧版 JSON 作为补充来源。
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
@@ -5749,6 +5986,8 @@ def compute():
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
+    dsh = _safe_scan("deepseek_harness", lambda: scan_deepseek_harness(bounds, cache),
+                     _empty_deepseek_harness, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
@@ -5875,6 +6114,7 @@ def compute():
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
+    dshranges = {k: token_usage_range(dsh["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
     qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
 
@@ -5952,6 +6192,9 @@ def compute():
         "workbuddy": {
             "ranges": wbranges,
         },
+        "deepseek_harness": {
+            "ranges": dshranges,
+        },
         "opencode": {
             "ranges": ocranges,
         },
@@ -5967,7 +6210,8 @@ def compute():
 
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
-    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
+    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
+                     "deepseek_harness", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -6001,6 +6245,13 @@ def _recalc_costs(result):
                     thoughts = m.get("thoughts", 0)
                     cost = (ti / 1e6 * p["in"] + (to + thoughts) / 1e6 * p["out"]
                             + cached / 1e6 * p["cache_read"])
+                elif tool_key == "deepseek_harness":
+                    cr = m.get("cr", 0)
+                    cw = m.get("cw", 0)
+                    reason = m.get("reason", 0)
+                    p = _deepseek_official_price(name) or p
+                    cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
+                            + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
                 elif tool_key in ("hermes", "zcode", "mimocode"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
@@ -6235,6 +6486,18 @@ def main():
         print(f"今日 输出   {human(wt['out']):>6} {F}")
         print(f"今日 缓存读 {human(wt['cr']):>6} {F}")
         print(f"今日 ≈成本  ${wt['cost']:.2f} {F}")
+        print("---")
+    # DeepSeek Harness 块
+    dt = d["deepseek_harness"]["ranges"]["today"]
+    if dt["sessions"] > 0:
+        print(f"DeepSeek Harness {HEAD}")
+        print(f"命中率   {dt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(dt['in']):>6} {F}")
+        print(f"今日 输出   {human(dt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(dt['cr']):>6} {F}")
+        if dt.get("reason"):
+            print(f"今日 推理   {human(dt['reason']):>6} {F}")
+        print(f"今日 ≈成本  ${dt['cost']:.2f} {F}")
         print("---")
     # Qwen Code 块
     qt = d["qwencode"]["ranges"]["today"]
@@ -6513,12 +6776,14 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
-                       "workbuddy": 0.0, "opencode": 0.0, "qwencode": 0.0,
+                       "workbuddy": 0.0, "deepseek_harness": 0.0,
+                       "opencode": 0.0, "qwencode": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
+                       "d_in": 0, "d_out": 0, "d_cr": 0, "d_cw": 0, "d_reason": 0,
                        "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "g_in": 0, "g_out": 0, "g_cr": 0, "g_reason": 0,
                        "tokens": 0, "sessions": 0}
@@ -6657,6 +6922,24 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         for key in TOKEN_FIELDS:
             m[key] += record.get(key, 0)
 
+    for _, _, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        dk = record.get("date")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        d = days.setdefault(dk, _empty())
+        d["deepseek_harness"] += record.get("cost", 0)
+        d["d_in"] += record.get("in", 0); d["d_out"] += record.get("out", 0)
+        d["d_cr"] += record.get("cr", 0); d["d_cw"] += record.get("cw", 0)
+        d["d_reason"] += record.get("reason", 0)
+        _add_day_tokens(d, dk, "deepseek_harness", token_total(record))
+        name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
+        model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
+                                         "cr": 0, "cw": 0, "reason": 0,
+                                         "tool": "deepseek_harness"})
+        model["cost"] += record.get("cost", 0)
+        for key in TOKEN_FIELDS:
+            model[key] += record.get(key, 0)
+
     qwencode_entries = cache.get("qwencode", {}).get("entries", [])
     for entry in qwencode_entries:
         dk = entry.get("date")
@@ -6748,7 +7031,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "opencode", "qwencode"))
+        "mimocode", "pi", "workbuddy", "deepseek_harness", "opencode", "qwencode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
             continue
@@ -6784,15 +7067,19 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
-              "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
+              "workbuddy": round(v["workbuddy"], 2),
+              "deepseek_harness": round(v["deepseek_harness"], 2),
+              "qwencode": round(v["qwencode"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"]
-                             + v["opencode"] + v["qwencode"] + v["hermes"]
+                             + v["deepseek_harness"] + v["opencode"] + v["qwencode"] + v["hermes"]
                              + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
+              "d_in": v["d_in"], "d_out": v["d_out"], "d_cr": v["d_cr"],
+              "d_cw": v["d_cw"], "d_reason": v["d_reason"],
               "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
               "g_in": v["g_in"], "g_out": v["g_out"], "g_cr": v["g_cr"], "g_reason": v["g_reason"],
               "tokens": v["tokens"]}
@@ -7061,6 +7348,27 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         pt[0] += tok; pt[1] += record.get("cost", 0)
         day_projs.setdefault(dk, set()).add(project)
         model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        model_tok[model_name] = model_tok.get(model_name, 0) + tok
+
+    # --- DeepSeek Harness (最终 message 优先，异常中断用 usage chunk) ---
+    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        dk = record.get("date", "")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        tok = token_total(record)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        day_cost[dk] = day_cost.get(dk, 0.0) + record.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        hour = record.get("hour")
+        if isinstance(hour, int) and 0 <= hour < 24:
+            hours[hour] += tok
+            all_day_hours.add(f"{dk}:{hour}")
+        project_path = entry.get("proj") or ""
+        project = os.path.basename(project_path.rstrip("/")) or "DeepSeek Harness"
+        pt = proj_tok.setdefault(project, [0, 0.0])
+        pt[0] += tok; pt[1] += record.get("cost", 0)
+        day_projs.setdefault(dk, set()).add(project)
+        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
         model_tok[model_name] = model_tok.get(model_name, 0) + tok
 
     # --- QoderWork (in + out, no cost) ---
@@ -7349,6 +7657,26 @@ def projects():
         workbuddy_sessions.setdefault(proj_path, set()).add(record.get("session") or entry.get("sid"))
     for proj_path, session_ids in workbuddy_sessions.items():
         proj_map[proj_path]["sessions"] += len(session_ids)
+
+    # DeepSeek Harness sessions
+    deepseek_sessions = {}
+    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("deepseek_harness")
+        p["tokens"] += token_total(record)
+        p["cost"] += record.get("cost", 0)
+        dk = record.get("date", "")
+        if dk > p["last_active"]:
+            p["last_active"] = dk
+        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
+        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
+        deepseek_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+    for proj_path, session_ids in deepseek_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
 
     # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
     grok_project_sessions = {}
