@@ -238,6 +238,24 @@ final class SyncManager {
         } ?? false
     }
 
+    /// 千问办公额度：默认关闭，只允许 Python 采集器查询本机 QwenWork MCP 适配器。
+    @discardableResult
+    static func setQwenWorkQuotaEnabled(_ enabled: Bool) -> Bool {
+        withConfigLock {
+            var dictionary: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                let data = try Data(contentsOf: configPath)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                dictionary = object
+            }
+            dictionary["qwenwork_quota_enabled"] = enabled
+            try writeConfigDictionary(dictionary)
+            return true
+        } ?? false
+    }
+
     // MARK: - Read peers
 
     func loadPeers() -> PeerLoadReport {
