@@ -3134,8 +3134,17 @@ def _normalize_grok_billing(config, *, plan=None, source=None, updated=None,
                             now_epoch=None):
     if not isinstance(config, dict):
         return None
+    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+    end = period.get("end") or config.get("billingPeriodEnd")
+    reset = _iso_to_epoch(end) if end else None
     pct_raw = config.get("creditUsagePercent")
-    if pct_raw is None:
+    if "creditUsagePercent" not in config:
+        # Grok 的 protobuf JSON 会省略 0 值；仅完整的统一账单周期可安全视为 0% 已用。
+        has_period = bool(period.get("start") and reset is not None)
+        if config.get("isUnifiedBillingUser") is not True or not has_period:
+            return None
+        pct_raw = 0.0
+    elif pct_raw is None:
         return None
     try:
         pct = float(pct_raw)
@@ -3144,9 +3153,6 @@ def _normalize_grok_billing(config, *, plan=None, source=None, updated=None,
     if not math.isfinite(pct):
         return None
     pct = min(100.0, max(0.0, pct))
-    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
-    end = period.get("end") or config.get("billingPeriodEnd")
-    reset = _iso_to_epoch(end) if end else None
     products = []
     for item in config.get("productUsage") or []:
         if not isinstance(item, dict):
