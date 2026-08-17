@@ -111,7 +111,7 @@ class CodexQuotaValuesTests(unittest.TestCase):
             with mock.patch.object(USAGE, "CODEX_AUTH", str(auth_path)), \
                     mock.patch.object(USAGE, "CODEX_QUOTA_CACHE", str(cache_path)), \
                     mock.patch("urllib.request.urlopen", opener):
-                limits, _ = USAGE.fetch_codex_live_limits()
+                limits, _, _ = USAGE.fetch_codex_live_limits()
 
         request = opener.call_args.args[0]
         self.assertNotIn("Authorization", request.headers)
@@ -120,6 +120,108 @@ class CodexQuotaValuesTests(unittest.TestCase):
             "Bearer test-token",
         )
         self.assertEqual(limits["primary"]["used_percent"], 25.0)
+
+    def test_recent_failure_uses_active_official_cache(self):
+        now = USAGE.datetime.now().timestamp()
+        auth = {
+            "tokens": {
+                "access_token": "test-token",
+                "account_id": "test-account",
+            },
+        }
+        account_key = USAGE._codex_auth_context(auth)["account_key"]
+        limits = {
+            "primary": {
+                "used_percent": 69.0,
+                "window_minutes": 10080,
+                "resets_at": int(now + 3 * 24 * 3600),
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "cache.json"
+            auth_path = Path(temp_dir) / "auth.json"
+            auth_path.write_text(json.dumps(auth))
+            cache_path.write_text(json.dumps({
+                "fetched_at": now - 3600,
+                "last_failure_at": now,
+                "limits": limits,
+                "plan": "pro",
+                "account_key": account_key,
+            }))
+            with mock.patch.object(USAGE, "CODEX_AUTH", str(auth_path)), \
+                    mock.patch.object(USAGE, "CODEX_QUOTA_CACHE", str(cache_path)), \
+                    mock.patch("urllib.request.urlopen") as opener:
+                cached_limits, plan, fetched_at = USAGE.fetch_codex_live_limits()
+
+        opener.assert_not_called()
+        self.assertEqual(cached_limits["primary"]["used_percent"], 69.0)
+        self.assertEqual(plan, "pro")
+        self.assertEqual(fetched_at, now - 3600)
+
+    def test_recent_failure_rejects_cache_after_window_reset(self):
+        now = USAGE.datetime.now().timestamp()
+        auth = {
+            "tokens": {
+                "access_token": "test-token",
+                "account_id": "test-account",
+            },
+        }
+        account_key = USAGE._codex_auth_context(auth)["account_key"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "cache.json"
+            auth_path = Path(temp_dir) / "auth.json"
+            auth_path.write_text(json.dumps(auth))
+            cache_path.write_text(json.dumps({
+                "fetched_at": now - 3600,
+                "last_failure_at": now,
+                "limits": {
+                    "primary": {
+                        "used_percent": 69.0,
+                        "window_minutes": 10080,
+                        "resets_at": int(now - 1),
+                    },
+                },
+                "plan": "pro",
+                "account_key": account_key,
+            }))
+            with mock.patch.object(USAGE, "CODEX_AUTH", str(auth_path)), \
+                    mock.patch.object(USAGE, "CODEX_QUOTA_CACHE", str(cache_path)):
+                self.assertIsNone(USAGE.fetch_codex_live_limits())
+
+    def test_official_cache_is_scoped_to_codex_account(self):
+        now = USAGE.datetime.now().timestamp()
+        auth = {
+            "tokens": {
+                "access_token": "test-token",
+                "account_id": "current-account",
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "cache.json"
+            auth_path = Path(temp_dir) / "auth.json"
+            auth_path.write_text(json.dumps(auth))
+            cache_path.write_text(json.dumps({
+                "fetched_at": now - 3600,
+                "last_failure_at": now,
+                "limits": {
+                    "primary": {
+                        "used_percent": 69.0,
+                        "window_minutes": 10080,
+                        "resets_at": int(now + 3600),
+                    },
+                },
+                "account_key": "different-account",
+            }))
+            with mock.patch.object(USAGE, "CODEX_AUTH", str(auth_path)), \
+                    mock.patch.object(USAGE, "CODEX_QUOTA_CACHE", str(cache_path)), \
+                    mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+                self.assertIsNone(USAGE.fetch_codex_live_limits())
+
+    def test_newer_local_snapshot_wins_over_stale_official_cache(self):
+        self.assertFalse(USAGE._codex_live_snapshot_is_current(
+            1_700_000_000, "2023-11-14T22:13:21+00:00"))
+        self.assertTrue(USAGE._codex_live_snapshot_is_current(
+            1_700_000_002, "2023-11-14T22:13:21+00:00"))
 
 
 if __name__ == "__main__":

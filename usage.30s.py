@@ -1301,15 +1301,49 @@ def _codex_live_to_limits(data):
     }
 
 
-def _cached_codex_live_limits(max_age):
+def _codex_limits_have_active_window(limits, now_epoch=None):
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    for slot_name in ("primary", "secondary"):
+        slot = (limits or {}).get(slot_name) or {}
+        reset = slot.get("resets_at")
+        try:
+            if reset is not None and float(reset) > now:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return False
+
+
+def _cached_codex_live_limits(max_age, allow_active_window=False, account_key=None):
     cached = _load_json(CODEX_QUOTA_CACHE, {})
     fetched_at = cached.get("fetched_at")
     limits = cached.get("limits")
     if not fetched_at or not limits:
         return None
-    if datetime.now().timestamp() - float(fetched_at) > max_age:
+    cached_account_key = cached.get("account_key")
+    if account_key and cached_account_key and cached_account_key != account_key:
         return None
-    return limits, cached.get("plan")
+    try:
+        fetched_at = float(fetched_at)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    age = datetime.now().timestamp() - fetched_at
+    if age > max_age and not (
+            allow_active_window and _codex_limits_have_active_window(limits)):
+        return None
+    return limits, cached.get("plan"), fetched_at
+
+
+def _codex_live_snapshot_is_current(live_updated, local_updated):
+    if live_updated is None or not local_updated:
+        return True
+    local_epoch = _iso_to_epoch(local_updated)
+    if local_epoch is None:
+        return True
+    try:
+        return float(live_updated) >= local_epoch
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _decode_jwt_claims(token):
@@ -1364,20 +1398,35 @@ def _codex_auth_context(auth):
 def fetch_codex_live_limits():
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return None
-    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
+    auth = _load_json(CODEX_AUTH, {})
+    auth_context = _codex_auth_context(auth)
+    access_token = auth_context.get("access_token")
+    account_key = auth_context.get("account_key")
+    auth_key = auth_context.get("auth_key")
+    if not access_token or not account_key:
+        return None
+    cache_state = _load_json(CODEX_QUOTA_CACHE, {})
+    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL, account_key=account_key)
     if cached:
         return cached
     # 失败退避:网络不可达(如公司代理拦截)时 5 分钟内不再联网重试,
     # 否则每轮 30s 刷新都会白等约 6s 超时
-    cache_state = _load_json(CODEX_QUOTA_CACHE, {})
     last_failure = cache_state.get("last_failure_at", 0)
-    if last_failure and datetime.now().timestamp() - last_failure < 300:
-        return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
-    auth = _load_json(CODEX_AUTH, {})
-    auth_context = _codex_auth_context(auth)
-    access_token = auth_context.get("access_token")
-    if not access_token:
-        return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+    if cache_state.get("account_key") not in (None, account_key):
+        last_failure = 0
+    if cache_state.get("account_key") == account_key \
+            and cache_state.get("auth_key") not in (None, auth_key):
+        last_failure = 0
+    try:
+        failure_is_recent = (
+            bool(last_failure)
+            and datetime.now().timestamp() - float(last_failure) < 300)
+    except (TypeError, ValueError, OverflowError):
+        failure_is_recent = False
+    if failure_is_recent:
+        return _cached_codex_live_limits(
+            _CODEX_QUOTA_FALLBACK_TTL, allow_active_window=True,
+            account_key=account_key)
     try:
         import urllib.request
         from urllib.parse import urlparse
@@ -1391,29 +1440,39 @@ def fetch_codex_live_limits():
         with urllib.request.urlopen(req, timeout=3) as res:
             final_url = urlparse(res.geturl())
             if final_url.scheme != "https" or final_url.hostname != "chatgpt.com":
-                return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+                raise ValueError("unexpected Codex usage redirect")
             raw = res.read(_CODEX_USAGE_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _CODEX_USAGE_MAX_RESPONSE_BYTES:
-            return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+            raise ValueError("Codex usage response is too large")
         data = json.loads(raw)
         limits = _codex_live_to_limits(data)
         if not limits:
-            return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+            raise ValueError("invalid Codex usage response")
         plan = data.get("plan_type")
+        fetched_at = datetime.now().timestamp()
         _atomic_write_json(CODEX_QUOTA_CACHE, {
-            "fetched_at": datetime.now().timestamp(),
+            "fetched_at": fetched_at,
             "limits": limits,
             "plan": plan,
+            "account_key": account_key,
+            "auth_key": auth_key,
+            "source": "live",
         })
-        return limits, plan
+        return limits, plan, fetched_at
     except Exception:
         try:
             state = _load_json(CODEX_QUOTA_CACHE, {})
+            if state.get("account_key") not in (None, account_key):
+                state = {}
             state["last_failure_at"] = datetime.now().timestamp()
+            state["account_key"] = account_key
+            state["auth_key"] = auth_key
             _atomic_write_json(CODEX_QUOTA_CACHE, state)
         except Exception:
             pass
-        return _cached_codex_live_limits(_CODEX_QUOTA_FALLBACK_TTL)
+        return _cached_codex_live_limits(
+            _CODEX_QUOTA_FALLBACK_TTL, allow_active_window=True,
+            account_key=account_key)
 
 
 def _normalize_codex_reset_cards(data, now_epoch):
@@ -2569,14 +2628,18 @@ def scan_codex(bounds, cache):
                 g_ts = entry["g_ts"]
                 g_limits = entry["g_limits"]
 
+    selected_limits_ts = latest_ts
     if latest_limits is None and g_limits is not None:
         latest_limits = g_limits
         plan_type = (g_limits or {}).get("plan_type")
+        selected_limits_ts = g_ts
 
     live = fetch_codex_live_limits()
     if live:
-        latest_limits, live_plan = live
-        plan_type = live_plan or (latest_limits or {}).get("plan_type") or plan_type
+        live_limits, live_plan, live_updated = live
+        if _codex_live_snapshot_is_current(live_updated, selected_limits_ts):
+            latest_limits = live_limits
+            plan_type = live_plan or (live_limits or {}).get("plan_type") or plan_type
 
     cur_total = None
     if cur_file:
