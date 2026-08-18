@@ -27,7 +27,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 |------|----------|
 | **Claude Code** | Token（输入/输出/缓存）、成本、配额、模型 |
 | **Codex CLI** | Token、成本、配额、会话 |
-| **Gemini CLI** | Token、思考量、成本、模型 |
+| **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
 | **Grok Build** | Token（输入/输出/缓存/推理）、会话、上下文、延迟、配额（本地日志；可选实时） |
 | **Hermes** | Token、成本、缓存命中率、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
@@ -154,7 +154,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 |------|----------|
 | Claude Code | `~/.claude/projects/<proj>/<session>.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` |
-| Gemini CLI | `~/.gemini/gemini-cli/conversations/*.json` |
+| Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` + `~/.gemini/gemini-cli/conversations/*.json` |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |

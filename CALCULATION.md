@@ -9,8 +9,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | 工具 | 日志路径 | 格式 |
 |------|---------|------|
 | Claude Code | `~/.claude/*/*.jsonl` | JSONL, `type=assistant` 行含 `message.usage` |
-| Codex | `~/.codex/**/rollout-*.jsonl` | JSONL, `payload.info.last_token_usage` |
-| Gemini CLI | `~/.gemini/*/chats/session-*.json` | JSON, `messages[].tokens` |
+| Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` / `~/.gemini/*/chats/session-*.json` | SQLite (`gen_metadata` protobuf) / JSON (`messages[].tokens`) |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl` + `sessions/*/*/{summary,signals}.json` | JSONL, `shell.turn.inference_done` + 会话指标 |
 | Qoder | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |

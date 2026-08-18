@@ -23,7 +23,8 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timedelta, date
+import sqlite3
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 
 HOME = os.path.expanduser("~")
@@ -80,9 +81,14 @@ CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_ARCHIVED_DIR = os.path.join(HOME, ".codex", "archived_sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
+ANTIGRAVITY_DIR = os.path.join(HOME, ".gemini", "antigravity-cli", "conversations")
 GEMINI_DIRS = _path_candidates(
     "TOKEI_GEMINI_DIR", GEMINI_DIR,
-    os.path.join(HOME, ".gemini", "gemini-cli", "conversations"))
+    ANTIGRAVITY_DIR,
+    os.path.join(HOME, ".gemini", "antigravity", "conversations"),
+    os.path.join(HOME, ".gemini", "antigravity-ide", "conversations"),
+    os.path.join(HOME, ".gemini", "gemini-cli", "conversations"),
+    *([os.environ["TOKEI_ANTIGRAVITY_DIR"]] if "TOKEI_ANTIGRAVITY_DIR" in os.environ else []))
 GROK_HOME = os.path.abspath(os.path.expanduser(
     os.environ.get("GROK_HOME", os.path.join(HOME, ".grok"))))
 GROK_DIR = os.path.join(GROK_HOME, "sessions")
@@ -2679,16 +2685,20 @@ def _codex_quota_values(limits, now_epoch=None):
     return values
 
 
-# ---------- Gemini CLI ----------
-# 日志:~/.gemini/tmp/<projectHash>/chats/{session-*.json,session-*.jsonl,<parent>/*.jsonl}
-# assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
-# (total=input+output+thoughts,cached⊂input)。JSONL 是追加日志，同消息 ID 以后写入的记录覆盖之前记录。
+# ---------- Gemini / Antigravity CLI ----------
+# 日志:
+# - Gemini CLI: ~/.gemini/tmp/<projectHash>/chats/{session-*.json,session-*.jsonl,<parent>/*.jsonl}
+#   assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
+# - Antigravity CLI: ~/.gemini/antigravity-cli/conversations/<uuid>.db
+#   gen_metadata 表存储 protobuf 逐步生成指标(包含 input, output, cached, thoughts, model, start_time)
 def _gemini_session_files():
     files = []
     roots = _path_candidates("TOKEI_GEMINI_DIR", GEMINI_DIR, *GEMINI_DIRS)
     patterns = []
     for root in roots:
         patterns.extend((
+            os.path.join(root, "*.db"),
+            os.path.join(root, "**", "*.db"),
             os.path.join(root, "*", "chats", "session-*.json"),
             os.path.join(root, "*", "chats", "**", "*.jsonl"),
             os.path.join(root, "**", "session-*.json"),
@@ -2696,7 +2706,128 @@ def _gemini_session_files():
         ))
     for pattern in patterns:
         files.extend(glob.glob(pattern, recursive=True))
-    return sorted(set(os.path.realpath(path) for path in files if os.path.isfile(path)))
+    return sorted(set(os.path.realpath(path) for path in files
+                      if os.path.isfile(path) and not path.endswith("conversation_summaries.db")))
+
+
+def _decode_proto_varint(data, offset):
+    val = 0
+    shift = 0
+    while offset < len(data):
+        b = data[offset]
+        offset += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return val, offset
+
+
+def _parse_proto_fields(data):
+    i = 0
+    fields = []
+    while i < len(data):
+        try:
+            key, i = _decode_proto_varint(data, i)
+        except Exception:
+            break
+        field_num = key >> 3
+        wire_type = key & 0x7
+        if wire_type == 0:
+            val, i = _decode_proto_varint(data, i)
+            fields.append((field_num, 0, val))
+        elif wire_type == 1:
+            val = data[i:i + 8]
+            i += 8
+            fields.append((field_num, 1, val))
+        elif wire_type == 2:
+            length, i = _decode_proto_varint(data, i)
+            val = data[i:i + length]
+            i += length
+            fields.append((field_num, 2, val))
+        elif wire_type == 5:
+            val = data[i:i + 4]
+            i += 4
+            fields.append((field_num, 5, val))
+        else:
+            break
+    return fields
+
+
+def _load_antigravity_db(path):
+    """从 Antigravity conversations/*.db 的 gen_metadata 表解析逐步 token 用量"""
+    events = []
+    max_ts = ""
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        cursor = conn.cursor()
+        cursor.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
+        for idx, data in cursor.fetchall():
+            if not data:
+                continue
+            top = _parse_proto_fields(data)
+            for fn, wt, val in top:
+                if fn == 1 and wt == 2:
+                    sub1 = _parse_proto_fields(val)
+                    model = "unknown"
+                    inp = 0
+                    out = 0
+                    cached = 0
+                    thoughts = 0
+                    ts_sec = None
+                    for sfn, swt, sval in sub1:
+                        if sfn == 19 and swt == 2:
+                            try:
+                                model = sval.decode("utf-8")
+                            except Exception:
+                                pass
+                        elif sfn == 4 and swt == 2:
+                            for tfn, twt, tval in _parse_proto_fields(sval):
+                                if twt == 0:
+                                    if tfn == 2:
+                                        inp = tval
+                                    elif tfn == 3:
+                                        out = tval
+                                    elif tfn == 5:
+                                        cached = tval
+                                    elif tfn == 9:
+                                        thoughts = tval
+                        elif sfn == 9 and swt == 2:
+                            for tfn, twt, tval in _parse_proto_fields(sval):
+                                if tfn == 4 and twt == 2:
+                                    for stfn, stwt, stval in _parse_proto_fields(tval):
+                                        if stfn == 1 and stwt == 0:
+                                            ts_sec = stval
+                    if ts_sec:
+                        iso_ts = datetime.fromtimestamp(ts_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        if iso_ts > max_ts:
+                            max_ts = iso_ts
+                        events.append({
+                            "id": f"{os.path.basename(path)}:{idx}",
+                            "timestamp": iso_ts,
+                            "model": model,
+                            "tokens": {
+                                "input": inp + cached,
+                                "output": out,
+                                "cached": cached,
+                                "thoughts": thoughts,
+                            },
+                        })
+        conn.close()
+    except Exception:
+        return None
+
+    if not events:
+        return None
+    sid = os.path.basename(path)
+    if sid.endswith(".db"):
+        sid = sid[:-3]
+    return {
+        "sid": sid,
+        "updated": max_ts,
+        "rank": 3,
+        "events": events,
+    }
 
 
 def _gemini_apply_messages(message_map, messages, replace=False):
@@ -2715,6 +2846,8 @@ def _gemini_apply_messages(message_map, messages, replace=False):
 
 
 def _load_gemini_usage_file(path):
+    if path.endswith(".db"):
+        return _load_antigravity_db(path)
     metadata = {}
     messages = {}
     rank = 2 if path.endswith(".jsonl") else 1
@@ -6498,10 +6631,10 @@ def main():
     if x["plan"]:
         print(f"plan: {x['plan']} {F}")
     print("---")
-    # Gemini 块
+    # Gemini / Antigravity 块
     g = d["gemini"]
     gt = g["ranges"]["today"]
-    print(f"Gemini CLI {HEAD}")
+    print(f"Gemini / Antigravity {HEAD}")
     print(f"命中率   {gt['hit']:5.1f}% {F}")
     print(f"今日 输入   {human(gt['in']):>6} {F}")
     print(f"今日 输出   {human(gt['out']):>6} {F}")
