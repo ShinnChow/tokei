@@ -7580,7 +7580,6 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             pt = proj_tok.setdefault(project, [0, 0.0])
