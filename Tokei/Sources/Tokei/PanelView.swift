@@ -22,12 +22,17 @@ struct PanelView: View {
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
     enum PanelMode { case cards, quotaHistory, dashboard, projects, settings }
+    private enum ToolCardPresentation: Equatable {
+        case standard
+        case compactStatus
+    }
     private struct ToolCardItem: Identifiable {
         let id: String
         let name: String
         let visible: Bool
         let active: Bool
         let tint: Color
+        var presentation: ToolCardPresentation = .standard
         let content: AnyView
     }
     @AppStorage("showClaude") private var showClaude = true
@@ -290,11 +295,22 @@ struct PanelView: View {
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
         let qcr = u.qwencode.ranges.get(sel)
+        let claudeQuotaState = SubscriptionQuotaState.resolve([
+            (value: u.claude.q5, stale: u.claude.q5_stale),
+            (value: u.claude.q7, stale: u.claude.q7_stale),
+            (value: u.claude.qf, stale: u.claude.qf_stale),
+        ])
+        let grokQuotaState = SubscriptionQuotaState.resolve([
+            (value: u.grok.pct, stale: u.grok.stale),
+        ])
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
                              u.claude.q7 != nil || u.claude.qf != nil,
-                         tint: Theme.claude, content: AnyView(claudeBlock(u.claude, cr))),
+                         tint: Theme.claude,
+                         presentation: claudeQuotaState.shouldUseCompactCard(hasUsage: cr.sessions > 0)
+                             ? .compactStatus : .standard,
+                         content: AnyView(claudeBlock(u.claude, cr))),
             ToolCardItem(id: "codex", name: "Codex", visible: showCodex,
                          active: xr.sessions > 0 || u.codex.p5 != nil || u.codex.pw != nil ||
                              (u.codex.reset_cards?.count ?? 0) > 0,
@@ -303,7 +319,11 @@ struct PanelView: View {
                          tint: Theme.gemini, content: AnyView(geminiBlock(gr))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
-                         tint: Theme.grok, content: AnyView(grokBlock(u.grok, kr))),
+                         tint: Theme.grok,
+                         presentation: grokQuotaState.shouldUseCompactCard(
+                            hasUsage: kr.sessions > 0 || kr.usage_calls > 0
+                         ) ? .compactStatus : .standard,
+                         content: AnyView(grokBlock(u.grok, kr))),
             ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder, active: qr.calls > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
             ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
@@ -338,28 +358,51 @@ struct PanelView: View {
 
     @ViewBuilder
     private func toolCardsLayout(_ cards: [ToolCardItem]) -> some View {
+        let compactCards = cards.filter { $0.presentation == .compactStatus }
+        let standardCards = cards.filter { $0.presentation == .standard }
         if useWide {
-            EqualHeightGrid() {
-                ForEach(cards) { item in
-                    Card(tint: item.tint) { item.content }
-                        .id(cardContentIdentity(for: item))
+            VStack(spacing: 13) {
+                if !compactCards.isEmpty {
+                    EqualHeightGrid(columns: compactCards.count == 1 ? 1 : 2) {
+                        ForEach(compactCards) { item in
+                            Card(tint: item.tint) { item.content }
+                                .id(cardContentIdentity(for: item))
+                        }
+                    }
+                }
+                if !standardCards.isEmpty {
+                    EqualHeightGrid() {
+                        ForEach(standardCards) { item in
+                            Card(tint: item.tint) { item.content }
+                                .id(cardContentIdentity(for: item))
+                        }
+                    }
                 }
             }
         } else {
-            ForEach(cards) { item in
-                Card(tint: item.tint) { item.content }
-                    .id(cardContentIdentity(for: item))
+            VStack(spacing: 13) {
+                ForEach(compactCards + standardCards) { item in
+                    Card(tint: item.tint) { item.content }
+                        .id(cardContentIdentity(for: item))
+                }
             }
         }
     }
 
     private func cardContentIdentity(for item: ToolCardItem) -> String {
-        "\(item.id):\(sel.rawValue):\(store.syncEnabled):\(store.showAllDevices)"
+        let presentation = item.presentation == .compactStatus ? "compact" : "standard"
+        return "\(item.id):\(presentation):\(sel.rawValue):\(store.syncEnabled):\(store.showAllDevices)"
     }
 
     // MARK: - Claude 卡片
     @ViewBuilder
     func claudeBlock(_ c: ClaudeStat, _ r: ClaudeRange) -> some View {
+        let quotaState = SubscriptionQuotaState.resolve([
+            (value: c.q5, stale: c.q5_stale),
+            (value: c.q7, stale: c.q7_stale),
+            (value: c.qf, stale: c.qf_stale),
+        ])
+        let compactExpired = quotaState.shouldUseCompactCard(hasUsage: r.sessions > 0)
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Claude Code", tint: Theme.claude, sessions: r.sessions)
             if r.sessions > 0 {
@@ -381,10 +424,20 @@ struct PanelView: View {
                 if !claudeRows.isEmpty {
                     modelDisclosure(claudeRows, open: $claudeModelsOpen, tint: Theme.claude)
                 }
-            } else {
-                emptyHint
+            } else if !compactExpired && quotaState != .unavailable {
+                usageEmptyHint
             }
-            if c.q5 != nil || c.q7 != nil || c.qf != nil {
+
+            if compactExpired {
+                quotaStateNotice(
+                    title: "额度数据已过期",
+                    detail: "等待 Claude Code 写入新的额度缓存，恢复后将自动展示。",
+                    source: "Claude Code 本地缓存",
+                    updated: c.q_updated,
+                    tint: Theme.claude,
+                    warning: true
+                )
+            } else if quotaState != .unavailable {
                 thinDivider
                 if let q5 = c.q5, c.q5_stale != true {
                     quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset, tint: Theme.claude)
@@ -395,7 +448,27 @@ struct PanelView: View {
                 if let qf = c.qf, c.qf_stale != true {
                     quotaRow(title: "周 · Fable 剩余", pct: 100 - qf, reset: c.qf_reset, tint: .orange)
                 }
-                claudeQuotaStatus(c)
+                if quotaState == .expired {
+                    quotaStateNotice(
+                        title: "额度数据已过期",
+                        detail: "当前用量仍可查看；新额度缓存写入后会自动恢复。",
+                        source: "Claude Code 本地缓存",
+                        updated: c.q_updated,
+                        tint: Theme.claude,
+                        warning: true
+                    )
+                } else {
+                    claudeQuotaStatus(c)
+                }
+            } else if r.sessions > 0 {
+                thinDivider
+                quotaStateNotice(
+                    title: "暂未获取到额度数据",
+                    detail: "用量统计不受影响；检测到订阅额度后会自动展示。",
+                    source: "Claude Code 本地缓存",
+                    updated: c.q_updated,
+                    tint: Theme.claude
+                )
             }
         }
     }
@@ -403,6 +476,7 @@ struct PanelView: View {
     // MARK: - Codex 卡片
     @ViewBuilder
     func codexBlock(_ x: CodexStat, _ r: CodexRange) -> some View {
+        let hasQuotaData = x.p5 != nil || x.pw != nil || (x.reset_cards?.count ?? 0) > 0
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Codex", tint: Theme.codex, sessions: r.sessions)
             if r.sessions > 0 {
@@ -421,11 +495,14 @@ struct PanelView: View {
                     tokenModelDisclosure(r.models, open: $codexModelsOpen, tint: Theme.codex,
                                          reasonIncludedInOutput: true)
                 }
-            } else {
-                emptyHint
+            } else if hasQuotaData {
+                usageEmptyHint
             }
-            if x.pw != nil || (x.reset_cards?.count ?? 0) > 0 {
+            if hasQuotaData {
                 thinDivider
+            }
+            if let p5 = x.p5 {
+                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.codex)
             }
             if let pw = x.pw {
                 quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
@@ -443,6 +520,16 @@ struct PanelView: View {
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Capsule().fill(Theme.codex.opacity(0.16)))
                 }
+            }
+            if r.sessions > 0 && !hasQuotaData {
+                thinDivider
+                quotaStateNotice(
+                    title: "暂未获取到额度数据",
+                    detail: "用量统计不受影响；检测到订阅周期后会自动展示。",
+                    source: "Codex 本地状态",
+                    updated: nil,
+                    tint: Theme.codex
+                )
             }
         }
     }
@@ -552,9 +639,14 @@ struct PanelView: View {
     // MARK: - Grok 卡片
     @ViewBuilder
     func grokBlock(_ g: GrokStat, _ r: GrokRange) -> some View {
+        let hasUsage = r.sessions > 0 || r.usage_calls > 0
+        let quotaState = SubscriptionQuotaState.resolve([
+            (value: g.pct, stale: g.stale),
+        ])
+        let compactExpired = quotaState.shouldUseCompactCard(hasUsage: hasUsage)
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Grok", tint: Theme.grok, sessions: r.sessions)
-            if r.sessions > 0 || r.usage_calls > 0 {
+            if hasUsage {
                 CostHeadline(value: Fmt.human(r.tokens),
                              caption: r.usage_available ? "\(sel.label) 真实用量" : "\(sel.label) 上下文快照",
                              tint: Theme.grok)
@@ -609,11 +701,21 @@ struct PanelView: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if g.pct == nil {
-                emptyHint
+            } else if !compactExpired && quotaState != .unavailable {
+                usageEmptyHint
             }
-            if let pct = g.pct, g.stale != true {
-                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
+
+            if compactExpired {
+                quotaStateNotice(
+                    title: "额度周期已结束",
+                    detail: "Grok 写入新周期日志后，将自动恢复额度展示。",
+                    source: grokQuotaSourceLabel(g.source),
+                    updated: g.q_updated,
+                    tint: Theme.grok,
+                    warning: true
+                )
+            } else if let pct = g.pct, g.stale != true {
+                if hasUsage { thinDivider }
                 let title = (g.window == "month") ? "月剩余" : "周剩余"
                 // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
@@ -639,22 +741,31 @@ struct PanelView: View {
                     }
                 }
                 grokQuotaStatus(g)
-            } else if g.stale == true {
-                if r.sessions > 0 || r.usage_calls > 0 { thinDivider }
-                Text("额度周期已结束，等待 Grok 写入新日志")
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(Color.orange.opacity(0.88))
+            } else if quotaState == .expired {
+                if hasUsage { thinDivider }
+                quotaStateNotice(
+                    title: "额度周期已结束",
+                    detail: "当前用量仍可查看；新周期日志写入后会自动恢复。",
+                    source: grokQuotaSourceLabel(g.source),
+                    updated: g.q_updated,
+                    tint: Theme.grok,
+                    warning: true
+                )
+            } else if hasUsage {
+                thinDivider
+                quotaStateNotice(
+                    title: "暂未获取到额度数据",
+                    detail: "用量统计不受影响；检测到订阅周期后会自动展示。",
+                    source: grokQuotaSourceLabel(g.source),
+                    updated: g.q_updated,
+                    tint: Theme.grok
+                )
             }
         }
     }
 
     func grokQuotaStatus(_ stat: GrokStat) -> some View {
-        let sourceLabel: String
-        switch stat.source {
-        case "live": sourceLabel = "实时接口"
-        case "cache": sourceLabel = "本地缓存"
-        default: sourceLabel = "本地日志"
-        }
+        let sourceLabel = grokQuotaSourceLabel(stat.source)
         let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
         return HStack(spacing: 5) {
             Image(systemName: "clock")
@@ -667,6 +778,14 @@ struct PanelView: View {
         .help(stat.source == "live"
               ? "已开启 Grok 实时额度查询。Grok Build / API 等为同一周额度池内的占用拆分，共享上方重置时间。"
               : "默认只读 ~/.grok 本地日志，不访问网络")
+    }
+
+    private func grokQuotaSourceLabel(_ source: String?) -> String {
+        switch source {
+        case "live": return "Grok 实时接口"
+        case "cache": return "Grok 本地缓存"
+        default: return "Grok 本地日志"
+        }
     }
 
     /// 账单 product 字段 → 更可读的名称。
@@ -949,6 +1068,57 @@ struct PanelView: View {
         Text("暂无数据")
             .font(.system(size: 10))
             .foregroundStyle(Theme.tTertiary)
+    }
+
+    var usageEmptyHint: some View {
+        Text("\(sel.label)暂无用量，额度状态如下")
+            .font(.system(size: 10))
+            .foregroundStyle(Theme.tTertiary)
+    }
+
+    func quotaStateNotice(
+        title: String,
+        detail: String,
+        source: String,
+        updated: Int?,
+        tint: Color,
+        warning: Bool = false
+    ) -> some View {
+        let statusTint = warning ? Color.orange : tint
+        let updatedLabel = updated.map { "上次更新 \(Fmt.reset($0))" } ?? "尚无更新时间"
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: warning ? "exclamationmark.triangle.fill" : "info.circle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer(minLength: 4)
+            }
+            .foregroundStyle(statusTint.opacity(0.95))
+
+            Text(detail)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Theme.tSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 5) {
+                Image(systemName: "clock")
+                    .font(.system(size: 8.5))
+                Text("\(source) · \(updatedLabel)")
+                    .font(.system(size: 9, design: .monospaced))
+                Spacer(minLength: 4)
+            }
+            .foregroundStyle(Theme.tTertiary)
+        }
+        .padding(9)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(statusTint.opacity(0.07))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(statusTint.opacity(0.16), lineWidth: 0.5)
+                )
+        )
     }
 
     func modelBadge(_ model: String, tint: Color) -> some View {
@@ -1332,7 +1502,7 @@ struct PanelView: View {
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Spacer()
-                Text(String(format: "%.0f%%", pct))
+                Text(SubscriptionQuotaPresentation.remainingLabel(pct))
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundStyle(pct <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.tPrimary))
                 // 无重置时间时不显示「· ?」，避免分产品行误导。
