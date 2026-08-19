@@ -72,6 +72,52 @@ class KimiCodeScanTests(unittest.TestCase):
         }), encoding="utf-8")
         return wire, now, project
 
+    def create_modern_session(self, root):
+        project = "/tmp/kimi-modern-project"
+        session_dir = Path(root) / "sessions" / "wd_kimi-modern_deadbeef" / "session-modern"
+        now = datetime.now().astimezone().replace(minute=0, second=0, microsecond=0)
+        timestamp_ms = int(now.timestamp() * 1000)
+        (session_dir / "state.json").parent.mkdir(parents=True)
+        (session_dir / "state.json").write_text(json.dumps({
+            "id": "session-modern",
+            "version": 2,
+            "cwd": project,
+            "agents": {
+                "main": {"type": "main"},
+                "agent-1": {"type": "sub", "parentAgentId": "main"},
+            },
+        }), encoding="utf-8")
+
+        def usage(time_offset, inp, out, cr=0, cw=0, scope="turn"):
+            return {
+                "type": "usage.record",
+                "time": timestamp_ms + time_offset,
+                "usageScope": scope,
+                "model": "moonshot/kimi-k3",
+                "usage": {
+                    "inputOther": inp,
+                    "output": out,
+                    "inputCacheRead": cr,
+                    "inputCacheCreation": cw,
+                },
+            }
+
+        main_wire = session_dir / "agents" / "main" / "wire.jsonl"
+        main_wire.parent.mkdir(parents=True)
+        main_wire.write_text("\n".join(json.dumps(record) for record in [
+            {"type": "metadata", "protocol_version": "1.5", "created_at": timestamp_ms},
+            usage(1, 100, 20, 30, 5),
+            usage(2, 10, 5, scope="session"),
+        ]) + "\n", encoding="utf-8")
+
+        sub_wire = session_dir / "agents" / "agent-1" / "wire.jsonl"
+        sub_wire.parent.mkdir(parents=True)
+        sub_wire.write_text("\n".join(json.dumps(record) for record in [
+            {"type": "metadata", "protocol_version": "1.5", "created_at": timestamp_ms},
+            usage(3, 40, 8, 10, 2),
+        ]) + "\n", encoding="utf-8")
+        return (main_wire, sub_wire), now, project
+
     def scan(self, root, cache=None):
         old_root = USAGE.KIMI_CODE_DIR
         USAGE.KIMI_CODE_DIR = str(root)
@@ -116,6 +162,52 @@ class KimiCodeScanTests(unittest.TestCase):
         self.assertEqual(result["ranges"]["all"]["in"], 0)
         self.assertEqual(cache["kimicode"], {})
         self.assertTrue(cache["_dirty"])
+
+    def test_protocol_1_5_scans_all_agents_and_counts_shared_session_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wires, now, project = self.create_modern_session(tmp)
+            result, cache = self.scan(tmp)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 150)
+        self.assertEqual(usage["out"], 33)
+        self.assertEqual(usage["cr"], 40)
+        self.assertEqual(usage["cw"], 7)
+        self.assertEqual(USAGE.token_total(usage), 230)
+        self.assertEqual(usage["sessions"], {"session-modern"})
+        self.assertEqual(usage["models"]["moonshot/kimi-k3"]["in"], 150)
+        self.assertEqual(usage["models"]["moonshot/kimi-k3"]["out"], 33)
+        self.assertEqual(usage["models"]["moonshot/kimi-k3"]["cr"], 40)
+        self.assertEqual(usage["models"]["moonshot/kimi-k3"]["cw"], 7)
+        self.assertEqual(len(cache["kimicode"]), 2)
+        for wire in wires:
+            entry = cache["kimicode"][str(wire)]
+            self.assertEqual(entry["sid"], "session-modern")
+            self.assertEqual(entry["proj"], project)
+            self.assertEqual(entry["parser_version"], USAGE._KIMI_PARSER_VERSION)
+            self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour],
+                             USAGE.token_total(entry["days"][now.date().isoformat()]))
+
+    def test_parser_upgrade_rescans_unchanged_modern_wires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wires, _, _ = self.create_modern_session(tmp)
+            _, cache = self.scan(tmp)
+            for entry in cache["kimicode"].values():
+                entry.pop("parser_version")
+            with mock.patch.object(USAGE, "_scan_kimi_wire", wraps=USAGE._scan_kimi_wire) as parser:
+                self.scan(tmp, cache=cache)
+        self.assertEqual(parser.call_count, len(wires))
+
+    def test_tokei_override_precedes_current_and_legacy_homes(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            wires, _, _ = self.create_modern_session(tmp)
+            with mock.patch.dict(os.environ, {
+                "TOKEI_KIMI_DIR": tmp,
+                "KIMI_CODE_HOME": other,
+                "KIMI_SHARE_DIR": other,
+            }):
+                self.assertEqual(USAGE._kimi_roots(), [os.path.abspath(tmp)])
+                self.assertEqual(USAGE._kimi_wire_files(), sorted(str(wire) for wire in wires))
 
     def test_daily_and_wrapped_include_kimi_tokens_hours_and_project(self):
         with tempfile.TemporaryDirectory() as tmp:

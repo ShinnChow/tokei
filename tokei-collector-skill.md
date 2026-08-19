@@ -46,7 +46,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 - DeepSeek Harness (`~/.dsh/sessions/`)
 - OpenCode (`~/.local/share/opencode/`)
 - Qwen Code (`~/.qwen/`)
-- Kimi Code (`${KIMI_SHARE_DIR:-~/.kimi}/`)
+- Kimi Code (`${KIMI_CODE_HOME:-~/.kimi-code}/`，兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/`)
 
 ## 卸载
 

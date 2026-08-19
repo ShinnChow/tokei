@@ -41,7 +41,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **17 款 AI 编�
 | **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
-| **Kimi Code** | Token（输入/输出/缓存）、会话 |
+| **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目 |
 
 ## 功能一览
 
@@ -168,7 +168,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
-| Kimi Code | `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` |
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` |

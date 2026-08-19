@@ -15,7 +15,8 @@
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   DeepSeek:    ~/.dsh/sessions/**/*.jsonl.zstd (由 App 原生解压后增量扫描)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
-#   Kimi Code:   ${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl (StatusUpdate.token_usage)
+#   Kimi Code:   ${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl
+#                兼容旧版 ${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl
 
 import os
 import sys
@@ -126,9 +127,11 @@ OMP_SESSION_DIR = os.path.expanduser(os.environ.get(
     "OMP_CODING_AGENT_SESSION_DIR", os.path.join(HOME, ".omp", "agent", "sessions")))
 QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("QWEN_HOME", os.path.join(HOME, ".qwen"))))
+_KIMI_CODE_DEFAULT_DIR = os.path.join(HOME, ".kimi-code")
+_KIMI_CODE_LEGACY_DIR = os.path.join(HOME, ".kimi")
 KIMI_CODE_DIR = os.path.abspath(os.path.expanduser(
-    os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_SHARE_DIR")
-    or os.path.join(HOME, ".kimi")))
+    os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
+    or os.environ.get("KIMI_SHARE_DIR") or _KIMI_CODE_DEFAULT_DIR))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -5786,29 +5789,83 @@ def scan_qwencode(bounds, cache):
 
 
 # ---------- Kimi Code CLI ----------
-# 官方 wire 日志的每个 StatusUpdate.token_usage 都是一轮真实模型调用；
-# SubagentEvent 会把子 Agent 的事件嵌套写回主会话 wire，因此只扫描主会话文件，
-# 不再递归扫描 session/subagents，避免重复累计。
+# protocol 1 使用主 wire 中的 StatusUpdate/SubagentEvent；protocol 1.5 把每个
+# Agent 的 usage.record 独立写入 agents/*/wire.jsonl。两者都只读 session 目录，
+# 不扫描 server/events 镜像，避免重复累计。
+_KIMI_PARSER_VERSION = 2
+
+
+def _kimi_roots():
+    configured = (os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
+                  or os.environ.get("KIMI_SHARE_DIR"))
+    if configured:
+        candidates = [configured]
+    elif os.path.normcase(KIMI_CODE_DIR) != os.path.normcase(_KIMI_CODE_DEFAULT_DIR):
+        # Tests and embedders may replace KIMI_CODE_DIR after importing this module.
+        candidates = [KIMI_CODE_DIR]
+    else:
+        candidates = [_KIMI_CODE_DEFAULT_DIR, _KIMI_CODE_LEGACY_DIR]
+    roots = []
+    seen = set()
+    for candidate in candidates:
+        root = os.path.abspath(os.path.expanduser(candidate))
+        key = os.path.normcase(os.path.realpath(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
 def _kimi_wire_files():
-    sessions_dir = os.path.join(KIMI_CODE_DIR, "sessions")
-    return sorted(glob.glob(os.path.join(sessions_dir, "*", "*", "wire.jsonl")))
+    files = set()
+    for root in _kimi_roots():
+        sessions_dir = os.path.join(root, "sessions")
+        files.update(glob.glob(os.path.join(sessions_dir, "*", "*", "wire.jsonl")))
+        files.update(glob.glob(os.path.join(
+            sessions_dir, "*", "*", "agents", "*", "wire.jsonl")))
+    return sorted(os.path.abspath(path) for path in files)
 
 
 def _kimi_project_map():
     result = {}
-    metadata = _load_json(os.path.join(KIMI_CODE_DIR, "kimi.json"), {})
-    for item in metadata.get("work_dirs", []) if isinstance(metadata, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        project = item.get("path")
-        if not isinstance(project, str) or not project:
-            continue
-        digest = hashlib.md5(project.encode("utf-8")).hexdigest()
-        result[digest] = project
-        kaos = item.get("kaos")
-        if isinstance(kaos, str) and kaos:
-            result[f"{kaos}_{digest}"] = project
+    for root in _kimi_roots():
+        metadata = _load_json(os.path.join(root, "kimi.json"), {})
+        for item in metadata.get("work_dirs", []) if isinstance(metadata, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            project = item.get("path")
+            if not isinstance(project, str) or not project:
+                continue
+            digest = hashlib.md5(project.encode("utf-8")).hexdigest()
+            result[digest] = project
+            kaos = item.get("kaos")
+            if isinstance(kaos, str) and kaos:
+                result[f"{kaos}_{digest}"] = project
     return result
+
+
+def _kimi_wire_context(path, legacy_projects):
+    agent_dir = os.path.dirname(path)
+    agents_dir = os.path.dirname(agent_dir)
+    if os.path.basename(agents_dir) == "agents":
+        session_dir = os.path.dirname(agents_dir)
+        state = _load_json(os.path.join(session_dir, "state.json"), {})
+        if not isinstance(state, dict):
+            state = {}
+        session_id = state.get("id") or os.path.basename(session_dir)
+        project = state.get("cwd")
+        return {
+            "sid": str(session_id),
+            "proj": project if isinstance(project, str) and project else None,
+            "agent": os.path.basename(agent_dir),
+        }
+    session_dir = agent_dir
+    work_dir_hash = os.path.basename(os.path.dirname(session_dir))
+    return {
+        "sid": os.path.basename(session_dir),
+        "proj": legacy_projects.get(work_dir_hash),
+        "agent": "main",
+    }
 
 
 def _kimi_events(message, scope="main"):
@@ -5834,30 +5891,58 @@ def _kimi_token(value):
         return 0
 
 
+def _kimi_datetime(record, key):
+    value = record.get(key) if isinstance(record, dict) else None
+    try:
+        epoch = float(value)
+        if not math.isfinite(epoch):
+            return None
+        if epoch > 100_000_000_000:
+            epoch /= 1000
+        return datetime.fromtimestamp(epoch).astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        parsed = parse_ts(value) if isinstance(value, str) else None
+        return parsed.astimezone() if parsed is not None else None
+
+
 def _scan_kimi_wire(path):
     days = {}
     seen_messages = set()
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                if '"StatusUpdate"' not in line and '"SubagentEvent"' not in line:
+                if ('"usage.record"' not in line and '"StatusUpdate"' not in line
+                        and '"SubagentEvent"' not in line):
                     continue
                 try:
                     record = json.loads(line)
                 except (TypeError, ValueError):
                     continue
-                timestamp = record.get("timestamp") if isinstance(record, dict) else None
-                try:
-                    epoch = float(timestamp)
-                    if not math.isfinite(epoch):
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") == "usage.record":
+                    usage = record.get("usage")
+                    dt = _kimi_datetime(record, "time")
+                    if not isinstance(usage, dict) or dt is None:
                         continue
-                    dt = datetime.fromtimestamp(epoch).astimezone()
-                except (TypeError, ValueError, OverflowError, OSError):
-                    parsed = parse_ts(timestamp) if isinstance(timestamp, str) else None
-                    if parsed is None:
+                    inp = _kimi_token(usage.get("inputOther"))
+                    out = _kimi_token(usage.get("output"))
+                    cr = _kimi_token(usage.get("inputCacheRead"))
+                    cw = _kimi_token(usage.get("inputCacheCreation"))
+                    if inp + out + cr + cw == 0:
                         continue
-                    dt = parsed.astimezone()
-                message = record.get("message") if isinstance(record, dict) else None
+                    model = record.get("model")
+                    if not isinstance(model, str) or not model.strip():
+                        model = None
+                    day = days.setdefault(dt.date().isoformat(), _empty_token_day())
+                    _add_token_usage(day, inp, out, cr, cw, model=model)
+                    day["hours"][dt.hour] += inp + out + cr + cw
+                    continue
+
+                dt = _kimi_datetime(record, "timestamp")
+                if dt is None:
+                    continue
+                message = record.get("message")
                 for scope, payload in _kimi_events(message):
                     usage = payload.get("token_usage")
                     if not isinstance(usage, dict):
@@ -5903,19 +5988,20 @@ def scan_kimicode(bounds, cache):
             continue
         signature = f"{stat.st_mtime_ns}:{stat.st_size}"
         entry = fc.get(path)
-        session_dir = os.path.dirname(path)
-        work_dir_hash = os.path.basename(os.path.dirname(session_dir))
-        project = projects.get(work_dir_hash)
-        if not isinstance(entry, dict) or entry.get("sig") != signature:
+        context = _kimi_wire_context(path, projects)
+        if (not isinstance(entry, dict) or entry.get("sig") != signature
+                or entry.get("parser_version") != _KIMI_PARSER_VERSION):
             fc[path] = {
                 "sig": signature,
                 "days": _scan_kimi_wire(path),
-                "sid": os.path.basename(session_dir),
-                "proj": project,
+                "sid": context["sid"],
+                "proj": context["proj"],
+                "agent": context["agent"],
+                "parser_version": _KIMI_PARSER_VERSION,
             }
             changed = True
-        elif entry.get("proj") != project:
-            entry["proj"] = project
+        elif any(entry.get(key) != context[key] for key in ("sid", "proj", "agent")):
+            entry.update(context)
             changed = True
 
     for path in stale:
@@ -6745,7 +6831,7 @@ def main():
             print(f"今日 思考   {human(qt['reason']):>6} {F}")
         print(f"今日 ≈成本  ${qt['cost']:.2f} {F}")
         print("---")
-    # Kimi Code 块（官方 wire 日志不持久化模型或成本）
+    # Kimi Code 块（protocol 1.5 提供模型，但 wire 不持久化实际成本）
     kt = d["kimicode"]["ranges"]["today"]
     if kt["sessions"] > 0:
         print(f"Kimi Code {HEAD}")
@@ -7211,7 +7297,14 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             if cutoff and dk < cutoff:
                 continue
             d = days.setdefault(dk, _empty())
-            d["tokens"] += token_total(day)
+            _add_day_tokens(d, dk, "kimicode", token_total(day))
+            for mn, mv in day.get("models", {}).items():
+                name = f"{nice_model(mn)} (Kimi Code)"
+                model = models.setdefault(
+                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                           "reason": 0, "tool": "kimicode"})
+                for key in TOKEN_FIELDS:
+                    model[key] += mv.get(key, 0)
 
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
@@ -7569,7 +7662,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             nm = f"{nice_model(mn)} (Qwen Code)"
             model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- Kimi Code (wire StatusUpdate: input_other + cache read/write + output) ---
+    # --- Kimi Code (legacy StatusUpdate and protocol 1.5 usage.record) ---
     for _, entry in cache.get("kimicode", {}).items():
         if not isinstance(entry, dict):
             continue
@@ -7585,6 +7678,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             pt = proj_tok.setdefault(project, [0, 0.0])
             pt[0] += tok
             day_projs.setdefault(dk, set()).add(project)
+            for mn, mv in day.get("models", {}).items():
+                model_name = f"{nice_model(mn)} (Kimi Code)"
+                model_tok[model_name] = model_tok.get(model_name, 0) + token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
     for f, entry in cache.get("pi", {}).items():
@@ -7949,6 +8045,29 @@ def projects():
         p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
         deepseek_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
     for proj_path, session_ids in deepseek_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
+
+    # Kimi Code sessions. protocol 1.5 writes one wire per Agent, so count the
+    # shared state.json session id once while summing every Agent's usage.
+    kimi_sessions = {}
+    for entry in cache.get("kimicode", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("kimicode")
+        kimi_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+        for dk, day in entry.get("days", {}).items():
+            p["tokens"] += token_total(day)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for model, usage in day.get("models", {}).items():
+                name = f"{nice_model(model)} (Kimi Code)"
+                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
+    for proj_path, session_ids in kimi_sessions.items():
         proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
 
     # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。

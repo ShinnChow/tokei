@@ -933,6 +933,7 @@ struct DashboardView: View {
                           suffix: "DeepSeek Harness", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
+        appendTokenModels(usage.kimicode.ranges.get(key).models, tool: "kimicode", suffix: "Kimi Code", to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
