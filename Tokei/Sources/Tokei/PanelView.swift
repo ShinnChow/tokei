@@ -427,8 +427,11 @@ struct PanelView: View {
             if x.pw != nil || (x.reset_cards?.count ?? 0) > 0 {
                 thinDivider
             }
-            if let pw = x.pw {
+            if let pw = x.pw, x.pw_stale != true {
                 quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
+            }
+            if x.pw_stale == true {
+                codexQuotaStatus(x)
             }
             if let cards = x.reset_cards, cards.count > 0 {
                 codexResetCardsRow(cards)
@@ -1369,6 +1372,19 @@ struct PanelView: View {
         }
         .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
         .help(stale ? "等待 Claude Desktop 写入新的额度缓存" : "来自 Claude Desktop 本地缓存")
+    }
+
+    func codexQuotaStatus(_ stat: CodexStat) -> some View {
+        let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+            Text("额度数据已过期 · 更新于 \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(Color.orange.opacity(0.88))
+        .help("等待 Codex 写入新的额度读数")
     }
 
     var footer: some View {

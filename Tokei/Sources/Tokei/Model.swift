@@ -154,6 +154,9 @@ struct CodexStat: Codable {
     var pw: Double?
     var r5: Int?
     var rw: Int?
+    var q_updated: Int?
+    var p5_stale: Bool?
+    var pw_stale: Bool?
     var plan: String?
     var reset_cards: CodexResetCards?
 }

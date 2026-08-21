@@ -783,7 +783,8 @@ def _empty_claude():
 def _empty_codex():
     ranges = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
                   "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
-    return {"ranges": ranges, "limits": None, "plan": None}
+    return {"ranges": ranges, "limits": None, "plan": None,
+            "limits_updated": None, "limits_consumed": None}
 
 
 def _empty_gemini():
@@ -2322,7 +2323,8 @@ def scan_codex(bounds, cache):
         if fc:
             _codex_clear_event_cache(fc)
             cache["_dirty"] = True
-        return {"ranges": B, "cur_total": None, "limits": None, "plan": None}
+        return {"ranges": B, "cur_total": None, "limits": None, "plan": None,
+                "limits_updated": None, "limits_consumed": None}
 
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
@@ -2599,7 +2601,8 @@ def scan_codex(bounds, cache):
             for k in _codex_range_keys(d):
                 B[k]["sessions"].add(f)
 
-    for dk, day in ledger_reconcile("codex", live_days).items():
+    merged_days = ledger_reconcile("codex", live_days)
+    for dk, day in merged_days.items():
         try:
             d = date.fromisoformat(dk)
         except ValueError:
@@ -2634,12 +2637,24 @@ def scan_codex(bounds, cache):
         plan_type = (g_limits or {}).get("plan_type")
         selected_limits_ts = g_ts
 
+    # 读数时间:live 真正胜出时用抓取时刻,否则用日志里那条记录的时间。
+    # live_updated 只在 if live 分支内有定义,先在外面兜底。
+    limits_updated = _iso_to_epoch(selected_limits_ts)
     live = fetch_codex_live_limits()
     if live:
         live_limits, live_plan, live_updated = live
         if _codex_live_snapshot_is_current(live_updated, selected_limits_ts):
             latest_limits = live_limits
             plan_type = live_plan or (live_limits or {}).get("plan_type") or plan_type
+            limits_updated = int(live_updated)
+
+    # 窗口翻篇后本机又消耗了多少 —— 用来区分「确实回满了」和「读数已经失真」。
+    # now_epoch=0 让映射函数只做槽位归类,不触发过期处理。
+    slots = _codex_quota_values(latest_limits, now_epoch=0)
+    limits_consumed = {
+        "p5": _codex_used_since(merged_days, slots["r5"]),
+        "pw": _codex_used_since(merged_days, slots["rw"]),
+    }
 
     cur_total = None
     if cur_file:
@@ -2652,12 +2667,46 @@ def scan_codex(bounds, cache):
         "cur_total": cur_total,
         "limits": latest_limits,
         "plan": plan_type,
+        "limits_updated": limits_updated,
+        "limits_consumed": limits_consumed,
     }
 
 
-def _codex_quota_values(limits, now_epoch=None):
-    """Map Codex rate-limit slots by duration; primary/secondary roles can change."""
-    values = {"p5": None, "pw": None, "r5": None, "rw": None}
+def _codex_used_since(days, since_epoch):
+    """since_epoch 之后本机消耗的 codex token;拿不到就返回 None。
+
+    账本里 in 已含 cached,所以口径是 in+out(与 hours 一致)。起始那天按 hours[24]
+    从重置小时切起;宁可把重置那个整点全算进来,也不要漏报消耗——漏报会让一份
+    已经失真的额度读数被当成"还满着"。
+    """
+    if not isinstance(days, dict) or not since_epoch:
+        return None
+    try:
+        start = datetime.fromtimestamp(float(since_epoch))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    start_day = start.date().isoformat()
+    total = 0
+    for dk, day in days.items():
+        if not isinstance(day, dict) or dk < start_day:
+            continue
+        whole_day = int(day.get("in", 0) or 0) + int(day.get("out", 0) or 0)
+        if dk > start_day:
+            total += whole_day
+            continue
+        hours = day.get("hours") or []
+        # 没有小时分布(老账本条目)就整天算,保守方向是宁多勿少
+        total += sum(int(h or 0) for h in hours[start.hour:24]) if hours else whole_day
+    return total
+
+
+def _codex_quota_values(limits, now_epoch=None, consumed=None):
+    """Map Codex rate-limit slots by duration; primary/secondary roles can change.
+
+    consumed = {"p5": n, "pw": n}:该窗口 resets_at 之后本机又消耗了多少 token。
+    """
+    values = {"p5": None, "pw": None, "r5": None, "rw": None,
+              "p5_stale": False, "pw_stale": False}
     for slot_name in ("primary", "secondary"):
         slot = (limits or {}).get(slot_name) or {}
         if not slot:
@@ -2673,9 +2722,15 @@ def _codex_quota_values(limits, now_epoch=None):
     now_epoch = now_epoch if now_epoch is not None else int(datetime.now().timestamp())
     for pct_key, reset_key in (("p5", "r5"), ("pw", "rw")):
         reset = values[reset_key]
-        if reset and now_epoch > reset:
+        if not reset or now_epoch <= reset:
+            continue
+        # 窗口已经翻篇。此后一个 token 都没用 = 确实回满了;用过 = 这份读数已经
+        # 失真,标出来让界面说"已过期"。谎报满额比承认不知道危险得多(issue #63)。
+        if (consumed or {}).get(pct_key) == 0:
             values[pct_key] = 0.0
             values[reset_key] = None
+        elif values[pct_key] is not None:
+            values[f"{pct_key}_stale"] = True
     return values
 
 
@@ -6190,7 +6245,7 @@ def compute():
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
 
-    quota = _codex_quota_values(cx["limits"])
+    quota = _codex_quota_values(cx["limits"], consumed=cx.get("limits_consumed"))
     p5, pw = quota["p5"], quota["pw"]
     r5, rw = quota["r5"], quota["rw"]
 
@@ -6213,6 +6268,8 @@ def compute():
         "codex": {
             "ranges": xranges,
             "p5": p5, "pw": pw, "r5": r5, "rw": rw,
+            "q_updated": cx.get("limits_updated"),
+            "p5_stale": quota["p5_stale"], "pw_stale": quota["pw_stale"],
             "plan": cx["plan"],
             "reset_cards": codex_reset_cards if codex_reset_cards.get("count", 0) > 0 else None,
         },
@@ -6458,12 +6515,13 @@ def main():
     cur_total = c["session_total"]
     cx_hit = xt["hit"]
     p5, pw, r5, rw = x["p5"], x["pw"], x["r5"], x["rw"]
+    p5_stale, pw_stale = x.get("p5_stale"), x.get("pw_stale")
 
     # ---- menu bar 标题(紧凑):⚡Claude命中率  ◷Codex周额度 ----
     parts = [f"⚡{cc_hit:.0f}"]
-    if p5 is not None:
+    if p5 is not None and not p5_stale:
         parts.append(f"◷{p5:.0f}")
-    elif pw is not None:
+    elif pw is not None and not pw_stale:
         parts.append(f"◷{pw:.0f}")
     print(" ".join(parts))
     print("---")
@@ -6492,9 +6550,15 @@ def main():
     print(f"今日 ≈成本  ${xt['cost']:.2f} {F}")
     print(f"  (按 API 价估,订阅实付不按此) | font=Menlo size=11")
     if p5 is not None:
-        print(f"5h 额度  {p5:5.1f}%  reset {fmt_reset(r5)} {F}")
+        if p5_stale:
+            print(f"5h 额度  已过期 {F}")
+        else:
+            print(f"5h 额度  {p5:5.1f}%  reset {fmt_reset(r5)} {F}")
     if pw is not None:
-        print(f"周额度   {pw:5.1f}%  reset {fmt_reset(rw)} {F}")
+        if pw_stale:
+            print(f"周额度   已过期 {F}")
+        else:
+            print(f"周额度   {pw:5.1f}%  reset {fmt_reset(rw)} {F}")
     if x["plan"]:
         print(f"plan: {x['plan']} {F}")
     print("---")
@@ -7865,6 +7929,8 @@ def _quota_tool_reading(source, tool):
             return None
         used, reset, updated = data.get("q7"), data.get("q7_reset"), data.get("q_updated")
     elif tool == "codex":
+        if data.get("pw_stale"):
+            return None
         used, reset, updated = data.get("pw"), data.get("rw"), data.get("q_updated")
     else:
         # Grok 也可能是月套餐,月窗口长度不定又没有数据可验证,先只认周。

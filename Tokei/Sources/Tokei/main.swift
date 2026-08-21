@@ -148,7 +148,8 @@ final class Store: ObservableObject {
                 ? nil : usage.claude.q7.map { 100 - $0 },
             claudeFableWeekRemaining: usage.claude.qf_stale == true
                 ? nil : usage.claude.qf.map { 100 - $0 },
-            codexWeekRemaining: usage.codex.pw.map { 100 - $0 },
+            codexWeekRemaining: usage.codex.pw_stale == true
+                ? nil : usage.codex.pw.map { 100 - $0 },
             claudeModelTotals: claudeModels,
             codexModelTotals: codexModels
         ))
@@ -307,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      remaining: remaining))
             }
             if MenuBarQuotaSource.codex.isEnabled,
+               u.codex.pw_stale != true,
                let quota = u.codex.pw {
                 let remaining = 100 - quota
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
