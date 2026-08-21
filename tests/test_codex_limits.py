@@ -1,5 +1,8 @@
+import atexit
 import importlib.util
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,9 +10,29 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "usage.30s.py"
+
+# usage.30s.py 在导入时就把 HOME 展开成 ~/.codex、~/.tokei/ledger.json 等路径常量,
+# 必须在 exec_module 之前换成沙箱,否则真实账本会把毕生用量并进 scan 结果。
+_SANDBOX_HOME = tempfile.mkdtemp(prefix="tokei-test-home-")
+os.environ["HOME"] = _SANDBOX_HOME
+os.environ["USERPROFILE"] = _SANDBOX_HOME
+atexit.register(shutil.rmtree, _SANDBOX_HOME, True)
+
 SPEC = importlib.util.spec_from_file_location("tokei_usage", SCRIPT)
 USAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(USAGE)
+
+# ledger_reconcile 会兜底回填"仅账本有"的天,进程内缓存不清会让前一个用例的天数漏进后一个。
+_TESTCASE_RUN = unittest.TestCase.run
+
+
+def _run_with_clean_ledger(self, *args, **kwargs):
+    USAGE._LEDGER_CACHE["data"] = None
+    USAGE._LEDGER_CACHE["dirty"] = False
+    return _TESTCASE_RUN(self, *args, **kwargs)
+
+
+unittest.TestCase.run = _run_with_clean_ledger
 
 
 class _Response:
