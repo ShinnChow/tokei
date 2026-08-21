@@ -6501,6 +6501,10 @@ def write_sync_snapshot():
     ledger = _load_ledger()
     if ledger.get("tools"):
         d["_ledger"] = ledger
+    # 周期边界推不出来,只有观测到的那台机器知道 —— 不发布,别的机器就永远补不齐历史。
+    anchors = _load_quota_anchors()
+    if anchors:
+        d["_quota_anchors"] = anchors
     return 0 if _write_configured_sync_snapshot(d) else 1
 
 
@@ -7735,13 +7739,14 @@ def _quota_local_day_range(day_key):
 
 
 def _quota_device_ledgers():
-    """[(设备名, 账本 tools, 快照, 日表)] —— 本机 + 各 peer 同步快照;本机快照为 None。
+    """→ ([(设备名, 账本 tools, 快照, 日表)], [peer 锚点表]) —— 本机 + 各 peer;本机快照为 None。
 
     额度% 是账号级的,只算本机会对不上(活儿可能全在另一台机器上干的);
     额度读数本身也可能只有另一台机器有(比如 Grok 只在 Air 上登录)。
     """
     own_tools = (_load_ledger() or {}).get("tools") or {}
     devices = [(_QUOTA_SELF_DEVICE, own_tools, None, _quota_daily_from_tools(own_tools))]
+    peer_anchors = []
     cfg = _load_tokei_config() or {}
     sync_dir = (os.path.expanduser(cfg.get("sync_dir") or "")
                 or os.path.join(HOME, ".tokei", "sync"))
@@ -7749,7 +7754,7 @@ def _quota_device_ledgers():
     try:
         names = sorted(os.listdir(sync_dir))
     except OSError:
-        return devices
+        return devices, peer_anchors
     for name in names:
         # 自己那份快照是本地账本的副本,再算一遍就是双倍。
         if not name.endswith(".json") or name.casefold() == own.casefold():
@@ -7761,11 +7766,15 @@ def _quota_device_ledgers():
             continue
         if not isinstance(snapshot, dict):
             continue
+        # 锚点不看 _ledger:周期历史推不出来,哪台机器观测到的都得收下。
+        incoming = snapshot.get("_quota_anchors")
+        if isinstance(incoming, dict):
+            peer_anchors.append(incoming)
         tools = (snapshot.get("_ledger") or {}).get("tools")
         if isinstance(tools, dict) and tools:
             devices.append((snapshot.get("_device") or name[:-5], tools, snapshot,
                             _quota_daily_from_tools(tools)))
-    return devices
+    return devices, peer_anchors
 
 
 def _quota_day_tokens(tool, entry):
@@ -7985,7 +7994,31 @@ def _record_quota_anchor(anchors, tool, reset, used, now):
     return True
 
 
-def _quota_anchor_cycles(anchors, tool, span, limit):
+def _merge_quota_anchors(anchors, incoming):
+    """把 peer 快照里的锚点并进内存表 —— 只为渲染,不回写自己的账。
+
+    周期边界只有亲眼观测到的那台机器知道,所以谁看到都算数。抖动对齐交给
+    _record_quota_anchor:同一个窗口在两台机器上读出的 reset 差几秒也能并成一条。
+    """
+    known = {tool for tool, _key in _QUOTA_TOOLS}
+    for tool, rows in (incoming or {}).items():
+        if tool not in known or not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # 快照是别的进程写的,字段可能是任何东西 —— 挑不出数的直接跳过。
+            reset, used, seen = row.get("reset"), row.get("max_used"), row.get("last_seen")
+            if not isinstance(reset, (int, float)) or reset <= 0:
+                continue
+            _record_quota_anchor(
+                anchors, tool, int(reset),
+                used if isinstance(used, (int, float)) else 0,
+                int(seen) if isinstance(seen, (int, float)) else 0)
+    return anchors
+
+
+def _quota_anchor_cycles(anchors, tool, span, limit, now):
     """→ [(start, end, max_used, 是否进行中)]，最新的排最前。
 
     按 reset 排序而不是按观测顺序:陈旧的会话记录偶尔会抢赢新记录,
@@ -8004,43 +8037,51 @@ def _quota_anchor_cycles(anchors, tool, span, limit):
         else:
             end = reset
         if end > start:
-            cycles.append((start, end, row.get("max_used", 0), index + 1 == len(rows)))
+            # 读数断了就不会再有新锚点,最后一条也可能早已过期 —— 那是历史,不是进行中。
+            # 但「进行中」仍只能是最后一条:多标一条会被前端当成当前卡片,另一条就没了。
+            current = index + 1 == len(rows) and reset > now
+            cycles.append((start, end, row.get("max_used", 0), current))
     return cycles[-limit:][::-1]
 
 
-def _quota_cycle_specs(payload, devices, now):
-    """→ (有读数的工具, 没读数的工具, 锚点表)，顺便把这次读到的锚点落盘。
+def _quota_cycle_specs(payload, devices, peer_anchors, now):
+    """→ (能切出周期的工具, 一条锚点都没有的工具, 锚点表)，顺便把这次读到的锚点落盘。
 
     额度是账号级的:本机读不到就用同步过来的(Grok 只在 Air 上登录就属于这种),
     所以每台设备的读数都记 —— 谁先看到重锚都算数。
+
+    落盘只写本机这轮亲眼读到的;peer 锚点在落盘之后才并进来,免得把别人的记录
+    反复回写成自己的观测。
     """
     anchors = _load_quota_anchors()
-    seen, missing, dirty = [], [], False
+    dirty = False
     for tool, _key in _QUOTA_TOOLS:
-        found = False
         for _name, _tools, snapshot, _daily in devices:
             reading = _quota_tool_reading(snapshot if snapshot else payload, tool)
-            if not reading:
-                continue
-            found = True
-            dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now)
-        (seen if found else missing).append(tool)
+            if reading:
+                dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now)
     if dirty:
         _save_quota_anchors(anchors)
-    return seen, missing, anchors
+    for incoming in peer_anchors:
+        _merge_quota_anchors(anchors, incoming)
+    # 当前读数断了不等于历史没了 —— 有锚点就照旧切周期,
+    # 只有一条都没有才算真没有,那才需要提示怎么把额度读数找回来。
+    charted = [tool for tool, _key in _QUOTA_TOOLS if anchors.get(tool)]
+    missing = [tool for tool, _key in _QUOTA_TOOLS if not anchors.get(tool)]
+    return charted, missing, anchors
 
 
 def build_quota_detail():
     payload = compute()
     now = int(datetime.now().timestamp())
-    devices = _quota_device_ledgers()
+    devices, peer_anchors = _quota_device_ledgers()
     span = _QUOTA_WEEK_HOURS * 3600
-    seen, missing, anchors = _quota_cycle_specs(payload, devices, now)
+    charted, missing, anchors = _quota_cycle_specs(payload, devices, peer_anchors, now)
 
     planned = []
-    for tool in seen:
+    for tool in charted:
         for start, end, used, current in _quota_anchor_cycles(
-                anchors, tool, span, _QUOTA_CYCLE_HISTORY):
+                anchors, tool, span, _QUOTA_CYCLE_HISTORY, now):
             planned.append((tool, start, end, used, current))
 
     codex_spans = [(s, e) for tool, s, e, _u, _c in planned if tool == "codex"]
