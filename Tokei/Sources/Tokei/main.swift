@@ -455,6 +455,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             store.refresh()
+            // 轨迹页的额度明细要跑 1~3 秒,面板一开就预热,免得切过去干等。
+            QuotaDetailRepository.shared.load()
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }

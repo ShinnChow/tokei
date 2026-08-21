@@ -39,6 +39,8 @@ struct ClaudeRange: Codable {
     var cost: Double
     var models: [ClaudeModelStat] = []
     var sessions: Int = 0
+
+    var tokens: Int { `in` + out + cr + cw }
 }
 
 struct ClaudeRanges: Codable {
@@ -92,6 +94,8 @@ struct CodexRange: Codable {
     var cost: Double
     var sessions: Int = 0
     var models: [TokenModelStat] = []
+
+    var tokens: Int { `in` + cached + out }
 
     init(hit: Double = 0, `in` input: Int = 0, cached: Int = 0, out: Int = 0,
          reason: Int = 0, cost: Double = 0, sessions: Int = 0, models: [TokenModelStat] = []) {
@@ -716,12 +720,28 @@ enum Fmt {
         return String(format: "%.0f", v)
     }
 
+    /// 千分位精确写法，如 234,567,890。分隔符固定为逗号，不随语言环境变化。
+    static func grouped(_ n: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.groupingSeparator = ","
+        formatter.usesGroupingSeparator = true
+        return formatter.string(from: NSNumber(value: n)) ?? String(n)
+    }
+
     static func reset(_ epoch: Int?) -> String {
         guard let e = epoch else { return "?" }
         let d = Date(timeIntervalSince1970: TimeInterval(e))
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm"
         return f.string(from: d)
+    }
+
+    static func day(_ epoch: Int?) -> String {
+        guard let e = epoch else { return "?" }
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(e)))
     }
 
     static func beijingTime(_ epoch: Int, full: Bool = false) -> String {
