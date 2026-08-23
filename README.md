@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **18 款 AI 工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
 
 ### 支持的工具
 
@@ -29,15 +29,22 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 工�
 | **Codex CLI** | Token、成本、配额、会话 |
 | **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
 | **Grok Build** | Token（输入/输出/缓存/推理）、会话、上下文、延迟、配额（本地日志；可选实时） |
+| **Qoder Desktop** | Token、缓存、会话、调用次数、模型 |
+| **QoderWork** | Token、调用次数、子 Agent、时长、上下文 |
+| **Qoder CLI** | 会话、调用、工具、活跃时长、估算 Token |
 | **Hermes** | Token、成本、缓存命中率、模型 |
+| **ZCode** | Token（输入/输出/缓存/推理）、成本、模型 |
+| **MiMoCode** | Token（输入/输出/缓存/推理）、成本、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
+| **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
 | **千问办公（QwenWork）** | 套餐与加购积分余额、团队共享资源包 |
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
+| **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目 |
 
 ## 功能一览
 
@@ -164,17 +171,23 @@ Token、成本和项目统计来自 **本地日志文件**。额度查询仅使�
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
-| OpenCode | `~/.opencode/sessions/*.json` |
+| OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP（默认关闭；需客户端运行且已登录） |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` |
+| Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
+| QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
+| Qoder CLI | `~/.qoder/projects/**/*.jsonl` |
+| ZCode | `~/.zcode/cli/db/db.sqlite` |
+| MiMoCode | `~/Library/Application Support/mimocode/mimocode*.db` 或 `~/.local/share/mimocode/mimocode*.db` |
 
 ## 对比 CodexBar
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
 |------|:-----:|:---------:|
-| 支持工具 | 13 | 40+ |
+| 支持工具 | 18 | 40+ |
 | Token 级用量分析 | ✅ | — |
 | 成本估算（317 模型） | ✅ | 部分 |
 | 数据面板（图表 + 热力图） | ✅ | — |
@@ -323,11 +336,11 @@ Token、成本和项目统计来自 **本地日志文件**。额度查询仅使�
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **13 AI tools** in real-time. Usage analytics are local-first; quota checks use each tool's existing local sign-in and may contact its official service.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **18 AI tools** in real-time. Usage analytics are local-first; quota checks use each tool's existing local sign-in and may contact its official service.
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok Build, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qwen Code, QwenWork, Qoder, QoderWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Grok Build, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, WorkBuddy, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

@@ -11,7 +11,9 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Claude Code | `~/.claude/*/*.jsonl` | JSONL, `type=assistant` 行含 `message.usage` |
 | Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` / `~/.gemini/*/chats/session-*.json` | SQLite (`gen_metadata` protobuf) / JSON (`messages[].tokens`) |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl` + `sessions/*/*/{summary,signals}.json` | JSONL, `shell.turn.inference_done` + 会话指标 |
-| Qoder | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
+| Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | SQLite, `chat_message.token_info` / `model_info` |
+| QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
+| Qoder CLI | `~/.qoder/projects/**/*.jsonl` | JSONL, 会话/调用/工具/时长；文本量估算 Token |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
@@ -20,6 +22,9 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
+| ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
+| MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
 
 ---
 
@@ -98,6 +103,19 @@ token 快照误删。
 - `deepseek-official` 路由固定采用 DeepSeek 官方直连价，不受 OpenRouter 价格更新影响
 - V4 Pro 缓存未命中输入、缓存命中输入、输出：`$0.435 / $0.003625 / $0.87` 每百万 Token
 - V4 Flash 缓存未命中输入、缓存命中输入、输出：`$0.14 / $0.0028 / $0.28` 每百万 Token
+
+**Kimi Code** — 官方 wire 日志字段独立:
+- protocol 1.5 输入 = `usage.inputOther`
+- protocol 1.5 输出 = `usage.output`
+- protocol 1.5 缓存读 = `usage.inputCacheRead`
+- protocol 1.5 缓存写 = `usage.inputCacheCreation`
+- protocol 1 使用对应的 `token_usage.input_other`、`output`、`input_cache_read`、`input_cache_creation`
+
+protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei 扫描全部 Agent wire，
+但使用 `state.json.id` 将它们归并为同一会话，并从 `state.json.cwd` 获取项目。旧 protocol 1
+仍递归展开主 wire 中的 `SubagentEvent`，且不扫描旧 `session/subagents`，避免重复。
+新格式提供权威 `model`，可展示模型明细；两种格式都不持久化实际成本，因此 Kimi Code
+卡片不展示推测的 API 成本。
 
 **Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
 - 输入 = `inputTokens - cachedTokens`

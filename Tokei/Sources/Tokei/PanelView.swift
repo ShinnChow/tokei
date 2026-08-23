@@ -18,6 +18,7 @@ struct PanelView: View {
     @State private var deepSeekHarnessModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
+    @State private var kimiCodeModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
@@ -52,6 +53,7 @@ struct PanelView: View {
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
     @AppStorage("showQwenWork") private var showQwenWork = true
+    @AppStorage("showKimiCode") private var showKimiCode = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
     /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
@@ -64,7 +66,7 @@ struct PanelView: View {
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode,
-         showQwenWork].filter { $0 }.count
+         showQwenWork, showKimiCode].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -298,7 +300,6 @@ struct PanelView: View {
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
-        let qcr = u.qwencode.ranges.get(sel)
         let claudeQuotaState = SubscriptionQuotaState.resolve([
             (value: u.claude.q5, stale: u.claude.q5_stale),
             (value: u.claude.q7, stale: u.claude.q7_stale),
@@ -307,6 +308,7 @@ struct PanelView: View {
         let grokQuotaState = SubscriptionQuotaState.resolve([
             (value: u.grok.pct, stale: u.grok.stale),
         ])
+        let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
@@ -362,6 +364,8 @@ struct PanelView: View {
                              u.qwenwork.remaining != nil || !u.qwenwork.segments.isEmpty ||
                              u.qwenwork.shared != nil,
                          tint: Theme.qwenwork, content: AnyView(qwenWorkBlock(u.qwenwork))),
+            ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode, active: kcr.sessions > 0,
+                         tint: Theme.kimicode, content: AnyView(tokenUsageBlock(title: "Kimi Code", kcr, tint: Theme.kimicode, modelsOpen: $kimiCodeModelsOpen, showsCost: false))),
         ]
     }
 
@@ -1226,12 +1230,13 @@ struct PanelView: View {
     // MARK: - Token usage cards
     @ViewBuilder
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
-                         modelsOpen: Binding<Bool>, inclusiveIO: Bool = false) -> some View {
+                         modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
+                         showsCost: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
-                metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
+                metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))] : [],
                     hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
@@ -2039,6 +2044,7 @@ struct PanelView: View {
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
                 settingsRow("千问办公", tint: Theme.qwenwork, isOn: $showQwenWork)
+                settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -2726,7 +2732,7 @@ struct PanelView: View {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork"]
+                         "opencode", "qwencode", "qwenwork", "kimicode"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

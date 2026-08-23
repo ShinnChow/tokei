@@ -766,10 +766,12 @@ struct Usage: Codable {
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
+    var kimicode: TokenUsageStat
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
-        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode, qwenwork
+        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
+        case qwenwork, kimicode
     }
 
     init(from decoder: Decoder) throws {
@@ -795,6 +797,7 @@ struct Usage: Codable {
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
+        kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
     }
 }
 
