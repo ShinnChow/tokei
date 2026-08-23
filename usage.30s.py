@@ -6524,9 +6524,20 @@ def _kimi_wire_files():
     files = set()
     for root in _kimi_roots():
         sessions_dir = os.path.join(root, "sessions")
-        files.update(glob.glob(os.path.join(sessions_dir, "*", "*", "wire.jsonl")))
-        files.update(glob.glob(os.path.join(
-            sessions_dir, "*", "*", "agents", "*", "wire.jsonl")))
+        for session_dir in glob.glob(os.path.join(sessions_dir, "*", "*")):
+            if not os.path.isdir(session_dir):
+                continue
+            # protocol 1.5 writes authoritative per-Agent usage.record files. Some
+            # transitional versions may also leave a root wire mirror; selecting
+            # both would count the same call twice. Root wire is protocol 1 fallback.
+            agent_wires = glob.glob(os.path.join(
+                session_dir, "agents", "*", "wire.jsonl"))
+            if agent_wires:
+                files.update(agent_wires)
+                continue
+            root_wire = os.path.join(session_dir, "wire.jsonl")
+            if os.path.isfile(root_wire):
+                files.add(root_wire)
     return sorted(os.path.abspath(path) for path in files)
 
 
@@ -6672,6 +6683,7 @@ def _scan_kimi_wire(path):
 
 
 def scan_kimicode(bounds, cache):
+    ledger_touch("kimicode")
     fc = cache.setdefault("kimicode", {})
     B = _empty_token_ranges()
     files = _kimi_wire_files()
@@ -6679,7 +6691,6 @@ def scan_kimicode(bounds, cache):
         if fc:
             fc.clear()
             cache["_dirty"] = True
-        return {"ranges": B}
 
     projects = _kimi_project_map()
     stale = set(fc)
@@ -6712,16 +6723,36 @@ def scan_kimicode(bounds, cache):
         fc.pop(path, None)
         changed = True
 
+    live_days = {}
+    live_sessions = {}
+    live_projects = {}
     for path, entry in fc.items():
         if not isinstance(entry, dict):
             continue
         for day_key, day in entry.get("days", {}).items():
             try:
-                local_day = date.fromisoformat(day_key)
+                date.fromisoformat(day_key)
             except (TypeError, ValueError):
                 continue
-            for range_key in classify_date(local_day, bounds):
-                _merge_token_day(B[range_key], day, entry.get("sid") or path)
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
+            session = entry.get("sid") or path
+            live_sessions.setdefault(day_key, set()).add(session)
+            project = entry.get("proj")
+            if isinstance(project, str) and project:
+                live_projects.setdefault(day_key, set()).add(project)
+
+    for day_key, day in live_days.items():
+        day["sessions"] = sorted(live_sessions.get(day_key, set()))
+        day["projects"] = sorted(live_projects.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("kimicode", live_days).items():
+        try:
+            local_day = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for range_key in classify_date(local_day, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
