@@ -17,6 +17,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
+| Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` | JSONL, assistant `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
@@ -116,6 +117,15 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 仍递归展开主 wire 中的 `SubagentEvent`，且不扫描旧 `session/subagents`，避免重复。
 新格式提供权威 `model`，可展示模型明细；两种格式都不持久化实际成本，因此 Kimi Code
 卡片不展示推测的 API 成本。
+**Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
+- 输入 = `usage.input`
+- 输出 = `usage.output`
+- 缓存读 = `usage.cacheRead`
+- 缓存写 = `usage.cacheWrite`
+- 推理 = `usage.reasoning`（通常没有，按 0 处理）
+- 成本 = `usage.cost.total`，缺失时按价格表估算
+
+只读取 assistant message 的逐次 usage；`child_usage_attributed` 是父会话聚合 bookkeeping，不重复计入。RLM 子代理日志按独立 session 参与统计。
 
 **Qwen Code** — `inputTokens` 已包含缓存,`thoughtsTokens` 独立:
 - 输入 = `inputTokens - cachedTokens`

@@ -20,6 +20,7 @@
 ## 什么是 Tokei？
 
 Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **18 款 AI 工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
 
 ### 支持的工具
 
@@ -37,6 +38,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **18 款 AI 工�
 | **MiMoCode** | Token（输入/输出/缓存/推理）、成本、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
+| **Prime Agent** | Token、成本、缓存命中率、模型、项目（含 RLM 子代理） |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
@@ -169,6 +171,7 @@ Token、成本和项目统计来自 **本地日志文件**。额度查询仅使�
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
+| Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
@@ -337,6 +340,7 @@ Token、成本和项目统计来自 **本地日志文件**。额度查询仅使�
 ## English
 
 Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **18 AI tools** in real-time. Usage analytics are local-first; quota checks use each tool's existing local sign-in and may contact its official service.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **13 AI coding tools** in real-time — all from local log files, with zero network traffic.
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
