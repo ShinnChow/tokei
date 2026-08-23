@@ -51,8 +51,11 @@ struct PanelView: View {
     @AppStorage("showDeepSeekHarness") private var showDeepSeekHarness = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
+    @AppStorage("showQwenWork") private var showQwenWork = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
+    /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
+    @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 菜单栏额度来源（与显示卡片独立）。Grok 默认关，避免新额度源抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude.defaultsKey) private var menuBarQuotaClaude = true
     @AppStorage(MenuBarQuotaSource.codex.defaultsKey) private var menuBarQuotaCodex = true
@@ -60,7 +63,8 @@ struct PanelView: View {
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
-         showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode].filter { $0 }.count
+         showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode,
+         showQwenWork].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -353,6 +357,11 @@ struct PanelView: View {
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
             ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
                          tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen))),
+            ToolCardItem(id: "qwenwork", name: "千问办公", visible: showQwenWork,
+                         active: qwenWorkQuotaEnabled || u.qwenwork.available ||
+                             u.qwenwork.remaining != nil || !u.qwenwork.segments.isEmpty ||
+                             u.qwenwork.shared != nil,
+                         tint: Theme.qwenwork, content: AnyView(qwenWorkBlock(u.qwenwork))),
         ]
     }
 
@@ -832,6 +841,205 @@ struct PanelView: View {
             MiniBar(value: max(0, min(100, 100 - usedPct)), tint: tint.opacity(0.75))
         }
         .help(help)
+    }
+
+    // MARK: - 千问办公额度卡片
+    @ViewBuilder
+    func qwenWorkBlock(_ quota: QwenWorkQuota) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHeadPlain("千问办公", tint: Theme.qwenwork)
+
+            if quota.available || quota.remaining != nil || !quota.segments.isEmpty || quota.shared != nil {
+                if quota.exceeded {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                        Text("官方额度状态：已用尽")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.red.opacity(0.92))
+                }
+
+                if let remaining = quota.remaining {
+                    CostHeadline(
+                        value: Fmt.credits(remaining),
+                        caption: quota.is_team ? "团队账号个人可用积分" : "个人可用积分",
+                        tint: Theme.qwenwork
+                    )
+                }
+
+                // 有明确比例时才画进度条。部分千问办公套餐只返回绝对积分余额。
+                if let remainingPct = quota.remaining_pct {
+                    quotaRow(
+                        title: "综合剩余比例",
+                        pct: max(0, min(100, remainingPct)),
+                        reset: nil,
+                        tint: Theme.qwenwork
+                    )
+                }
+
+                if let expiresAt = quota.expires_at {
+                    qwenWorkDateRow("额度有效期", epoch: expiresAt)
+                }
+                if let planExpiration = quota.plan_expiration,
+                   planExpiration != quota.expires_at {
+                    qwenWorkDateRow("套餐有效期", epoch: planExpiration)
+                }
+
+                if !quota.segments.isEmpty {
+                    thinDivider
+                    Text("个人积分明细")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.tSecondary)
+                    ForEach(Array(quota.segments.enumerated()), id: \.offset) { item in
+                        qwenWorkSegmentRow(item.element)
+                    }
+                }
+
+                if let shared = quota.shared {
+                    thinDivider
+                    qwenWorkSharedBlock(shared)
+                }
+
+                qwenWorkQuotaStatus(quota)
+            } else if qwenWorkQuotaEnabled {
+                Text("未读取到额度。请确认千问办公已登录并保持运行。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("在设置的「隐私与额度」中开启查询后显示。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    func qwenWorkSegmentRow(_ segment: QwenWorkQuotaSegment) -> some View {
+        let remainingPct = ((segment.total ?? 0) > 0)
+            ? segment.percentage_used.map { max(0, min(100, 100 - $0)) }
+            : nil
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(Self.qwenWorkSegmentLabel(segment))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if let remaining = segment.remaining {
+                    Text("剩余 \(Fmt.credits(remaining)) \(Self.qwenWorkUnitLabel(segment.unit))")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tPrimary)
+                }
+            }
+
+            if let total = segment.total, total > 0 {
+                let used = segment.used.map(Fmt.credits) ?? "?"
+                Text("已用 \(used) / 总量 \(Fmt.credits(total))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+            }
+
+            if let remainingPct {
+                HStack(spacing: 6) {
+                    MiniBar(value: remainingPct, tint: remainingPct <= 15 ? .red : Theme.qwenwork)
+                    Text(String(format: "%.0f%%", remainingPct))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(remainingPct <= 15 ? Color.red : Theme.tSecondary)
+                }
+            }
+
+            if let renewsAt = segment.renews_at {
+                qwenWorkDateRow("续期", epoch: renewsAt)
+            } else if let expiresAt = segment.expires_at {
+                qwenWorkDateRow("到期", epoch: expiresAt)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    func qwenWorkSharedBlock(_ shared: QwenWorkSharedQuota) -> some View {
+        let remainingPct = ((shared.total ?? 0) > 0)
+            ? shared.percentage_used.map { max(0, min(100, 100 - $0)) }
+            : nil
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("团队共享资源包")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.tSecondary)
+                Spacer(minLength: 6)
+                if let remaining = shared.remaining {
+                    Text("剩余 \(Fmt.credits(remaining)) \(Self.qwenWorkUnitLabel(shared.unit))")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tPrimary)
+                }
+            }
+            Text("共享包独立展示，不计入上方个人积分")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+            if let total = shared.total, total > 0 {
+                let used = shared.used.map(Fmt.credits) ?? "?"
+                Text("已用 \(used) / 总量 \(Fmt.credits(total))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+            }
+            if let remainingPct {
+                HStack(spacing: 6) {
+                    MiniBar(value: remainingPct, tint: remainingPct <= 15 ? .red : Theme.qwenwork)
+                    Text(String(format: "%.0f%%", remainingPct))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(remainingPct <= 15 ? Color.red : Theme.tSecondary)
+                }
+            }
+            if let expiresAt = shared.expires_at {
+                qwenWorkDateRow("共享包到期", epoch: expiresAt)
+            }
+        }
+    }
+
+    func qwenWorkDateRow(_ label: String, epoch: Int) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "calendar")
+                .font(.system(size: 8.5))
+            Text("\(label) · \(Fmt.reset(epoch))")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(Theme.tTertiary)
+    }
+
+    func qwenWorkQuotaStatus(_ quota: QwenWorkQuota) -> some View {
+        let sourceLabel: String
+        switch quota.source {
+        case "mcp", "local_mcp": sourceLabel = "本机 QwenWork 接口"
+        case "cache": sourceLabel = "本地缓存"
+        default: sourceLabel = "额度数据"
+        }
+        let updated = quota.updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: quota.stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9))
+            Text("\(quota.stale ? "缓存可能已过期" : sourceLabel) · \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(quota.stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
+        .help("Tokei 仅通过千问办公桌面端的本机 QwenWork 接口读取额度，不读取或保存登录凭据。")
+    }
+
+    static func qwenWorkSegmentLabel(_ segment: QwenWorkQuotaSegment) -> String {
+        let key = segment.id.isEmpty ? segment.kind : segment.id
+        switch key.lowercased().replacingOccurrences(of: "-", with: "_") {
+        case "plan", "plan_credits": return "套餐积分"
+        case "addon", "add_on", "add_on_credits": return "加购积分"
+        case "shared_addon", "shared_add_on", "shared_add_on_credits": return "共享加购积分"
+        default: return key.isEmpty ? "积分" : key
+        }
+    }
+
+    static func qwenWorkUnitLabel(_ unit: String?) -> String {
+        guard let unit, !unit.isEmpty else { return "积分" }
+        return ["credit", "credits"].contains(unit.lowercased()) ? "积分" : unit
     }
 
     // MARK: - Qoder IDE 卡片
@@ -1830,6 +2038,7 @@ struct PanelView: View {
                 settingsRow("DeepSeek Harness", tint: Theme.deepseekHarness, isOn: $showDeepSeekHarness)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
+                settingsRow("千问办公", tint: Theme.qwenwork, isOn: $showQwenWork)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -1844,9 +2053,21 @@ struct PanelView: View {
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
+            settingsToggleRow("千问办公额度查询", isOn: $qwenWorkQuotaEnabled)
+            Text("默认关闭。开启后，Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。Tokei 不读取或保存登录凭据，需保持千问办公已登录并运行。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)
+            store.refresh()
+        }
+        .onChange(of: qwenWorkQuotaEnabled) { enabled in
+            Self.setQwenWorkQuotaEnabled(enabled)
             store.refresh()
         }
     }
@@ -1857,6 +2078,10 @@ struct PanelView: View {
 
     private static func setGrokLiveQuotaEnabled(_ enabled: Bool) {
         SyncManager.setGrokLiveQuotaEnabled(enabled)
+    }
+
+    private static func setQwenWorkQuotaEnabled(_ enabled: Bool) {
+        SyncManager.setQwenWorkQuotaEnabled(enabled)
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -1871,6 +2096,12 @@ struct PanelView: View {
     static func syncGrokLiveQuotaConfigOnLaunch() {
         let enabled = UserDefaults.standard.object(forKey: "grokLiveQuotaEnabled") as? Bool ?? false
         setGrokLiveQuotaEnabled(enabled)
+    }
+
+    /// 启动时同步千问办公额度开关（默认关）。
+    static func syncQwenWorkQuotaConfigOnLaunch() {
+        let enabled = UserDefaults.standard.object(forKey: "qwenWorkQuotaEnabled") as? Bool ?? false
+        setQwenWorkQuotaEnabled(enabled)
     }
 
     var settingsPricingSection: some View {
@@ -2495,7 +2726,7 @@ struct PanelView: View {
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "deepseek_harness",
-                         "opencode", "qwencode"]
+                         "opencode", "qwencode", "qwenwork"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

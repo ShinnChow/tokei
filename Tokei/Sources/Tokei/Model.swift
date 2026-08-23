@@ -666,6 +666,88 @@ struct TokenUsageRanges: Codable {
 }
 struct TokenUsageStat: Codable { var ranges: TokenUsageRanges }
 
+/// A single quota bucket reported by the QwenWork desktop app.
+/// `total == 0` does not imply that the bucket is empty: some plans expose
+/// only an absolute remaining-credit balance.
+struct QwenWorkQuotaSegment: Codable, Identifiable {
+    var id = ""
+    var kind = ""
+    var total: Double?
+    var used: Double?
+    var remaining: Double?
+    var percentage_used: Double?
+    var unit: String?
+    var renews_at: Int?
+    var expires_at: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        total = try? c.decodeIfPresent(Double.self, forKey: .total)
+        used = try? c.decodeIfPresent(Double.self, forKey: .used)
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        percentage_used = try? c.decodeIfPresent(Double.self, forKey: .percentage_used)
+        unit = try? c.decodeIfPresent(String.self, forKey: .unit)
+        renews_at = try? c.decodeIfPresent(Int.self, forKey: .renews_at)
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+    }
+}
+
+/// A team/shared package is displayed separately and never added to the
+/// personal credit balance.
+struct QwenWorkSharedQuota: Codable {
+    var total: Double?
+    var used: Double?
+    var remaining: Double?
+    var percentage_used: Double?
+    var unit: String?
+    var expires_at: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        total = try? c.decodeIfPresent(Double.self, forKey: .total)
+        used = try? c.decodeIfPresent(Double.self, forKey: .used)
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        percentage_used = try? c.decodeIfPresent(Double.self, forKey: .percentage_used)
+        unit = try? c.decodeIfPresent(String.self, forKey: .unit)
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+    }
+}
+
+struct QwenWorkQuota: Codable {
+    var available = false
+    var remaining: Double?
+    var remaining_pct: Double?
+    var exceeded = false
+    var is_team = false
+    var expires_at: Int?
+    var plan_expiration: Int?
+    var segments: [QwenWorkQuotaSegment] = []
+    var shared: QwenWorkSharedQuota?
+    var source: String?
+    var updated: Int?
+    var stale = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = (try? c.decodeIfPresent(Bool.self, forKey: .available)) ?? false
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        remaining_pct = try? c.decodeIfPresent(Double.self, forKey: .remaining_pct)
+        exceeded = (try? c.decodeIfPresent(Bool.self, forKey: .exceeded)) ?? false
+        is_team = (try? c.decodeIfPresent(Bool.self, forKey: .is_team)) ?? false
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+        plan_expiration = try? c.decodeIfPresent(Int.self, forKey: .plan_expiration)
+        segments = (try? c.decodeIfPresent([QwenWorkQuotaSegment].self, forKey: .segments)) ?? []
+        shared = try? c.decodeIfPresent(QwenWorkSharedQuota.self, forKey: .shared)
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+        updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -683,10 +765,11 @@ struct Usage: Codable {
     var deepseekHarness: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
+    var qwenwork: QwenWorkQuota
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
-        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
+        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode, qwenwork
     }
 
     init(from decoder: Decoder) throws {
@@ -711,10 +794,20 @@ struct Usage: Codable {
         deepseekHarness = try c.decodeIfPresent(TokenUsageStat.self, forKey: .deepseekHarness) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
+        qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
     }
 }
 
 enum Fmt {
+    static func credits(_ n: Double) -> String {
+        if abs(n.rounded() - n) < 0.000_001 {
+            return String(format: "%.0f", n)
+        }
+        return String(format: "%.2f", n)
+            .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\.$", with: "", options: .regularExpression)
+    }
+
     static func human(_ n: Int) -> String {
         let v = Double(n)
         if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) }

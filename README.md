@@ -19,7 +19,7 @@
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
 
 ### 支持的工具
 
@@ -35,6 +35,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
+| **千问办公（QwenWork）** | 套餐与加购积分余额、团队共享资源包 |
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
 
@@ -83,6 +84,8 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **12 款 AI 编�
 - Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Grok 实时额度默认关闭，可选择只读本地日志
+- 千问办公额度默认关闭；开启后仅调用官方桌面端的 `127.0.0.1` MCP，由已运行并登录的千问办公查询官方额度
+- Tokei 不读取或解密千问办公的 `auth-v2.dat`、浏览器 Cookie 或 `.status.json` 账号资料；仅用 `.status.json` 文件元数据使切换账号后的额度缓存失效，也不会自动启动千问办公
 - 其余联网操作仅用于检查/下载更新，以及手动更新模型价格表
 
 ## 快速开始
@@ -148,7 +151,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## 数据来源
 
-所有数据均来自 **本地日志文件**，无网络请求。
+Token、成本和项目统计来自 **本地日志文件**。额度查询仅使用对应工具已有的本机登录态；需联网的额度功能会在下表标明。
 
 | 工具 | 日志路径 |
 |------|----------|
@@ -163,6 +166,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
+| 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP（默认关闭；需客户端运行且已登录） |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 
@@ -170,7 +174,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
 |------|:-----:|:---------:|
-| 支持工具 | 12 | 40+ |
+| 支持工具 | 13 | 40+ |
 | Token 级用量分析 | ✅ | — |
 | 成本估算（317 模型） | ✅ | 部分 |
 | 数据面板（图表 + 热力图） | ✅ | — |
@@ -179,7 +183,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | 多设备同步 | ✅ | — |
 | 年度回顾 | ✅ | — |
 | 防休眠 / 久坐提醒 | ✅ | — |
-| 需要联网 | 否 | 是 |
+| 需要联网 | 仅额度查询、更新等功能 | 是 |
 | 需要登录 | 否 | 是 |
 | 数据来源 | 本地日志 | 远程 API |
 
@@ -319,11 +323,11 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **12 AI coding tools** in real-time — all from local log files, with zero network traffic.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **13 AI tools** in real-time. Usage analytics are local-first; quota checks use each tool's existing local sign-in and may contact its official service.
 
-**Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
+**Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok Build, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qwen Code, Qoder, QoderWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok Build, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qwen Code, QwenWork, Qoder, QoderWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

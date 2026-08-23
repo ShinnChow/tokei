@@ -1,6 +1,6 @@
 # Tokei 计算逻辑
 
-Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有数据纯本地读取,不联网。
+Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度查询按工具使用本地日志或已有的本机登录态；需要联网的查询会明确标注并提供开关。
 
 ---
 
@@ -19,6 +19,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
+| 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
 
 ---
 
@@ -290,6 +291,34 @@ Codex 刷新登录 Token 后立即重试。
 1. 始终优先解析本地日志
 2. 仅当用户开启实时查询时，才请求账单接口覆盖为最新值
 3. 失败时回退到本地日志或短缓存，不报错
+
+### 千问办公（QwenWork）
+
+千问办公与 Qwen Code 是两个独立产品。本功能只读取额度，不参与 Qwen Code 的 token、成本或模型统计。
+
+查询默认**关闭**，可通过设置开启，也可使用环境变量：
+
+- `~/.tokei/config.json` 中 `qwenwork_quota_enabled: true`
+- `TOKEI_QWENWORK_QUOTA=1` 开启；`TOKEI_QWENWORK_QUOTA=0` 强制关闭
+
+开启后，Tokei 读取 `~/.qwenworkcn/mcp-adaptor.config`，并向其中限定为
+`http://127.0.0.1:<port>` 的地址发送 JSON-RPC `POST`：工具固定为 `qw_query`，参数固定为
+`{"key":"qwenwork.usage"}`。千问办公必须正在运行且已登录；本机 MCP 会由千问办公自行请求
+官方额度。Tokei 不读取或解密 `auth-v2.dat`，不读取浏览器 Cookie，也不自动启动客户端。
+为防止退出或切换账号后显示旧额度，Tokei 仅把 `.status.json` 的文件 generation 元数据纳入
+缓存标识，不读取其中的姓名、邮箱等账号资料；接口明确返回不可用时会删除旧额度缓存。
+
+额度口径：
+
+- `segments` 是套餐积分和加购积分的 canonical 明细；`planCredits`、`addOnCredits` alias
+  仅用于个人积分兼容，不能与 `segments` 重复相加；`sharedAddOnCredits` 只作为共享资源包 fallback
+- `aggregateRemainingPercent` 表示**剩余百分比**，允许为 `null`；缺失时展示绝对积分，不反推已用百分比
+- `total=0` 且 `remaining>0` 是合法的未知总额状态，例如 `total=0, remaining=2100` 应显示
+  `2,100` 剩余积分
+- `sharedResourcePackage` 单独展示，不并入个人套餐/加购积分余额
+- 结果使用短缓存降低查询频率；实时查询失败时可显示标记为缓存来源的最近结果
+
+千问办公首版只有绝对积分时不加入以百分比为口径的菜单栏额度源，额度在独立卡片展示。
 
 ### Qoder(credit)
 

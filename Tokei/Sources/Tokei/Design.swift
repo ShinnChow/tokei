@@ -45,6 +45,7 @@ enum Theme {
     static let deepseekHarness = Color(red: 0.18, green: 0.58, blue: 0.94) // 深海蓝
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
+    static let qwenwork = Color(red: 0.24, green: 0.72, blue: 0.68) // 千问青
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16

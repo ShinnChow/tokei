@@ -8,6 +8,8 @@
 # 数据主要读自本地会话日志,不改动任何 CLI；Codex 额度会短缓存查询官方 live usage。
 # Grok 额度默认只读本地 unified.jsonl billing 日志；实时账单接口需显式开启
 # (config grok_live_quota_enabled 或 TOKEI_GROK_LIVE_QUOTA=1)。
+# 千问办公额度同样默认关闭；开启后仅访问官方桌面端的 127.0.0.1 MCP 适配器，
+# 不读取或解密账号凭据 (config qwenwork_quota_enabled 或 TOKEI_QWENWORK_QUOTA=1)。
 # 仅 --update-prices 显式联网更新价格表:
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
@@ -131,6 +133,10 @@ OMP_SESSION_DIR = os.path.expanduser(os.environ.get(
     "OMP_CODING_AGENT_SESSION_DIR", os.path.join(HOME, ".omp", "agent", "sessions")))
 QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("QWEN_HOME", os.path.join(HOME, ".qwen"))))
+QWENWORK_HOME = os.path.abspath(os.path.expanduser(
+    os.environ.get("TOKEI_QWENWORK_HOME", os.path.join(HOME, ".qwenworkcn"))))
+QWENWORK_MCP_CONFIG = os.path.join(QWENWORK_HOME, "mcp-adaptor.config")
+QWENWORK_STATUS = os.path.join(QWENWORK_HOME, ".status.json")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -155,6 +161,7 @@ CODEX_QUOTA_CACHE = _writable_path("codex_quota_cache.json")
 CODEX_RESET_CARDS_CACHE = _writable_path("codex_reset_cards_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
+QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -3645,6 +3652,409 @@ def scan_grok_quota():
     return {}
 
 
+# ---------- 千问办公额度 (官方桌面端本机 MCP；需显式开启) ----------
+# 千问办公负责登录、token 刷新和服务端额度请求。Tokei 只调用它监听在
+# 127.0.0.1 的只读 qwenwork.usage 资源，不读取 auth-v2.dat 或浏览器 Cookie。
+_QWENWORK_QUOTA_TTL = 300
+_QWENWORK_QUOTA_FALLBACK_TTL = 3600
+_QWENWORK_MCP_TIMEOUT = 3
+_QWENWORK_MCP_MAX_CONFIG_BYTES = 16 * 1024
+_QWENWORK_MCP_MAX_RESPONSE_BYTES = 1024 * 1024
+_QWENWORK_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _qwenwork_quota_enabled():
+    """默认关闭；开启后千问办公可能通过自己的登录态访问官方额度接口。"""
+    env = os.environ.get("TOKEI_QWENWORK_QUOTA")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    return bool(_tokei_config().get("qwenwork_quota_enabled"))
+
+
+def _read_qwenwork_mcp_config(path=None):
+    """读取千问办公本机 MCP capability，拒绝宽权限文件和非 loopback URL。"""
+    import stat
+    from urllib.parse import urlsplit
+
+    config_path = path or QWENWORK_MCP_CONFIG
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(config_path, flags)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode)
+                or info.st_size <= 0
+                or info.st_size > _QWENWORK_MCP_MAX_CONFIG_BYTES):
+            return None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return None
+        # x-api-key 可调用适配器的其他工具；只信任当前用户私有的 0600 风格文件。
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = None
+            config = json.load(fh)
+    except Exception:
+        return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    if not isinstance(config, dict):
+        return None
+    url = config.get("url")
+    token = config.get("token")
+    if not isinstance(url, str) or not isinstance(token, str):
+        return None
+    try:
+        parsed = urlsplit(url.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None or parsed.password is not None
+            or port is None or not 1 <= port <= 65535
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+        return None
+    token = token.strip()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", token) is None:
+        return None
+    mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
+    # .status.json 内容含账号资料，Tokei 不读取；仅把其文件 generation 纳入
+    # cache marker，使登录、退出或切换账号后的快照不会沿用旧额度。
+    status_marker = _qwenwork_private_file_marker(QWENWORK_STATUS)
+    marker = f"{info.st_dev}:{info.st_ino}:{mtime_ns}:{port}:{status_marker}"
+    return {"port": port, "token": token, "marker": marker}
+
+
+def _qwenwork_private_file_marker(path):
+    """只读取私有普通文件的元数据 generation，不读取文件内容。"""
+    import stat
+
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "missing"
+    if (not stat.S_ISREG(info.st_mode)
+            or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        return "untrusted"
+    mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
+    return f"{info.st_dev}:{info.st_ino}:{mtime_ns}:{info.st_size}"
+
+
+def _qwenwork_mcp_rpc(config):
+    """固定调用 qwenwork.usage；http.client 不使用代理，也不会跟随重定向。"""
+    import http.client
+
+    request_body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "qw_query",
+            "arguments": {"key": "qwenwork.usage"},
+        },
+    }, separators=(",", ":")).encode("utf-8")
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", config["port"], timeout=_QWENWORK_MCP_TIMEOUT)
+    try:
+        connection.request("POST", "/", body=request_body, headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "User-Agent": "Tokei",
+            "x-api-key": config["token"],
+        })
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = response.read(_QWENWORK_MCP_MAX_RESPONSE_BYTES + 1)
+        if len(payload) > _QWENWORK_MCP_MAX_RESPONSE_BYTES:
+            return None
+        text = payload.decode("utf-8")
+        content_type = (response.getheader("Content-Type") or "").lower()
+        if "text/event-stream" in content_type:
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    candidate = line[5:].strip()
+                    if candidate:
+                        return json.loads(candidate)
+            return None
+        return json.loads(text)
+    except Exception:
+        return None
+    finally:
+        connection.close()
+
+
+def _qwenwork_mcp_data(payload):
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    envelope = result.get("structuredContent")
+    if not isinstance(envelope, dict):
+        # Older MCP clients may expose the same JSON envelope as text content.
+        for item in result.get("content") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            try:
+                candidate = json.loads(item["text"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, dict):
+                envelope = candidate
+                break
+    if not isinstance(envelope, dict) or envelope.get("ok") is False:
+        return None
+    if envelope.get("key") not in (None, "qwenwork.usage"):
+        return None
+    data = envelope.get("data")
+    if isinstance(data, dict):
+        return data
+    # Be tolerant if a future adapter returns the resource body directly.
+    if any(key in envelope for key in ("available", "segments", "planCredits")):
+        return envelope
+    return None
+
+
+def _qwenwork_number(value, *, percent=False):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    upper = 100.0 if percent else 1_000_000_000_000_000.0
+    return min(upper, max(0.0, number))
+
+
+def _qwenwork_epoch(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            return None
+        epoch = float(value)
+        if epoch > 1_000_000_000_000:
+            epoch /= 1000
+        return int(epoch) if 0 < epoch < 253_402_300_800 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return _qwenwork_epoch(float(stripped))
+        except ValueError:
+            return _iso_to_epoch(stripped)
+    return None
+
+
+def _qwenwork_safe_name(value, default):
+    value = str(value or "").strip()
+    return value if _QWENWORK_SAFE_NAME_RE.fullmatch(value) else default
+
+
+def _normalize_qwenwork_segment(item, index, *, default_id=None, default_kind=None):
+    if not isinstance(item, dict):
+        return None
+    segment_id = _qwenwork_safe_name(
+        item.get("id"), default_id or f"segment_{index + 1}")
+    kind = _qwenwork_safe_name(
+        item.get("kind"), default_kind or segment_id)
+    unit = item.get("unit")
+    unit = _qwenwork_safe_name(unit, "") if unit is not None else None
+    if not unit:
+        unit = None
+    total = _qwenwork_number(item.get("total"))
+    percentage_used = _qwenwork_number(
+        item.get("percentageUsed", item.get("percentage")), percent=True)
+    # total=0 means the denominator is unknown in current QwenWork responses.
+    # Keep the absolute balance, but do not turn percentageUsed=0 into a fake 100% remaining bar.
+    if total is None or total <= 0:
+        percentage_used = None
+    out = {
+        "id": segment_id,
+        "kind": kind,
+        "total": total,
+        "used": _qwenwork_number(item.get("used")),
+        "remaining": _qwenwork_number(item.get("remaining")),
+        "percentage_used": percentage_used,
+        "unit": unit,
+        "renews_at": _qwenwork_epoch(item.get("renewsAt", item.get("renews_at"))),
+        "expires_at": _qwenwork_epoch(item.get(
+            "expiresAt", item.get("planExpiration", item.get("expires_at")))),
+    }
+    if all(out.get(key) is None for key in ("total", "used", "remaining", "percentage_used")):
+        return None
+    return out
+
+
+def _normalize_qwenwork_shared(item):
+    if not isinstance(item, dict):
+        return None
+    unit = item.get("unit")
+    unit = _qwenwork_safe_name(unit, "") if unit is not None else None
+    if not unit:
+        unit = None
+    total = _qwenwork_number(
+        item.get("total", item.get("cap", item.get("allowance"))))
+    percentage_used = _qwenwork_number(
+        item.get("percentageUsed", item.get("percentage")), percent=True)
+    if total is None or total <= 0:
+        percentage_used = None
+    out = {
+        "total": total,
+        "used": _qwenwork_number(item.get("used")),
+        "remaining": _qwenwork_number(item.get("remaining")),
+        "percentage_used": percentage_used,
+        "unit": unit,
+        "expires_at": _qwenwork_epoch(item.get("expiresAt", item.get("expires_at"))),
+    }
+    numeric_keys = ("total", "used", "remaining", "percentage_used", "expires_at")
+    return out if any(out.get(key) is not None for key in numeric_keys) else None
+
+
+def _normalize_qwenwork_usage(data, *, updated=None):
+    if not isinstance(data, dict) or data.get("available") is False:
+        return None
+
+    segments = []
+    raw_segments = data.get("segments")
+    if isinstance(raw_segments, list):
+        for index, item in enumerate(raw_segments[:8]):
+            segment = _normalize_qwenwork_segment(item, index)
+            if segment:
+                segments.append(segment)
+
+    # planCredits/addOnCredits are mirrors of segments, never sum both shapes.
+    if not segments:
+        aliases = (
+            ("planCredits", "plan", "plan_credits"),
+            ("addOnCredits", "add_on", "add_on_credits"),
+        )
+        for key, segment_id, kind in aliases:
+            segment = _normalize_qwenwork_segment(
+                data.get(key), len(segments), default_id=segment_id, default_kind=kind)
+            if segment:
+                segments.append(segment)
+
+    remaining_values = []
+    for segment in segments:
+        unit = (segment.get("unit") or "").lower()
+        kind = segment.get("kind") or ""
+        is_credit = (unit in ("credit", "credits")) if unit else "credit" in kind.lower()
+        if segment.get("remaining") is not None and is_credit:
+            remaining_values.append(segment["remaining"])
+    remaining = sum(remaining_values) if remaining_values else None
+    if remaining is None:
+        remaining = _qwenwork_number(data.get("remaining", data.get("balance")))
+
+    remaining_pct = _qwenwork_number(data.get("aggregateRemainingPercent"), percent=True)
+    shared_source = data.get("sharedResourcePackage")
+    if not isinstance(shared_source, dict):
+        shared_source = data.get("sharedAddOnCredits")
+    shared = _normalize_qwenwork_shared(shared_source)
+    if remaining is None and remaining_pct is None and not segments and shared is None:
+        return None
+    return {
+        "available": True,
+        "remaining": remaining,
+        "remaining_pct": remaining_pct,
+        "exceeded": data.get("isQuotaExceeded") is True,
+        "is_team": data.get("isTeamPlan") is True,
+        "expires_at": _qwenwork_epoch(data.get("expiresAt")),
+        "plan_expiration": _qwenwork_epoch(data.get("planExpiration")),
+        "segments": segments,
+        "shared": shared,
+        "source": "mcp",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def _cached_qwenwork_quota(config_marker, max_age, *, stale=False):
+    cached = _load_json(QWENWORK_QUOTA_CACHE, {})
+    if not isinstance(cached, dict) or cached.get("config_marker") != config_marker:
+        return None
+    quota = cached.get("quota")
+    fetched_at = cached.get("fetched_at")
+    if not isinstance(quota, dict) or fetched_at is None:
+        return None
+    try:
+        age = datetime.now().timestamp() - float(fetched_at)
+    except (TypeError, ValueError):
+        return None
+    if age < -60 or age > max_age:
+        return None
+    out = dict(quota)
+    if stale:
+        out["source"] = "cache"
+        out["stale"] = True
+    return out
+
+
+def _save_qwenwork_quota_cache(quota, config_marker):
+    if not isinstance(quota, dict) or not quota.get("available"):
+        return
+    try:
+        _atomic_write_json(QWENWORK_QUOTA_CACHE, {
+            "fetched_at": datetime.now().timestamp(),
+            "config_marker": config_marker,
+            "quota": quota,
+        })
+        os.chmod(QWENWORK_QUOTA_CACHE, 0o600)
+    except Exception:
+        pass
+
+
+def _clear_qwenwork_quota_cache():
+    try:
+        os.remove(QWENWORK_QUOTA_CACHE)
+    except OSError:
+        pass
+
+
+def scan_qwenwork_quota():
+    """读取千问办公官方本机额度资源；不可用时静默降级，不自动启动客户端。"""
+    if not _qwenwork_quota_enabled():
+        return {}
+    config = _read_qwenwork_mcp_config()
+    if not config:
+        return {}
+    cached = _cached_qwenwork_quota(config["marker"], _QWENWORK_QUOTA_TTL)
+    if cached:
+        return cached
+
+    latest_config = config
+    for attempt in range(2):
+        if attempt:
+            latest_config = _read_qwenwork_mcp_config()
+            if not latest_config:
+                break
+        payload = _qwenwork_mcp_rpc(latest_config)
+        data = _qwenwork_mcp_data(payload)
+        if isinstance(data, dict) and data.get("available") is False:
+            _clear_qwenwork_quota_cache()
+            return {}
+        quota = _normalize_qwenwork_usage(data)
+        if quota:
+            _save_qwenwork_quota_cache(quota, latest_config["marker"])
+            return quota
+
+    fallback = _cached_qwenwork_quota(
+        latest_config["marker"], _QWENWORK_QUOTA_FALLBACK_TTL, stale=True)
+    return fallback or {}
+
+
 def scan_grok(bounds, cache=None):
     ledger_touch("grok")
     cache = cache if cache is not None else {"v": _SCAN_CACHE_VERSION}
@@ -6418,6 +6828,8 @@ def compute():
 
     plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
     grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
+    qwenwork_quota = _safe_scan(
+        "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
@@ -6455,6 +6867,7 @@ def compute():
             "q_updated": grok_quota.get("updated"),
             "stale": grok_quota.get("stale"),
         },
+        "qwenwork": qwenwork_quota,
         "qoderwork": {
             "ranges": qwranges,
             "model": qd.get("model"),
