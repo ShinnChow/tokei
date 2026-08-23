@@ -519,11 +519,11 @@ struct PanelView: View {
         }
     }
 
-    // MARK: - Gemini 卡片
+    // MARK: - Gemini / Antigravity 卡片
     @ViewBuilder
     func geminiBlock(_ r: GeminiRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Gemini CLI", tint: Theme.gemini, sessions: r.sessions)
+            cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.cached + r.out + r.thoughts), caption: "\(sel.label) 总量", tint: Theme.gemini)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -1646,7 +1646,7 @@ struct PanelView: View {
                                 GridItem(.flexible(), spacing: 7)], spacing: 7) {
                 settingsRow("Claude", tint: Theme.claude, isOn: $showClaude)
                 settingsRow("Codex", tint: Theme.codex, isOn: $showCodex)
-                settingsRow("Gemini", tint: Theme.gemini, isOn: $showGemini)
+                settingsRow("Gemini / Antigravity", tint: Theme.gemini, isOn: $showGemini)
                 settingsRow("Grok", tint: Theme.grok, isOn: $showGrok)
                 settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
