@@ -2765,17 +2765,23 @@ def _gemini_session_files():
                       if os.path.isfile(path) and not path.endswith("conversation_summaries.db")))
 
 
+_PROTO_VARINT_MAX_BYTES = 10  # protobuf 规范:64 位整数最多 10 个字节
+
+
 def _decode_proto_varint(data, offset):
+    """坏数据不封顶会让 val 长成百万位大整数,每轮 |= 都是 O(n),整体退化成 O(n²)。"""
     val = 0
     shift = 0
-    while offset < len(data):
+    for _ in range(_PROTO_VARINT_MAX_BYTES):
+        if offset >= len(data):
+            break
         b = data[offset]
         offset += 1
         val |= (b & 0x7F) << shift
         if not (b & 0x80):
-            break
+            return val, offset
         shift += 7
-    return val, offset
+    raise ValueError("varint 超过 64 位,当坏数据处理")
 
 
 def _parse_proto_fields(data):
@@ -2784,93 +2790,119 @@ def _parse_proto_fields(data):
     while i < len(data):
         try:
             key, i = _decode_proto_varint(data, i)
+            field_num = key >> 3
+            wire_type = key & 0x7
+            if wire_type == 0:
+                val, i = _decode_proto_varint(data, i)
+            elif wire_type == 2:
+                length, i = _decode_proto_varint(data, i)
+                # 越界不能靠切片静默截短:截出来的碎片会被当成合法子消息继续解析。
+                if length < 0 or i + length > len(data):
+                    break
+                val = data[i:i + length]
+                i += length
+            elif wire_type in (1, 5):
+                width = 8 if wire_type == 1 else 4
+                if i + width > len(data):
+                    break
+                val = data[i:i + width]
+                i += width
+            else:
+                break
         except Exception:
             break
-        field_num = key >> 3
-        wire_type = key & 0x7
-        if wire_type == 0:
-            val, i = _decode_proto_varint(data, i)
-            fields.append((field_num, 0, val))
-        elif wire_type == 1:
-            val = data[i:i + 8]
-            i += 8
-            fields.append((field_num, 1, val))
-        elif wire_type == 2:
-            length, i = _decode_proto_varint(data, i)
-            val = data[i:i + length]
-            i += length
-            fields.append((field_num, 2, val))
-        elif wire_type == 5:
-            val = data[i:i + 4]
-            i += 4
-            fields.append((field_num, 5, val))
-        else:
-            break
+        fields.append((field_num, wire_type, val))
     return fields
+
+
+# gen_metadata.data 的字段号是逆向出来的,没有官方 schema:
+# 1 = 单次生成记录,其中 19=模型名, 4={2:输入(不含缓存), 3:输出, 5:缓存读, 9:思考},
+# 9→4→1 = 生成开始时间(秒)。Google 一改编号这里就会静默解出错数,所以下面做了上界校验。
+_ANTIGRAVITY_MAX_TOKENS = 100_000_000  # 单次生成的 token 上界,超了就是解析错位
+_ANTIGRAVITY_MIN_TS = 1_577_836_800    # 2020-01-01,更早的时间戳必然是错位
+
+
+def _antigravity_gen_step(record):
+    """解一条生成记录 → (model, input, output, cached, thoughts, ts_sec);解不出返回 None。"""
+    model = "unknown"
+    inp = out = cached = thoughts = 0
+    ts_sec = None
+    for sfn, swt, sval in _parse_proto_fields(record):
+        if sfn == 19 and swt == 2:
+            try:
+                model = sval.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        elif sfn == 4 and swt == 2:
+            for tfn, twt, tval in _parse_proto_fields(sval):
+                if twt != 0:
+                    continue
+                if tfn == 2:
+                    inp = tval
+                elif tfn == 3:
+                    out = tval
+                elif tfn == 5:
+                    cached = tval
+                elif tfn == 9:
+                    thoughts = tval
+        elif sfn == 9 and swt == 2:
+            for tfn, twt, tval in _parse_proto_fields(sval):
+                if tfn == 4 and twt == 2:
+                    for stfn, stwt, stval in _parse_proto_fields(tval):
+                        if stfn == 1 and stwt == 0:
+                            ts_sec = stval
+    # 账本是逐日高水位,虚高数字一旦写进去就永久留着且无法纠正 —— 宁可丢也不能记错。
+    if not isinstance(ts_sec, int) or not (_ANTIGRAVITY_MIN_TS <= ts_sec <= 1 << 34):
+        return None
+    if max(inp, out, cached, thoughts) > _ANTIGRAVITY_MAX_TOKENS:
+        return None
+    if not model or len(model) > 120 or not model.isprintable():
+        model = "unknown"
+    return model, inp, out, cached, thoughts, ts_sec
 
 
 def _load_antigravity_db(path):
     """从 Antigravity conversations/*.db 的 gen_metadata 表解析逐步 token 用量"""
     events = []
     max_ts = ""
+    conn = None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        cursor = conn.cursor()
-        cursor.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC")
-        for idx, data in cursor.fetchall():
-            if not data:
-                continue
-            top = _parse_proto_fields(data)
-            for fn, wt, val in top:
-                if fn == 1 and wt == 2:
-                    sub1 = _parse_proto_fields(val)
-                    model = "unknown"
-                    inp = 0
-                    out = 0
-                    cached = 0
-                    thoughts = 0
-                    ts_sec = None
-                    for sfn, swt, sval in sub1:
-                        if sfn == 19 and swt == 2:
-                            try:
-                                model = sval.decode("utf-8")
-                            except Exception:
-                                pass
-                        elif sfn == 4 and swt == 2:
-                            for tfn, twt, tval in _parse_proto_fields(sval):
-                                if twt == 0:
-                                    if tfn == 2:
-                                        inp = tval
-                                    elif tfn == 3:
-                                        out = tval
-                                    elif tfn == 5:
-                                        cached = tval
-                                    elif tfn == 9:
-                                        thoughts = tval
-                        elif sfn == 9 and swt == 2:
-                            for tfn, twt, tval in _parse_proto_fields(sval):
-                                if tfn == 4 and twt == 2:
-                                    for stfn, stwt, stval in _parse_proto_fields(tval):
-                                        if stfn == 1 and stwt == 0:
-                                            ts_sec = stval
-                    if ts_sec:
-                        iso_ts = datetime.fromtimestamp(ts_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                        if iso_ts > max_ts:
-                            max_ts = iso_ts
-                        events.append({
-                            "id": f"{os.path.basename(path)}:{idx}",
-                            "timestamp": iso_ts,
-                            "model": model,
-                            "tokens": {
-                                "input": inp + cached,
-                                "output": out,
-                                "cached": cached,
-                                "thoughts": thoughts,
-                            },
-                        })
-        conn.close()
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+        rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
     except Exception:
         return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    for idx, data in rows:
+        if not data:
+            continue
+        for fn, wt, val in _parse_proto_fields(data):
+            if fn != 1 or wt != 2:
+                continue
+            # 逐条兜异常:一行坏数据不该把同一个库里的好数据一起带走。
+            try:
+                step = _antigravity_gen_step(val)
+            except Exception:
+                step = None
+            if step is None:
+                continue
+            model, inp, out, cached, thoughts, ts_sec = step
+            iso_ts = datetime.fromtimestamp(ts_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if iso_ts > max_ts:
+                max_ts = iso_ts
+            events.append({
+                "id": f"{os.path.basename(path)}:{idx}",
+                "timestamp": iso_ts,
+                "model": model,
+                "tokens": {
+                    "input": inp + cached,
+                    "output": out,
+                    "cached": cached,
+                    "thoughts": thoughts,
+                },
+            })
 
     if not events:
         return None
@@ -2995,7 +3027,9 @@ def scan_gemini(bounds, cache):
             stat = os.stat(path)
         except OSError:
             continue
-        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        # SQLite 的新数据可能全在 -wal 里,主库 mtime/size 一动不动 —— 只看主库会永不刷新。
+        signature = (_sqlite_signature(path) if path.endswith(".db")
+                     else f"{stat.st_mtime_ns}:{stat.st_size}")
         entry = fc.get(path)
         if entry and entry.get("sig") == signature:
             continue

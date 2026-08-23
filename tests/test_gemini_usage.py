@@ -1,4 +1,8 @@
 import json
+import os
+import random
+import shutil
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -191,6 +195,99 @@ class GeminiUsageTests(unittest.TestCase):
             self.assertEqual(usage["sessions"], {"session-12345"})
             self.assertEqual(cached_res["ranges"]["all"]["in"], 2700)
             self.assertTrue(cache["_dirty"])
+
+
+class AntigravityRobustnessTests(unittest.TestCase):
+    """Antigravity 的 .db 是二进制 + 逆向字段号,坏数据必须挡在账本之外。"""
+
+    @staticmethod
+    def _varint(val):
+        out = bytearray()
+        while True:
+            b = val & 0x7F
+            val >>= 7
+            if val:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                break
+        return bytes(out)
+
+    @classmethod
+    def _field(cls, num, wire, val):
+        key = cls._varint((num << 3) | wire)
+        if wire == 0:
+            return key + cls._varint(val)
+        if isinstance(val, str):
+            val = val.encode("utf-8")
+        return key + cls._varint(len(val)) + val
+
+    @classmethod
+    def _step(cls, ts_sec, inp=100, out=10, cached=900, thoughts=5, model="gemini-3-pro"):
+        tokens = (cls._field(2, 0, inp) + cls._field(3, 0, out)
+                  + cls._field(5, 0, cached) + cls._field(9, 0, thoughts))
+        return cls._field(1, 2, cls._field(19, 2, model)
+                          + cls._field(4, 2, tokens)
+                          + cls._field(9, 2, cls._field(4, 2, cls._field(1, 0, ts_sec))))
+
+    def _write_db(self, blobs, dirname="conv"):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, True))
+        directory = root / dirname
+        directory.mkdir(parents=True)
+        path = directory / "conv.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB)")
+        for idx, blob in enumerate(blobs):
+            conn.execute("INSERT INTO gen_metadata VALUES (?, ?)", (idx, blob))
+        conn.commit()
+        conn.close()
+        return str(path)
+
+    def test_oversized_varint_is_rejected_instead_of_hanging(self):
+        # 不封顶时 val 会长成百万位大整数,O(n²) 能把 30 秒一轮的采集器拖死。
+        with self.assertRaises(ValueError):
+            USAGE._decode_proto_varint(b"\xff" * 200_000, 0)
+
+    def test_random_bytes_never_become_usage_events(self):
+        random.seed(7)
+        for _ in range(200):
+            blob = bytes(random.getrandbits(8) for _ in range(64))
+            self.assertIsNone(USAGE._antigravity_gen_step(blob))
+
+    def test_one_bad_row_does_not_discard_the_whole_database(self):
+        path = self._write_db([self._step(1780000000), self._step(10 ** 18)])
+        parsed = USAGE._load_antigravity_db(path)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed["events"]), 1)
+
+    def test_question_mark_in_path_cannot_override_read_only_mode(self):
+        # f"file:{path}?mode=ro" 会被路径里的 ? 截断,mode 可被改成 rwc。
+        path = self._write_db([self._step(1780000000)], dirname="proj?mode=rwc&x=")
+        parsed = USAGE._load_antigravity_db(path)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed["events"]), 1)
+
+    def test_db_cache_signature_covers_the_wal_file(self):
+        path = self._write_db([self._step(1780000000)])
+        conn = sqlite3.connect(path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("INSERT INTO gen_metadata VALUES (1, ?)", (self._step(1780000100),))
+        conn.commit()
+
+        isolate_ledger(self)
+        old_dir, old_dirs = USAGE.GEMINI_DIR, USAGE.GEMINI_DIRS
+        self.addCleanup(lambda: setattr(USAGE, "GEMINI_DIR", old_dir))
+        self.addCleanup(lambda: setattr(USAGE, "GEMINI_DIRS", old_dirs))
+        USAGE.GEMINI_DIR = os.path.dirname(path)
+        USAGE.GEMINI_DIRS = [os.path.dirname(path)]
+        cache = {"v": USAGE._SCAN_CACHE_VERSION}
+        USAGE.scan_gemini(USAGE.range_bounds(), cache)
+        conn.close()
+
+        signature = cache["gemini"][os.path.realpath(path)]["sig"]
+        # 新数据可能整段落在 -wal 里,签名不含它就等于「文件永远没变」→ 用量冻住。
+        self.assertIn("-wal", signature)
 
 
 if __name__ == "__main__":
