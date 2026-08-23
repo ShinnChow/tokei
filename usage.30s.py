@@ -84,6 +84,7 @@ CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_ARCHIVED_DIR = os.path.join(HOME, ".codex", "archived_sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
+CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
 ANTIGRAVITY_DIR = os.path.join(HOME, ".gemini", "antigravity-cli", "conversations")
 GEMINI_DIRS = _path_candidates(
@@ -1384,6 +1385,49 @@ def _decode_jwt_claims(token):
         return {}
 
 
+def _codex_config():
+    """→ {"model_provider": str|None, "model_providers": [名字]};读不到返回空。
+
+    tomllib 是 3.11+ 才有的,而没装 Homebrew Python 的机器会落到 /usr/bin/python3
+    (macOS 自带 3.9),模块级 import 会让整个脚本崩掉 —— 所以惰性导入 + 最小回退。
+    """
+    try:
+        with open(CODEX_CONFIG, "rb") as f:
+            raw = f.read(64 * 1024)
+    except OSError:
+        return {}
+    try:
+        import tomllib
+    except ImportError:
+        # 3.9 回退:只认顶层 model_provider = "x" 和 [model_providers.x] 段名。
+        text = raw.decode("utf-8", errors="ignore")
+        hit = re.search(r'^\s*model_provider\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        return {
+            "model_provider": hit.group(1) if hit else None,
+            "model_providers": re.findall(
+                r'^\s*\[\s*model_providers\.([^\]\s.]+)', text, re.M),
+        }
+    try:
+        data = tomllib.loads(raw.decode("utf-8", errors="ignore")) or {}
+    except Exception:
+        return {}
+    provider = data.get("model_provider")
+    return {
+        "model_provider": provider if isinstance(provider, str) else None,
+        "model_providers": list((data.get("model_providers") or {}).keys()),
+    }
+
+
+def _codex_is_custom_provider():
+    """True 表示 Codex 已切到非 OpenAI 的 provider(cc Switch 之类)。
+
+    只认显式声明:光有 [model_providers.x] 段、但没把 model_provider 指过去的用户
+    仍在用官方额度,误判会把他们的额度卡整块藏掉。
+    """
+    provider = _codex_config().get("model_provider")
+    return bool(provider) and provider != "openai"
+
+
 def _codex_auth_context(auth):
     if not isinstance(auth, dict):
         return {}
@@ -1423,6 +1467,20 @@ def _codex_auth_context(auth):
 def fetch_codex_live_limits():
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return None
+    # When the user has switched to a third-party provider (cc Switch, etc.),
+    # the official OpenAI quota endpoint is no longer relevant. Skip it and
+    # clear any stale cached official quota so the dashboard falls back to
+    # showing only token usage/cost.
+    if _codex_is_custom_provider():
+        try:
+            if os.path.exists(CODEX_QUOTA_CACHE):
+                os.remove(CODEX_QUOTA_CACHE)
+        except Exception:
+            pass
+        return None
+    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
+    if cached:
+        return cached
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
     access_token = auth_context.get("access_token")
@@ -1567,6 +1625,14 @@ def _save_codex_reset_cards_state(state):
 def fetch_codex_reset_cards(now_epoch=None):
     """Return available reset-card expirations with a persistent low-frequency cache."""
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
+        return {}
+    # Reset cards are an OpenAI-account concept; ignore them for third-party providers.
+    if _codex_is_custom_provider():
+        try:
+            if os.path.exists(CODEX_RESET_CARDS_CACHE):
+                os.remove(CODEX_RESET_CARDS_CACHE)
+        except Exception:
+            pass
         return {}
     now_epoch = int(datetime.now().timestamp()) if now_epoch is None else int(now_epoch)
     auth = _load_json(CODEX_AUTH, {})
@@ -2679,6 +2745,12 @@ def scan_codex(bounds, cache):
         "p5": _codex_used_since(merged_days, slots["r5"]),
         "pw": _codex_used_since(merged_days, slots["rw"]),
     }
+
+    # For third-party providers the official OpenAI quota is not meaningful,
+    # and stale limits from older sessions must not be shown.
+    if _codex_is_custom_provider():
+        latest_limits = None
+        plan_type = None
 
     cur_total = None
     if cur_file:
