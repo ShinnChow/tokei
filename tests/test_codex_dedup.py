@@ -175,7 +175,7 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(session_id, "child")
         self.assertEqual(parent_id, "parent")
 
-    def token_count(self, ts, total, last, ordinal=None):
+    def token_count(self, ts, total, last, ordinal=None, rate_limits=None):
         record = {"timestamp": ts}
         if ordinal is not None:
             record["ordinal"] = ordinal
@@ -199,6 +199,8 @@ class CodexScanDedupTests(unittest.TestCase):
                 },
             },
         })
+        if rate_limits is not None:
+            record["payload"]["rate_limits"] = rate_limits
         return json.dumps(record)
 
     def turn_context(self, ts, model, ordinal=None):
@@ -257,6 +259,41 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
+    def test_scan_ignores_runtime_quota_label_for_model_attribution(self):
+        # rate_limits.limit_name 是额度/路由名，不是用户选的模型，
+        # 不能凭空造出一个模型桶。来自 PR #51 的回归用例。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-runtime-label.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("runtime-label"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.5"),
+                self.token_count(
+                    "2024-01-08T00:01:00Z", (100, 80, 10, 4), (100, 80, 10, 4),
+                    rate_limits={"limit_name": "GPT-5.3-Codex-Spark"},
+                ),
+            ]) + "\n", encoding="utf-8")
+            day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+            bounds = {
+                "today": day, "yesterday": day - timedelta(days=1), "week": day,
+                "last_week": day - timedelta(days=7), "last_week_end": day,
+                "month": day.replace(day=1), "year": day.replace(month=1, day=1),
+            }
+            old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
+            USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
+            try:
+                with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                    result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
+            finally:
+                USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
+
+        models = result["ranges"]["all"]["models"]
+        self.assertEqual(sorted(models), ["openai/gpt-5.5"])
+        self.assertEqual(models["openai/gpt-5.5"]["in"], 20)
+        self.assertEqual(models["openai/gpt-5.5"]["cr"], 80)
 
     def test_scan_mixes_legacy_and_ordinal_records_with_model_attribution(self):
         with tempfile.TemporaryDirectory() as tmp:
