@@ -189,26 +189,58 @@ class KimiCodeScanTests(unittest.TestCase):
             self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour],
                              USAGE.token_total(entry["days"][now.date().isoformat()]))
 
-    def test_agent_wires_exclude_root_usage_mirror(self):
+    def _write_root_wire(self, session_dir, records):
+        (session_dir / "wire.jsonl").write_text("\n".join(json.dumps(record) for record in [
+            {"type": "metadata", "protocol_version": "1.5"}, *records
+        ]) + "\n", encoding="utf-8")
+
+    def _agent_records(self, wires):
+        records = []
+        for wire in wires:
+            for line in wire.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if record.get("type") == "usage.record":
+                    records.append(record)
+        return records
+
+    def test_root_wire_mirroring_agent_records_is_counted_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             wires, _, _ = self.create_modern_session(tmp)
             session_dir = wires[0].parents[2]
-            root_wire = session_dir / "wire.jsonl"
-            root_wire.write_text("\n".join(json.dumps(record) for record in [
-                {"type": "metadata", "protocol_version": "1.5"},
-                {
-                    "type": "usage.record",
-                    "time": int(datetime.now().timestamp() * 1000),
-                    "usageScope": "turn",
-                    "model": "moonshot/kimi-k3",
-                    "usage": {"inputOther": 9999, "output": 9999},
-                },
-            ]) + "\n", encoding="utf-8")
-
+            self._write_root_wire(session_dir, self._agent_records(wires))
             result, cache = self.scan(tmp)
 
-        self.assertEqual(set(cache["kimicode"]), {str(wire) for wire in wires})
+        # 根 wire 进了缓存,但每条记录都被 agent wire 抵扣掉,总量不变。
+        self.assertIn(str(session_dir / "wire.jsonl"), cache["kimicode"])
         self.assertEqual(USAGE.token_total(result["ranges"]["all"]), 230)
+
+    def test_root_wire_with_own_records_is_not_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wires, _, _ = self.create_modern_session(tmp)
+            session_dir = wires[0].parents[2]
+            mirrored = self._agent_records(wires)
+            unique = dict(mirrored[0], usage={"inputOther": 700, "output": 77})
+            self._write_root_wire(session_dir, [*mirrored, unique])
+            result, _ = self.scan(tmp)
+
+        # 镜像那几条抵扣掉,根 wire 独有的 777 仍要计入。
+        self.assertEqual(USAGE.token_total(result["ranges"]["all"]), 230 + 777)
+
+    def test_root_wire_rescanned_when_agent_wires_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wires, _, _ = self.create_modern_session(tmp)
+            session_dir = wires[0].parents[2]
+            mirrored = self._agent_records(wires)
+            self._write_root_wire(session_dir, mirrored)
+            first, cache = self.scan(tmp)
+            self.assertEqual(USAGE.token_total(first["ranges"]["all"]), 230)
+
+            # agent wire 被清空后,根 wire 的镜像记录就是唯一来源,必须重算。
+            wires[0].write_text(json.dumps(
+                {"type": "metadata", "protocol_version": "1.5"}) + "\n", encoding="utf-8")
+            second, _ = self.scan(tmp, cache=cache)
+
+        self.assertEqual(USAGE.token_total(second["ranges"]["all"]), 230)
 
     def test_ledger_preserves_usage_sessions_and_projects_after_wire_cleanup(self):
         ledger = {"v": USAGE._LEDGER_VERSION, "tools": {}}

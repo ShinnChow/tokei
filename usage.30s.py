@@ -6640,7 +6640,7 @@ def scan_qwencode(bounds, cache):
 # protocol 1 使用主 wire 中的 StatusUpdate/SubagentEvent；protocol 1.5 把每个
 # Agent 的 usage.record 独立写入 agents/*/wire.jsonl。两者都只读 session 目录，
 # 不扫描 server/events 镜像，避免重复累计。
-_KIMI_PARSER_VERSION = 2
+_KIMI_PARSER_VERSION = 3
 
 
 def _kimi_roots():
@@ -6664,25 +6664,60 @@ def _kimi_roots():
     return roots
 
 
-def _kimi_wire_files():
-    files = set()
+def _kimi_wire_groups():
+    """按会话产出 (agent_wires, root_wire);定深有界遍历,不碰 server/events 等镜像目录。
+
+    protocol 1 只写会话根 wire.jsonl,protocol 1.5 写 agents/<agent>/wire.jsonl。
+    过渡版本可能两者并存,所以两类都要交给上层,由记录级去重决定谁算谁不算。"""
+    groups = []
     for root in _kimi_roots():
         sessions_dir = os.path.join(root, "sessions")
         for session_dir in glob.glob(os.path.join(sessions_dir, "*", "*")):
             if not os.path.isdir(session_dir):
                 continue
-            # protocol 1.5 writes authoritative per-Agent usage.record files. Some
-            # transitional versions may also leave a root wire mirror; selecting
-            # both would count the same call twice. Root wire is protocol 1 fallback.
-            agent_wires = glob.glob(os.path.join(
-                session_dir, "agents", "*", "wire.jsonl"))
-            if agent_wires:
-                files.update(agent_wires)
-                continue
+            agent_wires = sorted(os.path.abspath(path) for path in glob.glob(
+                os.path.join(session_dir, "agents", "*", "wire.jsonl")))
             root_wire = os.path.join(session_dir, "wire.jsonl")
-            if os.path.isfile(root_wire):
-                files.add(root_wire)
-    return sorted(os.path.abspath(path) for path in files)
+            root_wire = os.path.abspath(root_wire) if os.path.isfile(root_wire) else None
+            if agent_wires or root_wire:
+                groups.append((agent_wires, root_wire))
+    return groups
+
+
+def _kimi_wire_files(groups=None):
+    files = set()
+    for agent_wires, root_wire in _kimi_wire_groups() if groups is None else groups:
+        files.update(agent_wires)
+        if root_wire:
+            files.add(root_wire)
+    return sorted(files)
+
+
+def _kimi_mirror_sources(groups):
+    """→ {根 wire: (同会话的 agent wire...)},只含两者并存的会话。"""
+    return {root_wire: tuple(agent_wires)
+            for agent_wires, root_wire in groups
+            if root_wire and agent_wires}
+
+
+def _kimi_group_signature(paths):
+    parts = []
+    for path in paths:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            parts.append(f"{path}:-")
+            continue
+        parts.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _kimi_record_counts(paths):
+    """把这些 wire 里每条记录的去重键计成多重集,用作根 wire 的排除表。"""
+    counts = {}
+    for path in paths:
+        _scan_kimi_wire(path, seen=counts)
+    return counts
 
 
 def _kimi_project_map():
@@ -6764,9 +6799,17 @@ def _kimi_datetime(record, key):
         return parsed.astimezone() if parsed is not None else None
 
 
-def _scan_kimi_wire(path):
+def _scan_kimi_wire(path, exclude=None, seen=None):
+    """exclude:记录键多重集,命中就跳过并抵扣(根 wire 去掉 agent wire 的镜像)。
+    seen:传进来就把本文件的记录键计进去,供上层构造 exclude。
+
+    键只在同一种记录形态内可比:protocol 1.5 的 usage.record 没有 id,只能按
+    时刻+模型+四个 token 值定身份;protocol 1 有 message_id 就用它。跨形态的
+    镜像(根 wire 是 protocol 1、agent wire 是 1.5)认不出来,不在此列。"""
     days = {}
     seen_messages = set()
+    # 绝大多数会话没有根 wire 镜像,这时一条记录键都不用建。
+    track = exclude is not None or seen is not None
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
@@ -6793,6 +6836,15 @@ def _scan_kimi_wire(path):
                     model = record.get("model")
                     if not isinstance(model, str) or not model.strip():
                         model = None
+                    if track:
+                        key = ("u", round(dt.timestamp() * 1000), model, inp, out, cr, cw)
+                        if exclude:
+                            left = exclude.get(key, 0)
+                            if left > 0:
+                                exclude[key] = left - 1
+                                continue
+                        if seen is not None:
+                            seen[key] = seen.get(key, 0) + 1
                     day = days.setdefault(dt.date().isoformat(), _empty_token_day())
                     _add_token_usage(day, inp, out, cr, cw, model=model)
                     day["hours"][dt.hour] += inp + out + cr + cw
@@ -6812,12 +6864,24 @@ def _scan_kimi_wire(path):
                         if dedup_key in seen_messages:
                             continue
                         seen_messages.add(dedup_key)
+                    else:
+                        message_id = None
                     inp = _kimi_token(usage.get("input_other"))
                     out = _kimi_token(usage.get("output"))
                     cr = _kimi_token(usage.get("input_cache_read"))
                     cw = _kimi_token(usage.get("input_cache_creation"))
                     if inp + out + cr + cw == 0:
                         continue
+                    if track:
+                        key = (("m", scope, message_id) if message_id else
+                               ("t", round(dt.timestamp() * 1000), scope, inp, out, cr, cw))
+                        if exclude:
+                            left = exclude.get(key, 0)
+                            if left > 0:
+                                exclude[key] = left - 1
+                                continue
+                        if seen is not None:
+                            seen[key] = seen.get(key, 0) + 1
                     day = days.setdefault(dt.date().isoformat(), _empty_token_day())
                     _add_token_usage(day, inp, out, cr, cw)
                     day["hours"][dt.hour] += inp + out + cr + cw
@@ -6830,13 +6894,15 @@ def scan_kimicode(bounds, cache):
     ledger_touch("kimicode")
     fc = cache.setdefault("kimicode", {})
     B = _empty_token_ranges()
-    files = _kimi_wire_files()
+    groups = _kimi_wire_groups()
+    files = _kimi_wire_files(groups)
     if not files:
         if fc:
             fc.clear()
             cache["_dirty"] = True
 
     projects = _kimi_project_map()
+    mirrors = _kimi_mirror_sources(groups)
     stale = set(fc)
     changed = False
     for path in files:
@@ -6846,13 +6912,18 @@ def scan_kimicode(bounds, cache):
         except OSError:
             continue
         signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        mirror_of = mirrors.get(path)
+        if mirror_of:
+            # 排除表来自 agent wire,它们一变根 wire 就得重算,否则镜像抵扣会错位。
+            signature = f"{signature}:{_kimi_group_signature(mirror_of)}"
         entry = fc.get(path)
         context = _kimi_wire_context(path, projects)
         if (not isinstance(entry, dict) or entry.get("sig") != signature
                 or entry.get("parser_version") != _KIMI_PARSER_VERSION):
             fc[path] = {
                 "sig": signature,
-                "days": _scan_kimi_wire(path),
+                "days": _scan_kimi_wire(
+                    path, exclude=_kimi_record_counts(mirror_of) if mirror_of else None),
                 "sid": context["sid"],
                 "proj": context["proj"],
                 "agent": context["agent"],
