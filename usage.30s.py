@@ -8972,6 +8972,7 @@ _QUOTA_SELF_DEVICE = "本机"
 _QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")
 # resets_in_seconds 是整秒截断的,同一个锚点读出来会有几秒抖动。
 _QUOTA_ANCHOR_JITTER = 120
+_QUOTA_CYCLE_MIN_USED_PCT = 2
 # 有周额度窗口的三个工具 → 日表里的短键。
 _QUOTA_TOOLS = (("claude", "c"), ("codex", "x"), ("grok", "g"))
 
@@ -9225,17 +9226,42 @@ def _save_quota_anchors(anchors):
                 pass
 
 
-def _record_quota_anchor(anchors, tool, reset, used, now):
-    """记下一次额度读数。同一个锚点只留一条,used 取见过的最大值。"""
+def _record_quota_anchor(anchors, tool, reset, used, now, confirmed_reset=False):
+    """记下一次额度读数。同一个锚点只留一条,used 取见过的最大值。
+
+    额度从有消耗的旧窗口回到 0%,同时 reset 前移到新窗口,已经足以确认提前重置。
+    后续空闲时 reset 继续漂移不会连开新周期:只有紧邻的上一锚点有真实消耗时
+    才确认这次 0% 重置。
+    """
     used = float(used or 0)
     rows = anchors.setdefault(tool, [])
+    previous = [
+        row for row in rows
+        if int(row.get("reset", 0)) < reset - _QUOTA_ANCHOR_JITTER
+    ]
+    latest_previous = max(previous, key=lambda row: int(row.get("reset", 0)), default=None)
+    confirmed_reset = bool(
+        confirmed_reset or
+        used >= _QUOTA_CYCLE_MIN_USED_PCT or
+        (latest_previous and
+         latest_previous.get("max_used", 0) >= _QUOTA_CYCLE_MIN_USED_PCT)
+    )
     for row in rows:
         if abs(int(row.get("reset", 0)) - reset) <= _QUOTA_ANCHOR_JITTER:
-            changed = used > row.get("max_used", 0) or now > row.get("last_seen", 0)
+            changed = (
+                used > row.get("max_used", 0) or
+                now > row.get("last_seen", 0) or
+                (confirmed_reset and not row.get("confirmed_reset"))
+            )
             row["max_used"] = max(row.get("max_used", 0), used)
             row["last_seen"] = max(row.get("last_seen", 0), now)
+            if confirmed_reset:
+                row["confirmed_reset"] = True
             return changed
-    rows.append({"reset": reset, "first_seen": now, "last_seen": now, "max_used": used})
+    row = {"reset": reset, "first_seen": now, "last_seen": now, "max_used": used}
+    if confirmed_reset:
+        row["confirmed_reset"] = True
+    rows.append(row)
     return True
 
 
@@ -9259,7 +9285,8 @@ def _merge_quota_anchors(anchors, incoming):
             _record_quota_anchor(
                 anchors, tool, int(reset),
                 used if isinstance(used, (int, float)) else 0,
-                int(seen) if isinstance(seen, (int, float)) else 0)
+                int(seen) if isinstance(seen, (int, float)) else 0,
+                confirmed_reset=row.get("confirmed_reset") is True)
     return anchors
 
 
@@ -9270,8 +9297,13 @@ def _quota_anchor_cycles(anchors, tool, span, limit, now):
     照观测顺序切会切出负时长的区间。排序后每段时长天然为正。
     """
     rows = sorted(anchors.get(tool) or [], key=lambda r: int(r.get("reset", 0)))
-    # 窗口空着的时候 reset 会一直跟着 now+7d 漂,那不是真周期,只有用过才算。
-    rows = [r for r in rows if r.get("max_used", 0) >= 2] or rows[-1:]
+    # 窗口空着的时候 reset 会一直跟着 now+7d 漂,那不是真周期。真实消耗和
+    # 「旧窗口有消耗后回到 0%」两种证据都能确认周期;没有证据时只展示最新读数。
+    rows = [
+        row for row in rows
+        if row.get("max_used", 0) >= _QUOTA_CYCLE_MIN_USED_PCT or
+        row.get("confirmed_reset") is True
+    ] or rows[-1:]
 
     cycles = []
     for index, row in enumerate(rows):
