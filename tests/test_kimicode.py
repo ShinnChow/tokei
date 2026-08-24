@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
@@ -187,6 +188,50 @@ class KimiCodeScanTests(unittest.TestCase):
             self.assertEqual(entry["parser_version"], USAGE._KIMI_PARSER_VERSION)
             self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour],
                              USAGE.token_total(entry["days"][now.date().isoformat()]))
+
+    def test_agent_wires_exclude_root_usage_mirror(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wires, _, _ = self.create_modern_session(tmp)
+            session_dir = wires[0].parents[2]
+            root_wire = session_dir / "wire.jsonl"
+            root_wire.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "metadata", "protocol_version": "1.5"},
+                {
+                    "type": "usage.record",
+                    "time": int(datetime.now().timestamp() * 1000),
+                    "usageScope": "turn",
+                    "model": "moonshot/kimi-k3",
+                    "usage": {"inputOther": 9999, "output": 9999},
+                },
+            ]) + "\n", encoding="utf-8")
+
+            result, cache = self.scan(tmp)
+
+        self.assertEqual(set(cache["kimicode"]), {str(wire) for wire in wires})
+        self.assertEqual(USAGE.token_total(result["ranges"]["all"]), 230)
+
+    def test_ledger_preserves_usage_sessions_and_projects_after_wire_cleanup(self):
+        ledger = {"v": USAGE._LEDGER_VERSION, "tools": {}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(USAGE, "_load_ledger_from_disk", return_value=ledger):
+            _, _, project = self.create_modern_session(tmp)
+            first, cache = self.scan(tmp)
+            first_usage = first["ranges"]["all"]
+
+            stored = USAGE._load_ledger()["tools"]["kimicode"]
+            self.assertEqual(len(stored), 1)
+            stored_day = next(iter(stored.values()))
+            self.assertEqual(stored_day["sessions"], ["session-modern"])
+            self.assertEqual(stored_day["projects"], [project])
+
+            shutil.rmtree(Path(tmp) / "sessions")
+            second, cache = self.scan(tmp, cache=cache)
+
+        second_usage = second["ranges"]["all"]
+        self.assertEqual(USAGE.token_total(second_usage), USAGE.token_total(first_usage))
+        self.assertEqual(second_usage["sessions"], {"session-modern"})
+        self.assertEqual(cache["kimicode"], {})
+        self.assertIn("kimicode", ledger["tools"])
 
     def test_parser_upgrade_rescans_unchanged_modern_wires(self):
         with tempfile.TemporaryDirectory() as tmp:
