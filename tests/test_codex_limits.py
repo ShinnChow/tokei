@@ -480,15 +480,24 @@ class CodexCustomProviderTests(unittest.TestCase):
             self.assertIsNone(USAGE.fetch_codex_live_limits())
         self.assertFalse(self.quota_cache_path.exists())
 
-    def test_reset_cards_skipped_for_custom_provider(self):
+    def test_reset_cards_survive_for_custom_provider(self):
+        # 重置卡挂在 OpenAI 账号上，临时切到第三方中转不会让卡消失；
+        # 按 provider 屏蔽会既藏掉卡、又删掉本地缓存。
         self._write_config('model_provider = "custom"\n')
+        now = 1_785_000_000
+        auth_context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
         self.reset_cards_cache_path.write_text(json.dumps({
-            "account_key": "x", "auth_key": "y", "cards": {"count": 1, "expires": [], "updated": 0}
+            "account_key": auth_context["account_key"],
+            "auth_key": auth_context["auth_key"],
+            "next_attempt_at": now + 3600,
+            "cards": {"count": 1, "expires": [now + 86400], "updated": now - 60},
         }))
         opener = mock.Mock(side_effect=AssertionError("should not call API"))
         with mock.patch("urllib.request.urlopen", opener):
-            self.assertEqual(USAGE.fetch_codex_reset_cards(now_epoch=1_785_000_000), {})
-        self.assertFalse(self.reset_cards_cache_path.exists())
+            cards = USAGE.fetch_codex_reset_cards(now_epoch=now)
+        self.assertEqual(cards["count"], 1)
+        self.assertEqual(cards["expires"], [now + 86400])
+        self.assertTrue(self.reset_cards_cache_path.exists())
 
     def test_iter_records_parses_token_count_with_ordinal_field(self):
         """Custom-provider Codex logs insert an 'ordinal' field between timestamp and type."""

@@ -1275,7 +1275,9 @@ def _claude_usage(line, want_dt=False):
 
 
 # ---------- Codex ----------
-_CODEX_QUOTA_TTL = 30
+# TTL 曾等于 App 的 30s 刷新间隔,缓存每轮刚好过期 —— 等于每次刷新都真打一次官方
+# 接口(约 2880 次/天)。额度对应的是周窗口,变化很慢,拉长到 5 分钟没有感知差别。
+_CODEX_QUOTA_TTL = 300
 _CODEX_QUOTA_FALLBACK_TTL = 300
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
@@ -1635,14 +1637,8 @@ def fetch_codex_reset_cards(now_epoch=None):
     """Return available reset-card expirations with a persistent low-frequency cache."""
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return {}
-    # Reset cards are an OpenAI-account concept; ignore them for third-party providers.
-    if _codex_is_custom_provider():
-        try:
-            if os.path.exists(CODEX_RESET_CARDS_CACHE):
-                os.remove(CODEX_RESET_CARDS_CACHE)
-        except Exception:
-            pass
-        return {}
+    # 重置卡是 OpenAI 账号级资产,不随 CLI 当前指向的 provider 变化 —— 临时切到
+    # 第三方中转的人手上那几张卡还在,切回来就要用,所以这里不按 provider 屏蔽。
     now_epoch = int(datetime.now().timestamp()) if now_epoch is None else int(now_epoch)
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
