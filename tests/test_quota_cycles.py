@@ -84,6 +84,64 @@ class AnchorCyclesTests(unittest.TestCase):
         self.assertTrue(cycles[0][3])
         self.assertEqual(cycles[0][0], 6 * WEEK + 3600 - WEEK)
 
+    def test_zero_percent_early_reset_starts_a_new_cycle_immediately(self):
+        old_reset = 6 * WEEK
+        new_reset = old_reset + 4 * 24 * 3600
+        anchors = {"codex": [_anchor(old_reset, 58.0)]}
+
+        USAGE._record_quota_anchor(
+            anchors, "codex", new_reset, 0.0, new_reset - WEEK + 60
+        )
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, new_reset - WEEK + 60
+        )
+
+        self.assertTrue(anchors["codex"][-1]["confirmed_reset"])
+        self.assertEqual(len(cycles), 2)
+        self.assertTrue(cycles[0][3])
+        self.assertEqual(cycles[0][0], new_reset - WEEK)
+        self.assertEqual(cycles[0][2], 0.0)
+        self.assertEqual(cycles[1][1], new_reset - WEEK)
+
+    def test_idle_zero_percent_drift_does_not_open_another_cycle(self):
+        old_reset = 6 * WEEK
+        first_zero_reset = old_reset + 4 * 24 * 3600
+        drifted_reset = first_zero_reset + 3600
+        anchors = {"codex": [_anchor(old_reset, 58.0)]}
+
+        USAGE._record_quota_anchor(
+            anchors, "codex", first_zero_reset, 0.0, first_zero_reset - WEEK
+        )
+        USAGE._record_quota_anchor(
+            anchors, "codex", drifted_reset, 0.0, drifted_reset - WEEK
+        )
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, drifted_reset - WEEK
+        )
+
+        self.assertTrue(anchors["codex"][-2]["confirmed_reset"])
+        self.assertNotIn("confirmed_reset", anchors["codex"][-1])
+        self.assertEqual(len(cycles), 2)
+        self.assertEqual(cycles[0][0], first_zero_reset - WEEK)
+
+    def test_confirmed_peer_reset_is_kept_without_local_history(self):
+        reset = 6 * WEEK
+        anchors = {}
+        USAGE._merge_quota_anchors(anchors, {"codex": [{
+            "reset": reset,
+            "last_seen": reset - WEEK,
+            "max_used": 0.0,
+            "confirmed_reset": True,
+        }]})
+
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, reset - WEEK
+        )
+
+        self.assertTrue(anchors["codex"][0]["confirmed_reset"])
+        self.assertEqual(len(cycles), 1)
+        self.assertTrue(cycles[0][3])
+
 
 class CycleSpecsTests(unittest.TestCase):
     def _run(self, payload, peer_anchors, now, existing=None):
