@@ -491,6 +491,8 @@ _CODEX_PARSER_VERSION = 3
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
+_CURSOR_PROVIDER_DAYS_CACHE_KEY = "_cursor_provider_days"
+_ZAI_PROVIDER_DAYS_CACHE_KEY = "_zai_provider_days"
 
 
 def _remove_codex_event_cache_dir():
@@ -2922,7 +2924,7 @@ _ANTIGRAVITY_MAX_TOKENS = 100_000_000  # 单次生成的 token 上界,超了就�
 _ANTIGRAVITY_MIN_TS = 1_577_836_800    # 2020-01-01,更早的时间戳必然是错位
 
 
-def _antigravity_gen_step(record):
+def _antigravity_gen_step(record, fallback_ts=None):
     """解一条生成记录 → (model, input, output, cached, thoughts, ts_sec);解不出返回 None。"""
     model = "unknown"
     inp = out = cached = thoughts = 0
@@ -2953,12 +2955,35 @@ def _antigravity_gen_step(record):
                             ts_sec = stval
     # 账本是逐日高水位,虚高数字一旦写进去就永久留着且无法纠正 —— 宁可丢也不能记错。
     if not isinstance(ts_sec, int) or not (_ANTIGRAVITY_MIN_TS <= ts_sec <= 1 << 34):
+        ts_sec = fallback_ts
+    if not isinstance(ts_sec, int) or not (_ANTIGRAVITY_MIN_TS <= ts_sec <= 1 << 34):
         return None
     if max(inp, out, cached, thoughts) > _ANTIGRAVITY_MAX_TOKENS:
         return None
     if not model or len(model) > 120 or not model.isprintable():
         model = "unknown"
     return model, inp, out, cached, thoughts, ts_sec
+
+
+def _decode_packed_varints(data):
+    values = []
+    offset = 0
+    while offset < len(data):
+        value, offset = _decode_proto_varint(data, offset)
+        values.append(value)
+    return values
+
+
+def _antigravity_step_timestamp(metadata):
+    """Current Antigravity stores a google.protobuf.Timestamp in steps.metadata field 1."""
+    for field_num, wire_type, value in _parse_proto_fields(metadata or b""):
+        if field_num != 1 or wire_type != 2:
+            continue
+        for sub_num, sub_wire, sub_value in _parse_proto_fields(value):
+            if sub_num == 1 and sub_wire == 0 \
+                    and _ANTIGRAVITY_MIN_TS <= sub_value <= 1 << 34:
+                return sub_value
+    return None
 
 
 def _load_antigravity_db(path):
@@ -2969,21 +2994,42 @@ def _load_antigravity_db(path):
     try:
         conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
         rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
+        try:
+            step_rows = conn.execute("SELECT idx, metadata FROM steps").fetchall()
+        except sqlite3.Error:
+            step_rows = []
     except Exception:
         return None
     finally:
         if conn is not None:
             conn.close()
 
+    step_timestamps = {
+        int(step_idx): timestamp
+        for step_idx, metadata in step_rows
+        if (timestamp := _antigravity_step_timestamp(metadata)) is not None
+    }
+
     for idx, data in rows:
         if not data:
             continue
-        for fn, wt, val in _parse_proto_fields(data):
+        fields = _parse_proto_fields(data)
+        referenced_steps = []
+        for fn, wt, val in fields:
+            if fn == 2 and wt == 2:
+                try:
+                    referenced_steps.extend(_decode_packed_varints(val))
+                except ValueError:
+                    pass
+        fallback_ts = next((step_timestamps.get(step_idx) for step_idx in referenced_steps
+                            if step_timestamps.get(step_idx) is not None), None)
+        record_index = 0
+        for fn, wt, val in fields:
             if fn != 1 or wt != 2:
                 continue
             # 逐条兜异常:一行坏数据不该把同一个库里的好数据一起带走。
             try:
-                step = _antigravity_gen_step(val)
+                step = _antigravity_gen_step(val, fallback_ts=fallback_ts)
             except Exception:
                 step = None
             if step is None:
@@ -2993,7 +3039,7 @@ def _load_antigravity_db(path):
             if iso_ts > max_ts:
                 max_ts = iso_ts
             events.append({
-                "id": f"{os.path.basename(path)}:{idx}",
+                "id": f"{os.path.basename(path)}:{idx}:{record_index}",
                 "timestamp": iso_ts,
                 "model": model,
                 "tokens": {
@@ -3003,6 +3049,7 @@ def _load_antigravity_db(path):
                     "thoughts": thoughts,
                 },
             })
+            record_index += 1
 
     if not events:
         return None
@@ -4226,6 +4273,86 @@ def _provider_money(value, unit="USD"):
     return f"{number:,.2f} {unit}"
 
 
+_PROVIDER_USAGE_FIELDS = ("in", "out", "cr", "cw", "reason")
+
+
+def _provider_usage_int(value):
+    number = _provider_integer(value)
+    return number if number is not None and number >= 0 else 0
+
+
+def _provider_usage_from_days(days, *, bounds=None, limited_coverage=None):
+    bounds = bounds or range_bounds()
+    buckets = {
+        key: {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+              "reason": 0, "cost": 0.0, "requests": 0, "models": {}}
+        for key in RANGE_KEYS
+    }
+    clean_days = days if isinstance(days, dict) else {}
+    for day_key, day in clean_days.items():
+        if not isinstance(day, dict):
+            continue
+        try:
+            local_day = date.fromisoformat(str(day_key)[:10])
+        except ValueError:
+            continue
+        components = {field: _provider_usage_int(day.get(field))
+                      for field in _PROVIDER_USAGE_FIELDS}
+        total = _provider_usage_int(day.get("tokens")) or sum(components.values())
+        cost = _provider_number(day.get("cost")) or 0.0
+        cost = cost if cost >= 0 else 0.0
+        requests = _provider_usage_int(day.get("requests"))
+        models = day.get("models") if isinstance(day.get("models"), dict) else {}
+        for range_key in classify_date(local_day, bounds):
+            bucket = buckets[range_key]
+            bucket["tokens"] += total
+            bucket["cost"] += cost
+            bucket["requests"] += requests
+            for field, value in components.items():
+                bucket[field] += value
+            for raw_name, raw_usage in models.items():
+                if not isinstance(raw_usage, dict):
+                    continue
+                model = bucket["models"].setdefault(
+                    str(raw_name or "unknown"),
+                    {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                     "reason": 0, "cost": 0.0})
+                model_components = {field: _provider_usage_int(raw_usage.get(field))
+                                    for field in _PROVIDER_USAGE_FIELDS}
+                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                    or sum(model_components.values())
+                for field, value in model_components.items():
+                    model[field] += value
+                model_cost = _provider_number(raw_usage.get("cost")) or 0.0
+                if model_cost >= 0:
+                    model["cost"] += model_cost
+
+    ranges = {}
+    for range_key, bucket in buckets.items():
+        formatted = {}
+        for raw_name, usage in bucket.pop("models").items():
+            display_name = nice_model(raw_name)
+            model = formatted.setdefault(
+                display_name,
+                {"name": display_name, "tokens": 0, "in": 0, "out": 0,
+                 "cr": 0, "cw": 0, "reason": 0, "cost": 0.0})
+            for field in ("tokens",) + _PROVIDER_USAGE_FIELDS:
+                model[field] += usage[field]
+            model["cost"] += usage["cost"]
+        row = dict(bucket)
+        input_total = row["in"] + row["cr"] + row["cw"]
+        row["hit"] = row["cr"] / input_total * 100 if input_total else 0.0
+        row["cost"] = round(row["cost"], 6)
+        row["models"] = sorted(
+            formatted.values(), key=lambda item: (-item["tokens"], item["name"]))
+        for model in row["models"]:
+            model["cost"] = round(model["cost"], 6)
+        if limited_coverage and range_key in {"year", "all"}:
+            row["coverage"] = limited_coverage
+        ranges[range_key] = row
+    return {"ranges": ranges, "days": clean_days}
+
+
 def _provider_window(window_id, title, used_pct=None, reset=None, window_minutes=None,
                      detail=None, usage_known=True):
     return {
@@ -4335,6 +4462,9 @@ def _provider_json_request(url, *, headers=None, method="GET", body=None, timeou
 
 # ----- Cursor -----
 
+_CURSOR_USAGE_PAGE_SIZE = 1000
+_CURSOR_USAGE_MAX_PAGES = 200
+
 
 def _cursor_app_auth_paths():
     return _path_candidates(
@@ -4425,6 +4555,120 @@ def _cursor_plan_name(raw):
         return None
     value = names.get(raw.strip().lower(), raw.strip())
     return f"Cursor {value}"
+
+
+def _normalize_cursor_usage_events(events, *, bounds=None):
+    days = {}
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        timestamp = _provider_number(event.get("timestamp"))
+        usage = event.get("tokenUsage")
+        if timestamp is None or timestamp <= 0 or not isinstance(usage, dict):
+            continue
+        timestamp_seconds = timestamp / 1000.0 if timestamp > 100_000_000_000 else timestamp
+        try:
+            dt = datetime.fromtimestamp(timestamp_seconds, timezone.utc).astimezone()
+        except (OverflowError, OSError, ValueError):
+            continue
+        components = {
+            "in": _provider_usage_int(usage.get("inputTokens")),
+            "out": _provider_usage_int(usage.get("outputTokens")),
+            "cr": _provider_usage_int(usage.get("cacheReadTokens")),
+            "cw": _provider_usage_int(usage.get("cacheWriteTokens")),
+            "reason": 0,
+        }
+        total = sum(components.values())
+        if total <= 0:
+            continue
+        cents = _provider_number(usage.get("totalCents"))
+        cost = cents / 100.0 if cents is not None and cents >= 0 else 0.0
+        model_name = event.get("model")
+        model_name = model_name.strip() if isinstance(model_name, str) and model_name.strip() else "unknown"
+        day_key = dt.date().isoformat()
+        day = days.setdefault(
+            day_key,
+            {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+             "reason": 0, "cost": 0.0, "requests": 0, "models": {},
+             "hours": [0] * 24})
+        day["tokens"] += total
+        day["cost"] += cost
+        day["requests"] += 1
+        day["hours"][dt.hour] += total
+        for field, value in components.items():
+            day[field] += value
+        model = day["models"].setdefault(
+            model_name,
+            {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+             "reason": 0, "cost": 0.0})
+        model["tokens"] += total
+        model["cost"] += cost
+        for field, value in components.items():
+            model[field] += value
+    return _provider_usage_from_days(days, bounds=bounds)
+
+
+def _cursor_boundary_overlap(previous, current):
+    limit = min(len(previous), len(current))
+    for count in range(limit, 0, -1):
+        if previous[-count:] == current[:count]:
+            return count
+    return 0
+
+
+def _fetch_cursor_usage_events(session, now=None):
+    now = now or datetime.now().astimezone()
+    start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    headers = {"Cookie": session["cookie"], "Origin": "https://cursor.com"}
+    pages = []
+    expected_total = None
+    completed = False
+    for page_number in range(1, _CURSOR_USAGE_MAX_PAGES + 1):
+        payload = _provider_json_request(
+            "https://cursor.com/api/dashboard/get-filtered-usage-events",
+            headers=headers, method="POST", timeout=15, max_bytes=16 * 1024 * 1024,
+            body={
+                "page": page_number,
+                "pageSize": _CURSOR_USAGE_PAGE_SIZE,
+                "startDate": str(int(start.timestamp() * 1000)),
+                "endDate": str(int(now.timestamp() * 1000)),
+            })
+        reported = _provider_integer(payload.get("totalUsageEventsCount")) \
+            if isinstance(payload, dict) else None
+        if reported is not None and reported < 0:
+            raise ValueError("cursor usage event count cannot be negative")
+        if reported is not None:
+            if expected_total is not None and reported != expected_total:
+                raise ValueError("cursor usage pagination count changed")
+            expected_total = reported
+        events = payload.get("usageEventsDisplay") if isinstance(payload, dict) else None
+        if not isinstance(events, list):
+            raise ValueError("cursor usage events response was invalid")
+        if not events:
+            completed = True
+            break
+        pages.append(events)
+        if len(events) < _CURSOR_USAGE_PAGE_SIZE:
+            completed = True
+            break
+    if not completed:
+        raise ValueError("cursor usage pagination did not complete")
+    raw = [event for page in pages for event in page]
+    if expected_total is None:
+        return raw
+    if len(raw) < expected_total:
+        raise ValueError("cursor usage pagination was incomplete")
+    if len(raw) == expected_total:
+        return raw
+    removals = len(raw) - expected_total
+    reconciled = list(pages[0]) if pages else []
+    for index in range(1, len(pages)):
+        overlap = min(_cursor_boundary_overlap(pages[index - 1], pages[index]), removals)
+        reconciled.extend(pages[index][overlap:])
+        removals -= overlap
+    if removals or len(reconciled) != expected_total:
+        raise ValueError("cursor usage pagination was inconsistent")
+    return reconciled
 
 
 def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, user_info=None,
@@ -4538,7 +4782,7 @@ def fetch_cursor_quota(session=None):
     session = session or _cursor_session()
     if not session:
         return {}
-    marker = session["marker"]
+    marker = _provider_credential_marker("cursor-usage-v1", session["marker"])
     cached = _cached_provider_quota("cursor", marker, _PROVIDER_QUOTA_TTL)
     if cached:
         return cached
@@ -4569,9 +4813,15 @@ def fetch_cursor_quota(session=None):
                 headers={**headers, "Origin": base}, method="POST", body={})
         except Exception:
             pass
+        usage = _provider_usage_from_days({})
+        try:
+            usage = _normalize_cursor_usage_events(_fetch_cursor_usage_events(session))
+        except Exception:
+            pass
         quota = _normalize_cursor_quota(
             summary, request_usage=request_usage, sand_usage=sand_usage,
             user_info=user_info, identity=session)
+        quota["usage"] = usage
         _save_provider_quota_cache("cursor", marker, quota)
         return quota
     except Exception:
@@ -4876,6 +5126,63 @@ def _zai_quota_url(url, scope="personal"):
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
+def _zai_model_usage_url(base, scope="personal", now=None):
+    from urllib.parse import urlencode
+    now = now or datetime.now().astimezone()
+    start = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now.replace(minute=59, second=59, microsecond=0)
+    query = {
+        "startTime": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "endTime": end.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if scope == "team":
+        query["type"] = "3"
+    return base.rstrip("/") + "/api/monitor/usage/model-usage?" + urlencode(query)
+
+
+def _normalize_zai_model_usage(payload, *, bounds=None):
+    if not isinstance(payload, dict) or payload.get("success") is not True \
+            or _provider_number(payload.get("code")) != 200:
+        return _provider_usage_from_days({}, bounds=bounds, limited_coverage="近30天")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    labels = data.get("x_time") if isinstance(data.get("x_time"), list) else []
+    models = data.get("modelDataList") \
+        if isinstance(data.get("modelDataList"), list) else []
+    parsed_labels = []
+    for label in labels:
+        if not isinstance(label, str):
+            parsed_labels.append(None)
+            continue
+        try:
+            parsed_labels.append(datetime.fromisoformat(label).astimezone())
+        except ValueError:
+            parsed_labels.append(None)
+    days = {}
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("modelName")
+        name = name.strip() if isinstance(name, str) and name.strip() else "unknown"
+        values = model.get("tokensUsage") if isinstance(model.get("tokensUsage"), list) else []
+        for index, dt in enumerate(parsed_labels):
+            if dt is None or index >= len(values):
+                continue
+            tokens = _provider_usage_int(values[index])
+            if tokens <= 0:
+                continue
+            day_key = dt.date().isoformat()
+            day = days.setdefault(
+                day_key,
+                {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                 "reason": 0, "cost": 0.0, "requests": 0, "models": {},
+                 "hours": [0] * 24})
+            day["tokens"] += tokens
+            day["hours"][dt.hour] += tokens
+            usage = day["models"].setdefault(name, {"tokens": 0})
+            usage["tokens"] += tokens
+    return _provider_usage_from_days(days, bounds=bounds, limited_coverage="近30天")
+
+
 def _zai_limit(raw):
     if not isinstance(raw, dict) or raw.get("type") not in {
             "TOKENS_LIMIT", "CREDIT_LIMIT", "TIME_LIMIT"}:
@@ -5018,7 +5325,7 @@ def fetch_zai_quota():
     base = "https://open.bigmodel.cn" if region == "bigmodel-cn" else "https://api.z.ai"
     quota_url = _zai_quota_url(base + "/api/monitor/usage/quota/limit", scope)
     marker = _provider_credential_marker(
-        "zai", api_key, region, scope, organization, project, quota_url)
+        "zai-usage-v1", api_key, region, scope, organization, project, quota_url)
     cached = _cached_provider_quota("zai", marker, _PROVIDER_QUOTA_TTL)
     if cached:
         return cached
@@ -5037,6 +5344,15 @@ def fetch_zai_quota():
             except Exception:
                 pass
         quota = _normalize_zai_quota(payload, region=region, balance=balance)
+        usage = _provider_usage_from_days({}, limited_coverage="近30天")
+        try:
+            model_payload = _provider_json_request(
+                _zai_model_usage_url(base, scope), headers=headers, timeout=15,
+                max_bytes=8 * 1024 * 1024)
+            usage = _normalize_zai_model_usage(model_payload)
+        except Exception:
+            pass
+        quota["usage"] = usage
         _save_provider_quota_cache("zai", marker, quota)
         return quota
     except Exception:
@@ -8592,6 +8908,13 @@ def compute():
     qwenwork_quota = _safe_scan(
         "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
     provider_quotas = scan_provider_quotas(errors)
+    _cache_dashboard_days(
+        cache, _CURSOR_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("cursor") or {}).get("usage") or {}).get("days", {}))
+    _cache_dashboard_days(
+        cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
+    _save_scan_cache(cache)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
@@ -9657,7 +9980,45 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                            "reason": v.get("reason", 0), "tokens": total_tok, "tool": v["tool"],
                            "cost_per_k": cost_per_k, "out_ratio": out_ratio})
 
-    return {"daily": daily, "models": model_list}
+    provider_models = {}
+    for cache_key, tool, suffix in (
+            (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
+            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号")):
+        for day_key, day in (cache.get(cache_key) or {}).items():
+            if cutoff and day_key < cutoff or not isinstance(day, dict):
+                continue
+            for raw_name, raw_usage in (day.get("models") or {}).items():
+                if not isinstance(raw_usage, dict):
+                    continue
+                name = f"{nice_model(raw_name)} ({suffix})"
+                model = provider_models.setdefault(
+                    name,
+                    {"name": name, "cost": 0.0, "in": 0, "out": 0,
+                     "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
+                     "tool": tool})
+                components = {field: _provider_usage_int(raw_usage.get(field))
+                              for field in _PROVIDER_USAGE_FIELDS}
+                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                    or sum(components.values())
+                for field, value in components.items():
+                    model[field] += value
+                cost = _provider_number(raw_usage.get("cost")) or 0.0
+                if cost >= 0:
+                    model["cost"] += cost
+
+    provider_model_list = []
+    for model in sorted(
+            provider_models.values(), key=lambda item: (-item["tokens"], item["name"])):
+        out_k = model["out"] / 1000 if model["out"] else 0
+        provider_model_list.append({
+            **model,
+            "cost": round(model["cost"], 2),
+            "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
+            "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
+            if model["tokens"] > 0 else 0,
+        })
+
+    return {"daily": daily, "models": model_list, "provider_models": provider_model_list}
 
 
 def daily_costs():

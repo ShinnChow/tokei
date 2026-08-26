@@ -244,6 +244,40 @@ class AntigravityRobustnessTests(unittest.TestCase):
         conn.close()
         return str(path)
 
+    def test_current_antigravity_rows_use_referenced_step_timestamp(self):
+        now_sec = int(datetime.now().astimezone().timestamp())
+        tokens = (self._field(2, 0, 200) + self._field(3, 0, 50)
+                  + self._field(5, 0, 800) + self._field(9, 0, 20))
+        generation = self._field(19, 2, "gemini-3.7-flash") + self._field(4, 2, tokens)
+        # Current Antigravity rows omit the old embedded timestamp. Field 2 is a
+        # packed list of referenced step indexes; the step metadata owns the time.
+        row = self._field(2, 2, self._varint(4) + self._varint(5)) \
+            + self._field(1, 2, generation)
+        step_metadata = self._field(1, 2, self._field(1, 0, now_sec))
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, True))
+        path = root / "current.db"
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER)")
+        conn.execute("CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB)")
+        conn.execute("INSERT INTO gen_metadata VALUES (0, ?, ?)", (row, len(row)))
+        conn.execute("INSERT INTO steps VALUES (4, ?)", (step_metadata,))
+        conn.execute("INSERT INTO steps VALUES (5, ?)", (step_metadata,))
+        conn.commit()
+        conn.close()
+
+        parsed = USAGE._load_antigravity_db(str(path))
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(parsed["events"]), 1)
+        event = parsed["events"][0]
+        self.assertEqual(event["model"], "gemini-3.7-flash")
+        self.assertEqual(event["tokens"]["input"], 1000)
+        self.assertEqual(event["tokens"]["cached"], 800)
+        self.assertEqual(event["timestamp"], datetime.fromtimestamp(
+            now_sec, USAGE.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
     def test_oversized_varint_is_rejected_instead_of_hanging(self):
         # 不封顶时 val 会长成百万位大整数,O(n²) 能把 30 秒一轮的采集器拖死。
         with self.assertRaises(ValueError):

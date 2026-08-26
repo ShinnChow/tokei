@@ -508,6 +508,7 @@ struct HermesRange: Codable {
 }
 struct TokenModelStat: Codable, Identifiable {
     var name: String
+    var tokens: Int?
     var `in`: Int
     var out: Int
     var cr: Int = 0
@@ -521,6 +522,7 @@ struct TokenModelStat: Codable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens)
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
         cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
@@ -604,6 +606,7 @@ struct OpenClawRanges: Codable {
 struct OpenClawStat: Codable { var ranges: OpenClawRanges }
 
 struct TokenUsageRange: Codable {
+    var tokens: Int
     var hit: Double
     var `in`: Int
     var out: Int
@@ -611,11 +614,24 @@ struct TokenUsageRange: Codable {
     var cw: Int
     var reason: Int
     var cost: Double
+    var requests: Int
     var sessions: Int = 0
     var models: [TokenModelStat] = []
+    var coverage: String?
 
-    init(hit: Double = 0, `in` input: Int = 0, out: Int = 0, cr: Int = 0, cw: Int = 0,
-         reason: Int = 0, cost: Double = 0, sessions: Int = 0, models: [TokenModelStat] = []) {
+    var totalTokens: Int {
+        tokens > 0 ? tokens : `in` + out + cr + cw + reason
+    }
+
+    var hasComponents: Bool {
+        `in` + out + cr + cw + reason > 0
+    }
+
+    init(tokens: Int = 0, hit: Double = 0, `in` input: Int = 0, out: Int = 0,
+         cr: Int = 0, cw: Int = 0, reason: Int = 0, cost: Double = 0,
+         requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
+         coverage: String? = nil) {
+        self.tokens = tokens
         self.hit = hit
         self.in = input
         self.out = out
@@ -623,12 +639,15 @@ struct TokenUsageRange: Codable {
         self.cw = cw
         self.reason = reason
         self.cost = cost
+        self.requests = requests
         self.sessions = sessions
         self.models = models
+        self.coverage = coverage
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
         hit = try c.decodeIfPresent(Double.self, forKey: .hit) ?? 0
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
@@ -636,8 +655,10 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
+        coverage = try c.decodeIfPresent(String.self, forKey: .coverage)
     }
 }
 struct TokenUsageRanges: Codable {
@@ -788,6 +809,7 @@ struct ProviderQuotaStat: Codable {
     var account: String?
     var windows: [ProviderQuotaWindow] = []
     var details: [ProviderQuotaDetail] = []
+    var usage: TokenUsageStat? = nil
     var source: String?
     var updated: Int?
     var stale = false
@@ -801,6 +823,7 @@ struct ProviderQuotaStat: Codable {
         account = try? c.decodeIfPresent(String.self, forKey: .account)
         windows = (try? c.decodeIfPresent([ProviderQuotaWindow].self, forKey: .windows)) ?? []
         details = (try? c.decodeIfPresent([ProviderQuotaDetail].self, forKey: .details)) ?? []
+        usage = try? c.decodeIfPresent(TokenUsageStat.self, forKey: .usage)
         source = try? c.decodeIfPresent(String.self, forKey: .source)
         updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
         stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false

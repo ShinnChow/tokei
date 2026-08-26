@@ -10,6 +10,8 @@ struct PanelView: View {
     @State private var codexModelsOpen = false
     @State private var codexResetCardsOpen = false
     @State private var geminiModelsOpen = false
+    @State private var cursorModelsOpen = false
+    @State private var zaiModelsOpen = false
     @State private var grokModelsOpen = false
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
@@ -332,6 +334,8 @@ struct PanelView: View {
         let grokQuotaState = SubscriptionQuotaState.resolve([
             (value: u.grok.pct, stale: u.grok.stale),
         ])
+        let cursorUsage = u.cursor.usage?.ranges.get(sel) ?? TokenUsageRange()
+        let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
@@ -351,10 +355,13 @@ struct PanelView: View {
                          presentation: gr.sessions == 0 && u.antigravity.available
                              ? .compactStatus : .standard,
                          content: AnyView(geminiBlock(gr, quota: u.antigravity))),
-            ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor, active: showCursor,
-                         tint: Theme.cursor, presentation: .compactStatus,
+            ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor,
+                         active: u.cursor.available || cursorUsage.totalTokens > 0,
+                         tint: Theme.cursor,
+                         presentation: cursorUsage.totalTokens > 0 ? .standard : .compactStatus,
                          content: AnyView(providerQuotaBlock(
-                            "Cursor", quota: u.cursor, tint: Theme.cursor,
+                            "Cursor", quota: u.cursor, usage: cursorUsage,
+                            modelsOpen: $cursorModelsOpen, tint: Theme.cursor,
                             setupHint: "请确认 Cursor.app 已登录；Tokei 会复用其本地登录态读取额度。"))),
             ToolCardItem(id: "zed", name: "Zed", visible: showZed, active: showZed,
                          tint: Theme.zed, presentation: .compactStatus,
@@ -366,10 +373,13 @@ struct PanelView: View {
                          content: AnyView(providerQuotaBlock(
                             "Sub2API", quota: u.sub2api, tint: Theme.sub2api,
                             setupHint: "请在设置的「Provider 额度」中保存 Base URL 与 Group API Key。"))),
-            ToolCardItem(id: "zai", name: "z.ai / GLM", visible: showZai, active: showZai,
-                         tint: Theme.zai, presentation: .compactStatus,
+            ToolCardItem(id: "zai", name: "z.ai / GLM", visible: showZai,
+                         active: u.zai.available || zaiUsage.totalTokens > 0,
+                         tint: Theme.zai,
+                         presentation: zaiUsage.totalTokens > 0 ? .standard : .compactStatus,
                          content: AnyView(providerQuotaBlock(
-                            "z.ai / GLM", quota: u.zai, tint: Theme.zai,
+                            "z.ai / GLM", quota: u.zai, usage: zaiUsage,
+                            modelsOpen: $zaiModelsOpen, tint: Theme.zai,
                             setupHint: "请在设置的「Provider 额度」中选择区域并保存 API Key。"))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
@@ -698,8 +708,8 @@ struct PanelView: View {
                     }
                     modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini)
                 }
-            } else if !quota.available {
-                emptyHint
+            } else {
+                quota.available ? AnyView(usageEmptyHint) : AnyView(emptyHint)
             }
             if quota.available {
                 if r.sessions > 0 { thinDivider }
@@ -713,18 +723,68 @@ struct PanelView: View {
     func providerQuotaBlock(
         _ title: String,
         quota: ProviderQuotaStat,
+        usage: TokenUsageRange? = nil,
+        modelsOpen: Binding<Bool>? = nil,
         tint: Color,
         setupHint: String
     ) -> some View {
+        let range = usage ?? TokenUsageRange()
+        let hasUsage = range.totalTokens > 0 || range.requests > 0
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain(title, tint: tint)
+            if hasUsage {
+                providerTokenUsageContent(range, modelsOpen: modelsOpen, tint: tint)
+            }
             if quota.available {
+                if hasUsage { thinDivider }
                 providerQuotaContent(quota, tint: tint)
-            } else {
+            } else if !hasUsage {
                 Text(setupHint)
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    func providerTokenUsageContent(
+        _ r: TokenUsageRange,
+        modelsOpen: Binding<Bool>?,
+        tint: Color
+    ) -> some View {
+        var top: [Metric] = []
+        if r.cost > 0 {
+            top.append(.init("dollarsign.circle", "API 价", String(format: "$%.2f", r.cost)))
+        }
+        if r.requests > 0 {
+            top.append(.init("arrow.triangle.2.circlepath", "请求", Fmt.human(r.requests)))
+        }
+        var details: [Metric] = []
+        if r.hasComponents {
+            details = [
+                .init("arrow.down", "输入", Fmt.human(r.in)),
+                .init("arrow.up", "输出", Fmt.human(r.out)),
+            ]
+            if r.cr > 0 { details.append(.init("bolt.fill", "缓存读", Fmt.human(r.cr))) }
+            if r.cw > 0 {
+                details.append(.init("square.stack.3d.up.fill", "缓存写", Fmt.human(r.cw)))
+            }
+            if r.reason > 0 { details.append(.init("brain", "推理", Fmt.human(r.reason))) }
+        }
+        return VStack(alignment: .leading, spacing: 9) {
+            CostHeadline(
+                value: Fmt.human(r.totalTokens),
+                caption: "\(r.coverage ?? sel.label) 账号总量",
+                tint: tint
+            )
+            Text("账号级用量 · 单列统计，避免与本地工具日志重复计算")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+            if !top.isEmpty || !details.isEmpty {
+                metricGrid(top, hit: r.hit, extra: details, tint: tint)
+            }
+            if !r.models.isEmpty, let modelsOpen {
+                tokenModelDisclosure(r.models, open: modelsOpen, tint: tint)
             }
         }
     }
@@ -1550,7 +1610,8 @@ struct PanelView: View {
     }
 
     func tokenModelTotal(_ m: TokenModelStat, reasonIncludedInOutput: Bool = false) -> Int {
-        m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
+        if let tokens = m.tokens, tokens > 0 { return tokens }
+        return m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
     }
 
     func tokenModelHit(_ m: TokenModelStat) -> Double {
@@ -1679,19 +1740,26 @@ struct PanelView: View {
                 ForEach(models) { m in
                     let total = tokenModelTotal(m, reasonIncludedInOutput: reasonIncludedInOutput)
                     let hit = tokenModelHit(m)
+                    let hasBreakdown = m.in + m.out + m.cr + m.cw + m.reason > 0
+                        || m.cost > 0 || m.pin > 0 || m.pout > 0
                     let isExpanded = expandedModels.contains(m.id)
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
+                            guard hasBreakdown else { return }
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 if isExpanded { expandedModels.remove(m.id) }
                                 else { expandedModels.insert(m.id) }
                             }
                         } label: {
                             HStack(spacing: 7) {
-                                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .foregroundStyle(Theme.tTertiary)
-                                    .frame(width: 8)
+                                if hasBreakdown {
+                                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .foregroundStyle(Theme.tTertiary)
+                                        .frame(width: 8)
+                                } else {
+                                    Color.clear.frame(width: 8, height: 8)
+                                }
                                 Circle().fill(tint.opacity(0.7)).frame(width: 5, height: 5)
                                 Text(m.name).font(.system(size: 11.5)).foregroundStyle(Theme.tPrimary)
                                     .lineLimit(1)
@@ -1715,7 +1783,7 @@ struct PanelView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        if isExpanded {
+                        if isExpanded && hasBreakdown {
                             modelDetailRow(tokIn: inclusiveIO ? m.in + m.cr + m.cw : m.in,
                                            tokOut: inclusiveIO ? m.out + m.reason : m.out,
                                            tokCR: m.cr, tokCW: m.cw,

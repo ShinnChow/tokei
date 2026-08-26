@@ -84,11 +84,13 @@ struct ModelCost: Codable, Identifiable {
 struct DashboardData: Codable {
     var daily: [DailyCost]
     var models: [ModelCost]
+    var provider_models: [ModelCost]? = nil
 }
 
 struct DashboardPayload: Codable {
     var daily: [DailyCost]
     var models: [ModelCost]
+    var provider_models: [ModelCost]? = nil
     var wrapped: WrappedData
 }
 
@@ -143,9 +145,11 @@ struct DashboardView: View {
     @ObservedObject private var dashboardRepository = DashboardRepository.shared
     @State private var daily: [DailyCost] = []
     @State private var models: [ModelCost] = []
+    @State private var providerModels: [ModelCost] = []
     @State private var wrapped: WrappedData? = nil
     @State private var baseDaily: [DailyCost] = []
     @State private var baseModels: [ModelCost] = []
+    @State private var baseProviderModels: [ModelCost] = []
     @State private var baseWrapped: WrappedData? = nil
     @State private var loading = true
     @State private var wrappedPeriod: WrappedPeriod = .all
@@ -160,9 +164,15 @@ struct DashboardView: View {
                 if let w = wrapped, w.total_tokens > 0 {
                     WrappedView(data: w, period: $wrappedPeriod) { p in loadWrapped(p) }
                 }
-                if !daily.isEmpty {
+                if !models.isEmpty {
                     Divider().opacity(0.15)
                     modelSection
+                }
+                if !providerModels.isEmpty {
+                    Divider().opacity(0.15)
+                    providerModelSection
+                }
+                if !daily.isEmpty {
                     if let w = wrapped, !w.projects.isEmpty {
                         Divider().opacity(0.15)
                         projectsSection(w.projects)
@@ -201,10 +211,33 @@ struct DashboardView: View {
         }
     }
 
+    var providerModelSection: some View {
+        let sorted = providerModels.sorted { ($0.tokens ?? 0) > ($1.tokens ?? 0) }
+        let top = Array(sorted.prefix(8))
+        let maxTokens = Double(top.first?.tokens ?? 1)
+        return VStack(alignment: .leading, spacing: 9) {
+            Text("账号 Provider 模型").font(.system(size: 13, weight: .bold))
+            Text("账号级统计单独展示，不并入本地工具总计")
+                .font(.system(size: 9))
+                .foregroundStyle(Theme.tTertiary)
+            ForEach(top) { model in
+                StatBar(
+                    name: model.name,
+                    tokens: model.tokens ?? ((model.in ?? 0) + (model.out ?? 0)),
+                    cost: model.cost,
+                    maxTokens: maxTokens,
+                    tint: modelTint(model.tool)
+                )
+            }
+        }
+    }
+
     func modelTint(_ tool: String) -> Color {
         switch tool {
         case "codex": return Theme.codex
         case "gemini": return Theme.gemini
+        case "cursor": return Theme.cursor
+        case "zai": return Theme.zai
         case "grok": return Theme.grok
         case "qoder": return Theme.qoder
         case "hermes": return Theme.hermes
@@ -561,7 +594,7 @@ struct DashboardView: View {
     func loadData(showLoading: Bool = false) {
         if let cached = dashboardRepository.payload(for: wrappedPeriod) {
             apply(cached, animated: false)
-        } else if showLoading || (daily.isEmpty && models.isEmpty && wrapped == nil) {
+        } else if showLoading || (daily.isEmpty && models.isEmpty && providerModels.isEmpty && wrapped == nil) {
             loading = true
         }
         dashboardRepository.load(wrappedPeriod)
@@ -577,6 +610,7 @@ struct DashboardView: View {
     func apply(_ payload: DashboardPayload, animated: Bool) {
         baseDaily = payload.daily
         baseModels = payload.models
+        baseProviderModels = payload.provider_models ?? []
         baseWrapped = payload.wrapped
         applyCachedScope(animated: animated)
         loading = false
@@ -585,6 +619,7 @@ struct DashboardView: View {
     func applyCachedScope(animated: Bool) {
         let update = {
             let fallback = DashboardData(daily: baseDaily, models: baseModels)
+            providerModels = baseProviderModels
             if let scoped = scopedUsage() {
                 let scopedDaily = allDeviceDaily(period: wrappedPeriod)
                 daily = scopedDaily
@@ -595,7 +630,7 @@ struct DashboardView: View {
                 models = baseModels
                 wrapped = baseWrapped
             }
-            if !daily.isEmpty || !models.isEmpty || wrapped != nil {
+            if !daily.isEmpty || !models.isEmpty || !providerModels.isEmpty || wrapped != nil {
                 loading = false
             }
         }

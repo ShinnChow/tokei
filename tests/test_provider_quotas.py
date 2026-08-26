@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -171,6 +172,9 @@ class ProviderQuotaTests(unittest.TestCase):
             if "/api/usage?" in url:
                 self.assertTrue(url.endswith("user=cursor-user"), url)
                 return {"gpt-4": {"numRequestsTotal": 24, "maxRequestUsage": 100}}
+            if url.endswith("/api/dashboard/get-filtered-usage-events"):
+                self.assertEqual(kwargs["method"], "POST")
+                return {"totalUsageEventsCount": 0, "usageEventsDisplay": []}
             self.assertEqual(kwargs["method"], "POST")
             self.assertEqual(kwargs["headers"]["Origin"], "https://cursor.com")
             return {"hasNonZeroIncludedLimit": False}
@@ -181,7 +185,44 @@ class ProviderQuotaTests(unittest.TestCase):
                 quota = USAGE.fetch_cursor_quota(session)
 
         self.assertEqual(quota["windows"][0]["used_pct"], 24.0)
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(requests), 5)
+        self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 0)
+
+    def test_cursor_usage_events_map_tokens_cost_and_models(self):
+        now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        events = [
+            {
+                "timestamp": str(int(now.timestamp() * 1000)),
+                "model": "gpt-5.6-sol-medium",
+                "tokenUsage": {
+                    "inputTokens": 100, "outputTokens": 20,
+                    "cacheReadTokens": 30, "cacheWriteTokens": 10,
+                    "totalCents": 12.5,
+                },
+            },
+            {
+                "timestamp": int(now.timestamp() * 1000),
+                "model": "gpt-5.6-sol-medium",
+                "tokenUsage": {
+                    "inputTokens": 40, "outputTokens": 5,
+                    "cacheReadTokens": 0, "cacheWriteTokens": 0,
+                    "totalCents": "2.5",
+                },
+            },
+        ]
+
+        usage = USAGE._normalize_cursor_usage_events(events, bounds=USAGE.range_bounds())
+        today = usage["ranges"]["today"]
+
+        self.assertEqual(today["tokens"], 205)
+        self.assertEqual(today["in"], 140)
+        self.assertEqual(today["out"], 25)
+        self.assertEqual(today["cr"], 30)
+        self.assertEqual(today["cw"], 10)
+        self.assertEqual(today["requests"], 2)
+        self.assertAlmostEqual(today["cost"], 0.15)
+        self.assertEqual(today["models"][0]["name"], "GPT-5.6 Sol")
+        self.assertEqual(today["models"][0]["tokens"], 205)
 
     def test_zed_maps_limited_and_unlimited_prediction_plans(self):
         payload = {
@@ -350,11 +391,20 @@ class ProviderQuotaTests(unittest.TestCase):
         )
 
     def test_zai_team_fetch_sends_scope_headers_and_type(self):
+        requests = []
+
         def request(url, **kwargs):
-            self.assertTrue(url.endswith("/api/monitor/usage/quota/limit?type=2"), url)
+            requests.append(url)
             self.assertEqual(kwargs["headers"]["Authorization"], "Bearer zai-key")
             self.assertEqual(kwargs["headers"]["Bigmodel-Organization"], "org")
             self.assertEqual(kwargs["headers"]["Bigmodel-Project"], "project")
+            if "/api/monitor/usage/model-usage?" in url:
+                self.assertIn("type=3", url)
+                return {
+                    "code": 200, "success": True,
+                    "data": {"x_time": [], "modelDataList": []},
+                }
+            self.assertTrue(url.endswith("/api/monitor/usage/quota/limit?type=2"), url)
             return {
                 "code": 200,
                 "success": True,
@@ -375,6 +425,35 @@ class ProviderQuotaTests(unittest.TestCase):
                 quota = USAGE.fetch_zai_quota()
 
         self.assertEqual(quota["windows"][0]["used_pct"], 25.0)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(quota["usage"]["ranges"]["month"]["tokens"], 0)
+
+    def test_zai_model_usage_maps_daily_ranges_and_models(self):
+        today = datetime.now().astimezone().replace(hour=8, minute=0, second=0, microsecond=0)
+        yesterday = today - timedelta(days=1)
+        payload = {
+            "code": 200,
+            "success": True,
+            "data": {
+                "x_time": [today.strftime("%Y-%m-%d %H:%M"),
+                           yesterday.strftime("%Y-%m-%d %H:%M")],
+                "modelDataList": [
+                    {"modelName": "glm-5.3", "tokensUsage": [100, 50]},
+                    {"modelName": "glm-4.7", "tokensUsage": [20, None]},
+                ],
+            },
+        }
+
+        usage = USAGE._normalize_zai_model_usage(payload, bounds=USAGE.range_bounds())
+
+        self.assertEqual(usage["ranges"]["today"]["tokens"], 120)
+        self.assertEqual(usage["ranges"]["yesterday"]["tokens"], 50)
+        self.assertEqual(usage["ranges"]["all"]["tokens"], 170)
+        self.assertEqual(usage["ranges"]["year"]["coverage"], "近30天")
+        self.assertEqual(usage["ranges"]["today"]["models"][0], {
+            "name": "Glm 5.3", "tokens": 100, "in": 0, "out": 0,
+            "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
+        })
 
     def test_antigravity_parses_process_and_quota_summary(self):
         output = """

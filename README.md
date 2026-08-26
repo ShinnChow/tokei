@@ -28,10 +28,10 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Claude Code** | Token（输入/输出/缓存）、成本、配额、模型 |
 | **Codex CLI** | Token、成本、配额、会话 |
 | **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
-| **Cursor** | 套餐额度、Cursor/第三方模型占比、按量预算、Grok Bot 周额度 |
+| **Cursor** | 账号 Token、请求、API 价成本、按模型统计、套餐额度与 Grok Bot 周额度 |
 | **Zed** | Edit Predictions、订阅周期、账号与套餐 |
 | **Sub2API** | 日/周/月额度、限流窗口、余额、请求与 Token 摘要 |
-| **z.ai / GLM** | 会话/周期/MCP 额度、套餐、BigModel CN 余额 |
+| **z.ai / GLM** | 近 30 天账号 Token、按模型统计、会话/周期/MCP 额度、BigModel CN 余额 |
 | **Grok Build** | Token（输入/输出/缓存/推理）、会话、上下文、延迟、配额（本地日志；可选实时） |
 | **Qoder Desktop** | Token、缓存、会话、调用次数、模型 |
 | **QoderWork** | Token、调用次数、子 Agent、时长、上下文 |
@@ -93,13 +93,14 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 可自定义间隔时间
 
 ### 隐私优先
-- 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据；外部额度卡只读取对应 Provider 返回的账号额度摘要
+- 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据；Cursor 与 z.ai 还可读取对应 Provider 返回的账号级 Token/模型摘要
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Grok 实时额度默认关闭，可选择只读本地日志
 - 千问办公额度默认关闭；开启后仅调用官方桌面端的 `127.0.0.1` MCP，由已运行并登录的千问办公查询官方额度
 - Tokei 不读取或解密千问办公的 `auth-v2.dat`、浏览器 Cookie 或 `.status.json` 账号资料；仅用 `.status.json` 文件元数据使切换账号后的额度缓存失效，也不会自动启动千问办公
 - Cursor、Zed、Sub2API、z.ai 卡片默认关闭；开启后才查询额度。Sub2API 与 z.ai API Key 保存于 macOS Keychain，不写入 `config.json` 或额度缓存
 - Cursor 只读取 Cursor.app 的本地登录态数据库；Zed 以禁止交互的方式读取现有 Keychain 登录态，不会弹出授权框
+- Cursor 与 z.ai 的账号级统计在 Dashboard 中单独展示，不并入本地工具总计，避免与 Claude Code 等本地日志重复计算
 - Antigravity 额度只连接已运行客户端的 `127.0.0.1` language server，不会自动启动客户端
 - 这 5 个 Provider 的额度与账号标签只保存在本机缓存，不写入多设备 Git 同步快照
 - 其他联网操作包括检查/下载更新，以及手动更新模型价格表
@@ -174,10 +175,10 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Claude Code | `~/.claude/projects/<proj>/<session>.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` |
 | Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` + `~/.gemini/gemini-cli/conversations/*.json` |
-| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` 登录态 + `cursor.com/api/usage-summary`（卡片默认关闭） |
+| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` 登录态 + Cursor usage summary / usage-events API（卡片默认关闭） |
 | Zed | `~/.config/zed/settings.json` + Zed Keychain 登录态 + Cloud API（卡片默认关闭） |
 | Sub2API | macOS Keychain API Key + 自定义 Base URL 的 `/v1/usage`（卡片默认关闭） |
-| z.ai / GLM | macOS Keychain API Key + Global/BigModel CN quota API（卡片默认关闭） |
+| z.ai / GLM | macOS Keychain API Key + Global/BigModel CN quota / model-usage API（卡片默认关闭） |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
@@ -222,6 +223,8 @@ chmod +x ~/.tokei/tokei-sync.sh
 ### Unreleased
 
 - feat(provider): 新增 Cursor、Zed、Sub2API、z.ai / GLM 额度卡
+- feat(provider-usage): Cursor 与 z.ai 新增账号 Token、按模型统计及 Dashboard 独立账号模型区
+- fix(antigravity): 兼容新版会话库把生成时间迁移到 `steps.metadata` 后的 Token 解析
 - feat(antigravity): 在现有 Gemini / Antigravity 卡片中读取本机 language server 额度
 - privacy: 外部 Provider 默认关闭，API Key 存入 macOS Keychain，账号额度不进入 Git 同步快照
 

@@ -40,6 +40,13 @@ struct ProviderQuotaModelCheck {
           "details": [
             {"label": "余额", "value": "$42.50", "secondary": "USD"}
           ],
+          "usage": {
+            "ranges": {
+              "today": {"tokens": 205, "in": 140, "out": 25, "cr": 30, "cw": 10, "requests": 2, "cost": 0.15, "models": [{"name": "GPT-5.6 Sol", "tokens": 205}]},
+              "yesterday": {}, "week": {}, "last_week": {},
+              "month": {}, "year": {"coverage": "近30天"}
+            }
+          },
           "source": "fixture",
           "updated": 1787702400,
           "stale": false
@@ -51,6 +58,10 @@ struct ProviderQuotaModelCheck {
         try expect(quota.windows.first?.used_pct == 35.5, "window percent")
         try expect(quota.windows.first?.window_minutes == 10080, "window minutes")
         try expect(quota.details.first?.secondary == "USD", "detail secondary")
+        try expect(quota.usage?.ranges.today.totalTokens == 205, "provider token total")
+        try expect(quota.usage?.ranges.today.requests == 2, "provider request count")
+        try expect(quota.usage?.ranges.today.models.first?.tokens == 205, "provider model tokens")
+        try expect(quota.usage?.ranges.year.coverage == "近30天", "provider range coverage")
 
         let empty = try JSONDecoder().decode(ProviderQuotaStat.self, from: Data("{}".utf8))
         try expect(!empty.available, "empty availability")
