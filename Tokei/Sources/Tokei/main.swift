@@ -15,6 +15,9 @@ final class Store: ObservableObject {
     @Published var syncDetail = ""
     @Published var syncFailStreak = 0
     @Published var peerLoadIssues: [PeerLoadIssue] = []
+    // popover 的视图树启动时建好后就不再释放,面板关上也还活着。
+    // 动画类视图得靠这个标志判断自己是不是真的能被看见。
+    @Published var popoverVisible = false
 
     let syncManager = SyncManager()
     let quotaHistory = QuotaHistoryStore.shared
@@ -216,7 +219,7 @@ final class Store: ObservableObject {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let store = Store()
     var statusItem: NSStatusItem!
     var popover = NSPopover()
@@ -249,6 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = host
         popover.behavior = .applicationDefined
         popover.animates = true
+        popover.delegate = self
 
         // 启动时先把 Qoder IDE / Grok / 千问办公额度开关落盘到 config.json,
         // 确保随后的 refresh() 触发的 Python 扫描能读到正确配置。
@@ -463,6 +467,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        store.popoverVisible = true
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        store.popoverVisible = false
     }
 }
 

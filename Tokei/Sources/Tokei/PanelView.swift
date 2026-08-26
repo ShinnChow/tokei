@@ -1867,25 +1867,36 @@ struct PanelView: View {
 
     @State private var updateSpin = false
 
+    private var updateRing: some View {
+        Circle()
+            .strokeBorder(
+                AngularGradient(colors: [.cyan, .blue, .purple, .cyan],
+                               center: .center),
+                lineWidth: 2
+            )
+            .frame(width: 26, height: 26)
+    }
+
     @ViewBuilder
     private var updatePill: some View {
         switch updater.state {
         case .available(let tag, _, _):
             Button { updater.performUpdate() } label: {
                 ZStack {
-                    Circle()
-                        .strokeBorder(
-                            AngularGradient(colors: [.cyan, .blue, .purple, .cyan],
-                                           center: .center),
-                            lineWidth: 2
-                        )
-                        .frame(width: 26, height: 26)
-                        .rotationEffect(.degrees(updateSpin ? 360 : 0))
-                        .onAppear {
-                            withAnimation(.linear(duration: 2.5).repeatForever(autoreverses: false)) {
-                                updateSpin = true
+                    // 面板关着时退化成静态圆环。这棵视图树永不释放,
+                    // repeatForever 会一直驱动 CoreAnimation 显示周期空烧 CPU。
+                    if store.popoverVisible {
+                        updateRing
+                            .rotationEffect(.degrees(updateSpin ? 360 : 0))
+                            .onAppear {
+                                withAnimation(.linear(duration: 2.5).repeatForever(autoreverses: false)) {
+                                    updateSpin = true
+                                }
                             }
-                        }
+                            .onDisappear { updateSpin = false }
+                    } else {
+                        updateRing
+                    }
                     Image(systemName: "arrow.up")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
