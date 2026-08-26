@@ -17,6 +17,28 @@ if [[ ! "$BUILD_DATE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
     exit 1
 fi
 
+# Command Line Tools 27 的 SwiftUI SDK 会引用 SwiftUIMacros.StateMacro，
+# 但部分 CLT 安装并未包含对应插件。此时使用同一工具链自带的 26.x SDK。
+if [[ -z "${SDKROOT:-}" ]]; then
+    DEVELOPER_PATH="$(xcode-select -p 2>/dev/null || true)"
+    DEFAULT_SDK="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+    SWIFTUI_CORE_MODULES="$DEFAULT_SDK/System/Library/Frameworks/SwiftUICore.framework/Versions/A/Modules"
+    SWIFTUI_MACROS_PLUGIN="$DEVELOPER_PATH/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib"
+
+    if [[ "$DEVELOPER_PATH" == */CommandLineTools ]] \
+        && [[ -d "$SWIFTUI_CORE_MODULES" ]] \
+        && grep -Rqs 'type: "StateMacro"' "$SWIFTUI_CORE_MODULES" \
+        && [[ ! -f "$SWIFTUI_MACROS_PLUGIN" ]]; then
+        COMPATIBLE_SDK="$DEVELOPER_PATH/SDKs/MacOSX26.sdk"
+        if [[ ! -d "$COMPATIBLE_SDK" ]]; then
+            echo "当前 Command Line Tools 缺少 SwiftUIMacros，请安装完整 Xcode 后重试" >&2
+            exit 1
+        fi
+        export SDKROOT="$COMPATIBLE_SDK"
+        echo "Command Line Tools 缺少 SwiftUIMacros，使用兼容 SDK: $SDKROOT"
+    fi
+fi
+
 swift build -c release
 
 APP="Tokei.app"
