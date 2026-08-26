@@ -317,7 +317,8 @@ struct PanelView: View {
 
     private func toolCards(for u: Usage) -> [ToolCardItem] {
         let cr = u.claude.ranges.get(sel), xr = u.codex.ranges.get(sel)
-        let gr = u.gemini.ranges.get(sel), kr = u.grok.ranges.get(sel)
+        let geminiDisplay = u.gemini.ranges.displayRange(for: sel)
+        let kr = u.grok.ranges.get(sel)
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let qclir = u.qodercli.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
@@ -350,11 +351,15 @@ struct PanelView: View {
                              (u.codex.reset_cards?.count ?? 0) > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini,
-                         active: gr.sessions > 0 || u.antigravity.available,
+                         active: geminiDisplay.range.hasUsage || u.antigravity.available,
                          tint: Theme.gemini,
-                         presentation: gr.sessions == 0 && u.antigravity.available
+                         presentation: !geminiDisplay.range.hasUsage && u.antigravity.available
                              ? .compactStatus : .standard,
-                         content: AnyView(geminiBlock(gr, quota: u.antigravity))),
+                         content: AnyView(geminiBlock(
+                            geminiDisplay.range,
+                            quota: u.antigravity,
+                            displayedRange: geminiDisplay.key
+                         ))),
             ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor,
                          active: u.cursor.available || cursorUsage.totalTokens > 0,
                          tint: Theme.cursor,
@@ -682,12 +687,25 @@ struct PanelView: View {
 
     // MARK: - Gemini / Antigravity 卡片
     @ViewBuilder
-    func geminiBlock(_ r: GeminiRange, quota: ProviderQuotaStat) -> some View {
+    func geminiBlock(
+        _ r: GeminiRange,
+        quota: ProviderQuotaStat,
+        displayedRange: RangeKey? = nil
+    ) -> some View {
+        let usageLabel: String = {
+            guard let displayedRange, displayedRange != sel else { return sel.label }
+            return "\(displayedRange.label)（\(sel.label)无用量）"
+        }()
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions,
-                     toolID: r.sessions > 0 ? "gemini" : nil)
-            if r.sessions > 0 {
-                CostHeadline(value: Fmt.human(r.in + r.cached + r.out + r.thoughts), caption: "\(sel.label) 总量", tint: Theme.gemini)
+                     toolID: r.hasUsage ? "gemini" : nil)
+            if r.hasUsage {
+                if let displayedRange, displayedRange != sel {
+                    Text("\(sel.label)暂无用量，显示\(displayedRange.label)最近用量")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                CostHeadline(value: Fmt.human(r.totalTokens), caption: "\(usageLabel) 总量", tint: Theme.gemini)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {
                     var items: [Metric] = [
@@ -706,13 +724,14 @@ struct PanelView: View {
                         return ModelRow(name: m.name, pin: m.pin, pout: m.pout, cost: m.cost, total: total, hit: hit,
                                         tokIn: m.in, tokOut: m.out, tokCR: m.cached, tokCW: m.thoughts)
                     }
-                    modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini)
+                    modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini,
+                                    periodLabel: usageLabel)
                 }
             } else {
                 quota.available ? AnyView(usageEmptyHint) : AnyView(emptyHint)
             }
             if quota.available {
-                if r.sessions > 0 { thinDivider }
+                if r.hasUsage { thinDivider }
                 providerQuotaContent(quota, tint: Theme.gemini)
             }
         }
@@ -1801,7 +1820,12 @@ struct PanelView: View {
     }
 
     @ViewBuilder
-    func modelDisclosure(_ models: [ModelRow], open: Binding<Bool>, tint: Color) -> some View {
+    func modelDisclosure(
+        _ models: [ModelRow],
+        open: Binding<Bool>,
+        tint: Color,
+        periodLabel: String? = nil
+    ) -> some View {
         Button {
             open.wrappedValue.toggle()
         } label: {
@@ -1821,7 +1845,7 @@ struct PanelView: View {
         .buttonStyle(.plain)
         if open.wrappedValue {
             VStack(alignment: .leading, spacing: 6) {
-                Text("按模型 · \(sel.label)")
+                Text("按模型 · \(periodLabel ?? sel.label)")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in

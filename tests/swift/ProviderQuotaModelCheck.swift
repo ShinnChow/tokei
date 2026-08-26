@@ -67,6 +67,22 @@ struct ProviderQuotaModelCheck {
         try expect(!empty.available, "empty availability")
         try expect(empty.windows.isEmpty, "empty windows")
         try expect(empty.details.isEmpty, "empty details")
+
+        let geminiRanges = try JSONDecoder().decode(GeminiRanges.self, from: Data("""
+        {
+          "today": {"hit": 0, "in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0, "models": [], "sessions": 0},
+          "yesterday": {"hit": 75, "in": 100, "out": 20, "cached": 30, "thoughts": 10, "cost": 1.25, "models": [], "sessions": 1},
+          "week": {"hit": 75, "in": 100, "out": 20, "cached": 30, "thoughts": 10, "cost": 1.25, "models": [], "sessions": 1},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0, "models": [], "sessions": 0},
+          "month": {"hit": 75, "in": 100, "out": 20, "cached": 30, "thoughts": 10, "cost": 1.25, "models": [], "sessions": 1},
+          "year": {"hit": 75, "in": 100, "out": 20, "cached": 30, "thoughts": 10, "cost": 1.25, "models": [], "sessions": 1}
+        }
+        """.utf8))
+        let geminiDisplay = geminiRanges.displayRange(for: .today)
+        try expect(geminiDisplay.key == .yesterday, "Gemini should expose the nearest non-empty range")
+        try expect(geminiDisplay.range.totalTokens == 160, "Gemini display total")
+        try expect(geminiDisplay.range.hasUsage, "Gemini display usage flag")
+
         print("provider quota model checks passed")
     }
 }

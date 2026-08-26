@@ -81,7 +81,32 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP"
+# A stable local signing identity keeps macOS Keychain ACLs valid across
+# rebuilds. Prefer Developer ID, then Apple Development; CI can force ad-hoc
+# signing with TOKEI_CODESIGN_IDENTITY=-.
+CODESIGN_IDENTITY="${TOKEI_CODESIGN_IDENTITY:-auto}"
+if [ "$CODESIGN_IDENTITY" = "auto" ]; then
+    CODESIGN_IDENTITY=""
+    if command -v security &>/dev/null; then
+        IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+        CODESIGN_IDENTITY="$(echo "$IDENTITIES" \
+            | sed -nE 's/^[[:space:]]*[0-9]+\) [0-9A-F]+ "(Developer ID Application:[^"]+)".*/\1/p' \
+            | head -n 1)"
+        if [ -z "$CODESIGN_IDENTITY" ]; then
+            CODESIGN_IDENTITY="$(echo "$IDENTITIES" \
+                | sed -nE 's/^[[:space:]]*[0-9]+\) [0-9A-F]+ "(Apple Development:[^"]+)".*/\1/p' \
+                | head -n 1)"
+        fi
+    fi
+    [ -n "$CODESIGN_IDENTITY" ] || CODESIGN_IDENTITY="-"
+fi
+
+if [ "$CODESIGN_IDENTITY" = "-" ]; then
+    echo "未找到稳定签名证书，使用 ad-hoc 签名；后续重编译可能需要重新保存 Provider 密钥"
+else
+    echo "使用代码签名: $CODESIGN_IDENTITY"
+fi
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"
 xattr -cr "$APP" 2>/dev/null || true
 echo "Built: $(pwd)/$APP"

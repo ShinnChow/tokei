@@ -121,6 +121,12 @@ cd tokei/Tokei
 bash package.sh
 open Tokei.app
 ```
+
+`package.sh` 会优先使用本机可用的 Developer ID / Apple Development
+证书，让 Keychain 中的 Provider 密钥在重复构建后仍可访问；没有证书时会回退到
+ad-hoc 签名。可用 `TOKEI_CODESIGN_IDENTITY=- bash package.sh` 强制 ad-hoc，或用
+`TOKEI_CODESIGN_IDENTITY="证书名称" bash package.sh` 指定签名身份。
+
 </details>
 
 ## 多设备同步配置

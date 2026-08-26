@@ -94,6 +94,14 @@ struct DashboardPayload: Codable {
     var wrapped: WrappedData
 }
 
+private struct DashboardProviderQuotaItem: Identifiable {
+    var id: String
+    var title: String
+    var quota: ProviderQuotaStat
+    var usage: TokenUsageRange?
+    var tint: Color
+}
+
 final class DashboardRepository: ObservableObject {
     static let shared = DashboardRepository()
 
@@ -155,6 +163,42 @@ struct DashboardView: View {
     @State private var wrappedPeriod: WrappedPeriod = .all
     @AppStorage("hideProjects") private var hideProjects = false
 
+    private var providerRangeKey: RangeKey {
+        switch wrappedPeriod {
+        case .day: return .today
+        case .week: return .week
+        case .month: return .month
+        case .year: return .year
+        case .all: return .all
+        }
+    }
+
+    private var providerQuotaItems: [DashboardProviderQuotaItem] {
+        guard let usage = store.usage else { return [] }
+        let range = providerRangeKey
+        let candidates: [(id: String, title: String, quota: ProviderQuotaStat,
+                         usage: TokenUsageRange?, tint: Color)] = [
+            ("antigravity", "Gemini / Antigravity", usage.antigravity, nil, Theme.gemini),
+            ("cursor", "Cursor", usage.cursor,
+             usage.cursor.usage?.ranges.get(range), Theme.cursor),
+            ("zed", "Zed", usage.zed, nil, Theme.zed),
+            ("sub2api", "Sub2API", usage.sub2api,
+             usage.sub2api.usage?.ranges.get(range), Theme.sub2api),
+            ("zai", "z.ai / GLM", usage.zai,
+             usage.zai.usage?.ranges.get(range), Theme.zai),
+        ]
+        return candidates.compactMap { candidate in
+            guard candidate.quota.available else { return nil }
+            return DashboardProviderQuotaItem(
+                id: candidate.id,
+                title: candidate.title,
+                quota: candidate.quota,
+                usage: candidate.usage,
+                tint: candidate.tint
+            )
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if loading {
@@ -163,6 +207,10 @@ struct DashboardView: View {
             } else {
                 if let w = wrapped, w.total_tokens > 0 {
                     WrappedView(data: w, period: $wrappedPeriod) { p in loadWrapped(p) }
+                }
+                if !providerQuotaItems.isEmpty {
+                    Divider().opacity(0.15)
+                    providerQuotaSection(providerQuotaItems)
                 }
                 if !models.isEmpty {
                     Divider().opacity(0.15)
@@ -185,10 +233,158 @@ struct DashboardView: View {
         .onAppear { loadData(showLoading: true) }
         .onChange(of: store.showAllDevices) { _ in applyCachedScope(animated: true) }
         .onChange(of: store.syncEnabled) { _ in applyCachedScope(animated: true) }
-        .onReceive(store.$usage) { _ in applyCachedScope(animated: false) }
+        .onReceive(store.$usage) { _ in
+            applyCachedScope(animated: false)
+            // Provider model days are written by the main refresh. Reload the
+            // lightweight dashboard aggregation after that refresh completes so
+            // z.ai/Cursor model rows stay in sync with the quota cards.
+            dashboardRepository.load(wrappedPeriod, force: true)
+        }
         .onReceive(dashboardRepository.$payloads) { payloads in
             guard let payload = payloads[wrappedPeriod.rawValue] else { return }
             apply(payload, animated: false)
+        }
+    }
+
+    @ViewBuilder
+    private func providerQuotaSection(_ items: [DashboardProviderQuotaItem]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("账号额度")
+                .font(.system(size: 13, weight: .bold))
+            Text("额度来自本机账号登录态；账号用量单独展示，不并入本地工具总计")
+                .font(.system(size: 9))
+                .foregroundStyle(Theme.tTertiary)
+            ForEach(items) { item in
+                providerQuotaCard(item)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func providerQuotaCard(_ item: DashboardProviderQuotaItem) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Circle().fill(item.tint.gradient).frame(width: 7, height: 7)
+                Text(item.title)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Theme.tPrimary)
+                if let plan = item.quota.plan, !plan.isEmpty {
+                    Text(plan)
+                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tSecondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(item.tint.opacity(0.14)))
+                }
+                Spacer(minLength: 6)
+                if let account = item.quota.account, !account.isEmpty {
+                    Text(account)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            if let usage = item.usage, usage.totalTokens > 0 {
+                HStack(spacing: 6) {
+                    Text("\(wrappedPeriod.label)账号 Token")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text("\(Fmt.human(usage.totalTokens)) · \(usage.models.count) 个模型")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(item.tint)
+                }
+            }
+
+            ForEach(item.quota.windows) { window in
+                dashboardQuotaWindow(window, tint: item.tint)
+            }
+
+            if !item.quota.details.isEmpty {
+                VStack(spacing: 4) {
+                    ForEach(Array(item.quota.details.prefix(6).enumerated()), id: \.offset) { entry in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(entry.element.label)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.tTertiary)
+                            Spacer(minLength: 6)
+                            Text(entry.element.value)
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 5) {
+                Image(systemName: item.quota.stale ? "exclamationmark.triangle" : "clock")
+                    .font(.system(size: 8.5))
+                Text(item.quota.stale
+                     ? "额度数据已过期"
+                     : (item.quota.updated.map { "更新于 \(Fmt.reset($0))" } ?? "尚无更新时间"))
+                    .font(.system(size: 8.5, design: .monospaced))
+                Spacer()
+            }
+            .foregroundStyle(item.quota.stale ? Color.orange : Theme.tTertiary)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(item.tint.opacity(0.16), lineWidth: 0.5)
+                )
+        )
+    }
+
+    @ViewBuilder
+    private func dashboardQuotaWindow(_ window: ProviderQuotaWindow, tint: Color) -> some View {
+        if window.usage_known, let used = window.used_pct {
+            let remaining = max(0, min(100, 100 - used))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(window.title)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.tSecondary)
+                    Spacer(minLength: 6)
+                    Text(String(format: "%.0f%% 剩余", remaining))
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(tint)
+                }
+                MiniBar(value: remaining, tint: tint)
+                if window.detail != nil || window.reset != nil {
+                    HStack(spacing: 6) {
+                        if let detail = window.detail, !detail.isEmpty {
+                            Text(detail)
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundStyle(Theme.tTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        if let reset = window.reset {
+                            Text("重置 \(Fmt.reset(reset))")
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
+                    }
+                }
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(window.title)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.tSecondary)
+                Spacer(minLength: 6)
+                Text(window.detail ?? "额度比例未知")
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(2)
+            }
         }
     }
 
@@ -630,7 +826,8 @@ struct DashboardView: View {
                 models = baseModels
                 wrapped = baseWrapped
             }
-            if !daily.isEmpty || !models.isEmpty || !providerModels.isEmpty || wrapped != nil {
+            if !daily.isEmpty || !models.isEmpty || !providerModels.isEmpty
+                || !providerQuotaItems.isEmpty || wrapped != nil {
                 loading = false
             }
         }

@@ -188,6 +188,9 @@ struct GeminiRange: Codable {
     var cost: Double
     var models: [GeminiModelStat] = []
     var sessions: Int = 0
+
+    var totalTokens: Int { self.in + out + cached + thoughts }
+    var hasUsage: Bool { sessions > 0 || totalTokens > 0 }
 }
 
 struct GeminiRanges: Codable {
@@ -198,6 +201,35 @@ struct GeminiRanges: Codable {
     var month: GeminiRange
     var year: GeminiRange
     var all: GeminiRange?
+
+    /// A zero-activity selected range should not hide a recent local session.
+    /// Return the nearest useful range together with its real label so the UI
+    /// never presents yesterday/week data as today's data.
+    func displayRange(for preferred: RangeKey) -> (range: GeminiRange, key: RangeKey) {
+        let order: [RangeKey]
+        switch preferred {
+        case .today:
+            order = [.today, .yesterday, .week, .month, .year, .all]
+        case .yesterday:
+            order = [.yesterday, .today, .week, .month, .year, .all]
+        case .week:
+            order = [.week, .today, .yesterday, .month, .year, .all]
+        case .lastWeek:
+            order = [.lastWeek, .week, .month, .year, .all, .today, .yesterday]
+        case .month:
+            order = [.month, .year, .all, .week, .today, .yesterday]
+        case .year:
+            order = [.year, .all, .month, .week, .today, .yesterday]
+        case .all:
+            order = [.all, .year, .month, .week, .today, .yesterday]
+        }
+        for key in order {
+            let candidate = get(key)
+            if candidate.hasUsage { return (candidate, key) }
+        }
+        return (get(preferred), preferred)
+    }
+
     func get(_ k: RangeKey) -> GeminiRange {
         switch k {
         case .today: return today; case .yesterday: return yesterday
