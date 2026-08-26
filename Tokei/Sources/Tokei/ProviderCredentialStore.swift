@@ -52,7 +52,7 @@ enum ProviderCredentialStore {
         if let token = token(for: .zai) {
             result["Z_AI_API_KEY"] = token
         }
-        if let credentials = zedCredentials() {
+        if providerQuotaEnabled("zed"), let credentials = zedCredentials() {
             result["TOKEI_ZED_USER_ID"] = credentials.userID
             result["TOKEI_ZED_ACCESS_TOKEN"] = credentials.accessToken
         }
@@ -64,7 +64,22 @@ enum ProviderCredentialStore {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: provider.rawValue,
+            // Avoid the legacy login-keychain ACL path, which can block indefinitely
+            // after an ad-hoc rebuild even when authentication UI is disabled.
+            kSecUseDataProtectionKeychain as String: true,
         ]
+    }
+
+    private static func providerQuotaEnabled(_ provider: String) -> Bool {
+        let envKey = "TOKEI_(provider.uppercased())_QUOTA"
+        if ProcessInfo.processInfo.environment[envKey] == "1" { return true }
+        if ProcessInfo.processInfo.environment[envKey] == "0" { return false }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".tokei/config.json")
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return object["(provider)_quota_enabled"] as? Bool ?? false
     }
 
     private struct ZedSettings: Decodable {
@@ -117,6 +132,16 @@ enum ProviderCredentialStore {
         ]
         applyNoUI(to: &query)
         var result: AnyObject?
+        var interactionAllowed: DarwinBoolean = false
+        let interactionStatus = SecKeychainGetUserInteractionAllowed(&interactionAllowed)
+        if interactionStatus == errSecSuccess {
+            SecKeychainSetUserInteractionAllowed(false)
+        }
+        defer {
+            if interactionStatus == errSecSuccess {
+                SecKeychainSetUserInteractionAllowed(interactionAllowed.boolValue)
+            }
+        }
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let item = result as? [String: Any],
               let userID = item[kSecAttrAccount as String] as? String,

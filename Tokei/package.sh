@@ -131,15 +131,25 @@ INSTALL
     rm -rf "$MOUNT_DIR"
 
     # 挂载并用 AppleScript 设置窗口样式
-    DEVICE=$(hdiutil attach -readwrite -noverify "$TMP_DMG" | grep '/Volumes/Tokei' | awk '{print $1}')
+    ATTACH_OUTPUT="$(hdiutil attach -readwrite -noverify "$TMP_DMG")"
+    DEVICE="$(echo "$ATTACH_OUTPUT" | awk '/^\/dev\/disk/ {print $1; exit}')"
+    VOLUME_PATH="$(echo "$ATTACH_OUTPUT" | sed -n 's|^.*\(/Volumes/.*\)$|\1|p' | head -n 1)"
+    if [ -z "$DEVICE" ]; then
+        echo "无法识别已挂载 DMG 的设备" >&2
+        exit 1
+    fi
     sleep 1
 
-    # 隐藏 dot 文件夹
-    SetFile -a V /Volumes/Tokei/.background 2>/dev/null || true
-    SetFile -a V /Volumes/Tokei/.fseventsd 2>/dev/null || true
+    # 新版 hdiutil 可能只附加设备而不返回 /Volumes 挂载点；窗口装饰是可选项。
+    if [ -n "$VOLUME_PATH" ] && [ -d "$VOLUME_PATH" ]; then
+        [ -d "$VOLUME_PATH/.background" ] \
+            && SetFile -a V "$VOLUME_PATH/.background" 2>/dev/null || true
+        [ -d "$VOLUME_PATH/.fseventsd" ] \
+            && SetFile -a V "$VOLUME_PATH/.fseventsd" 2>/dev/null || true
+    fi
 
-    if [ -f "/Volumes/Tokei/.background/bg.png" ]; then
-        osascript <<'APPLE'
+    if [ -n "$VOLUME_PATH" ] && [ -f "$VOLUME_PATH/.background/bg.png" ]; then
+        osascript <<'APPLE' || true
 tell application "Finder"
     tell disk "Tokei"
         open
@@ -164,7 +174,22 @@ APPLE
     fi
 
     sync
-    hdiutil detach "$DEVICE" 2>/dev/null
+    if command -v diskutil &>/dev/null; then
+        EJECT_COMMAND=(diskutil eject "$DEVICE")
+    else
+        EJECT_COMMAND=(hdiutil detach "$DEVICE")
+    fi
+    EJECTED=0
+    for _attempt in 1 2 3 4 5; do
+        sleep 1
+        if "${EJECT_COMMAND[@]}" >/dev/null 2>&1; then
+            EJECTED=1
+            break
+        fi
+    done
+    if [ "$EJECTED" -ne 1 ]; then
+        hdiutil detach -force "$DEVICE" 2>/dev/null
+    fi
     sleep 1
 
     # 转为压缩只读 DMG
