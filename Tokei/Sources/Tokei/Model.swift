@@ -748,6 +748,65 @@ struct QwenWorkQuota: Codable {
     }
 }
 
+struct ProviderQuotaWindow: Codable, Identifiable {
+    var id = ""
+    var title = ""
+    var used_pct: Double?
+    var reset: Int?
+    var window_minutes: Int?
+    var detail: String?
+    var usage_known = true
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? id
+        used_pct = try? c.decodeIfPresent(Double.self, forKey: .used_pct)
+        reset = try? c.decodeIfPresent(Int.self, forKey: .reset)
+        window_minutes = try? c.decodeIfPresent(Int.self, forKey: .window_minutes)
+        detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+        usage_known = (try? c.decodeIfPresent(Bool.self, forKey: .usage_known)) ?? true
+    }
+}
+
+struct ProviderQuotaDetail: Codable {
+    var label = ""
+    var value = ""
+    var secondary: String?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        value = try c.decodeIfPresent(String.self, forKey: .value) ?? ""
+        secondary = try? c.decodeIfPresent(String.self, forKey: .secondary)
+    }
+}
+
+struct ProviderQuotaStat: Codable {
+    var available = false
+    var plan: String?
+    var account: String?
+    var windows: [ProviderQuotaWindow] = []
+    var details: [ProviderQuotaDetail] = []
+    var source: String?
+    var updated: Int?
+    var stale = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = (try? c.decodeIfPresent(Bool.self, forKey: .available)) ?? false
+        plan = try? c.decodeIfPresent(String.self, forKey: .plan)
+        account = try? c.decodeIfPresent(String.self, forKey: .account)
+        windows = (try? c.decodeIfPresent([ProviderQuotaWindow].self, forKey: .windows)) ?? []
+        details = (try? c.decodeIfPresent([ProviderQuotaDetail].self, forKey: .details)) ?? []
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+        updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -768,11 +827,16 @@ struct Usage: Codable {
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
     var kimicode: TokenUsageStat
+    var antigravity: ProviderQuotaStat
+    var cursor: ProviderQuotaStat
+    var zed: ProviderQuotaStat
+    var sub2api: ProviderQuotaStat
+    var zai: ProviderQuotaStat
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, prime_agent
+        case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -800,6 +864,11 @@ struct Usage: Codable {
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
         kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
+        antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
+        cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
+        zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()
+        sub2api = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .sub2api) ?? ProviderQuotaStat()
+        zai = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zai) ?? ProviderQuotaStat()
     }
 }
 

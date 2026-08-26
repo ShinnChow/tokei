@@ -40,6 +40,10 @@ struct PanelView: View {
     @AppStorage("showClaude") private var showClaude = true
     @AppStorage("showCodex") private var showCodex = true
     @AppStorage("showGemini") private var showGemini = true
+    @AppStorage("showCursor") private var showCursor = false
+    @AppStorage("showZed") private var showZed = false
+    @AppStorage("showSub2API") private var showSub2API = false
+    @AppStorage("showZai") private var showZai = false
     @AppStorage("showGrok") private var showGrok = true
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
@@ -79,7 +83,8 @@ struct PanelView: View {
     }
 
     private var visibleCount: Int {
-        [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
+        [showClaude, showCodex, showGemini, showCursor, showZed, showSub2API, showZai,
+         showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode,
          showQwenWork, showKimiCode, showPrimeAgent].filter { $0 }.count
     }
@@ -340,8 +345,32 @@ struct PanelView: View {
                          active: xr.sessions > 0 || u.codex.p5 != nil || u.codex.pw != nil ||
                              (u.codex.reset_cards?.count ?? 0) > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
-            ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini, active: gr.sessions > 0,
-                         tint: Theme.gemini, content: AnyView(geminiBlock(gr))),
+            ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini,
+                         active: gr.sessions > 0 || u.antigravity.available,
+                         tint: Theme.gemini,
+                         presentation: gr.sessions == 0 && u.antigravity.available
+                             ? .compactStatus : .standard,
+                         content: AnyView(geminiBlock(gr, quota: u.antigravity))),
+            ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor, active: showCursor,
+                         tint: Theme.cursor, presentation: .compactStatus,
+                         content: AnyView(providerQuotaBlock(
+                            "Cursor", quota: u.cursor, tint: Theme.cursor,
+                            setupHint: "请确认 Cursor.app 已登录；Tokei 会复用其本地登录态读取额度。"))),
+            ToolCardItem(id: "zed", name: "Zed", visible: showZed, active: showZed,
+                         tint: Theme.zed, presentation: .compactStatus,
+                         content: AnyView(providerQuotaBlock(
+                            "Zed", quota: u.zed, tint: Theme.zed,
+                            setupHint: "请先在 Zed 中登录 GitHub；Tokei 会无弹窗读取现有 Keychain 登录态。"))),
+            ToolCardItem(id: "sub2api", name: "Sub2API", visible: showSub2API, active: showSub2API,
+                         tint: Theme.sub2api, presentation: .compactStatus,
+                         content: AnyView(providerQuotaBlock(
+                            "Sub2API", quota: u.sub2api, tint: Theme.sub2api,
+                            setupHint: "请在设置的「Provider 额度」中保存 Base URL 与 Group API Key。"))),
+            ToolCardItem(id: "zai", name: "z.ai / GLM", visible: showZai, active: showZai,
+                         tint: Theme.zai, presentation: .compactStatus,
+                         content: AnyView(providerQuotaBlock(
+                            "z.ai / GLM", quota: u.zai, tint: Theme.zai,
+                            setupHint: "请在设置的「Provider 额度」中选择区域并保存 API Key。"))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
                          tint: Theme.grok,
@@ -643,9 +672,10 @@ struct PanelView: View {
 
     // MARK: - Gemini / Antigravity 卡片
     @ViewBuilder
-    func geminiBlock(_ r: GeminiRange) -> some View {
+    func geminiBlock(_ r: GeminiRange, quota: ProviderQuotaStat) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions, toolID: "gemini")
+            cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions,
+                     toolID: r.sessions > 0 ? "gemini" : nil)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.cached + r.out + r.thoughts), caption: "\(sel.label) 总量", tint: Theme.gemini)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
@@ -668,10 +698,139 @@ struct PanelView: View {
                     }
                     modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini)
                 }
-            } else {
+            } else if !quota.available {
                 emptyHint
             }
+            if quota.available {
+                if r.sessions > 0 { thinDivider }
+                providerQuotaContent(quota, tint: Theme.gemini)
+            }
         }
+    }
+
+    // MARK: - CodexBar-compatible quota providers
+    @ViewBuilder
+    func providerQuotaBlock(
+        _ title: String,
+        quota: ProviderQuotaStat,
+        tint: Color,
+        setupHint: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHeadPlain(title, tint: tint)
+            if quota.available {
+                providerQuotaContent(quota, tint: tint)
+            } else {
+                Text(setupHint)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func providerQuotaContent(_ quota: ProviderQuotaStat, tint: Color) -> some View {
+        if quota.plan != nil || quota.account != nil {
+            HStack(spacing: 6) {
+                if let plan = quota.plan, !plan.isEmpty {
+                    providerQuotaPill(plan, tint: tint)
+                }
+                if let account = quota.account, !account.isEmpty {
+                    Text(account)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+
+        ForEach(quota.windows) { window in
+            if window.usage_known, let used = window.used_pct {
+                quotaRow(
+                    title: window.title,
+                    pct: max(0, min(100, 100 - used)),
+                    detail: window.detail,
+                    reset: window.reset,
+                    tint: tint
+                )
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(window.title)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.tSecondary)
+                    Spacer(minLength: 6)
+                    Text(window.detail ?? "额度比例未知")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+        }
+
+        if !quota.details.isEmpty {
+            thinDivider
+            VStack(spacing: 6) {
+                ForEach(Array(quota.details.prefix(12).enumerated()), id: \.offset) { item in
+                    let detail = item.element
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(detail.label)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.tTertiary)
+                        Spacer(minLength: 8)
+                        VStack(alignment: .trailing, spacing: 1) {
+                            Text(providerQuotaDetailValue(detail))
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tPrimary)
+                            if let secondary = detail.secondary, !secondary.isEmpty {
+                                Text(secondary)
+                                    .font(.system(size: 8.5, design: .monospaced))
+                                    .foregroundStyle(Theme.tTertiary)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if quota.stale {
+            quotaStateNotice(
+                title: "额度数据已过期",
+                detail: "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。",
+                source: quota.source ?? "Provider 缓存",
+                updated: quota.updated,
+                tint: tint,
+                warning: true
+            )
+        } else if let updated = quota.updated {
+            HStack(spacing: 5) {
+                Image(systemName: "clock")
+                    .font(.system(size: 8.5))
+                Text("额度更新于 \(Fmt.reset(updated))")
+                    .font(.system(size: 9, design: .monospaced))
+                Spacer(minLength: 4)
+            }
+            .foregroundStyle(Theme.tTertiary)
+        }
+    }
+
+    func providerQuotaPill(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .foregroundStyle(Theme.tSecondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.16)))
+    }
+
+    func providerQuotaDetailValue(_ detail: ProviderQuotaDetail) -> String {
+        if detail.label.contains("到期"), let epoch = Int(detail.value) {
+            return Fmt.reset(epoch)
+        }
+        return detail.value
     }
 
     // MARK: - Grok 卡片
@@ -1942,6 +2101,13 @@ struct PanelView: View {
     @State private var debugOutput = ""
     @State private var debugExpanded = false
     @State private var cachedRemoteUrl = ""
+    @State private var sub2APIBaseURL = ""
+    @State private var sub2APIKey = ""
+    @State private var sub2APIKeyStored = false
+    @State private var zaiRegion = "global"
+    @State private var zaiKey = ""
+    @State private var zaiKeyStored = false
+    @State private var providerSettingsResult = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @State private var configuredDeviceID: String?
@@ -1959,6 +2125,7 @@ struct PanelView: View {
             HStack(alignment: .top, spacing: 11) {
                 VStack(alignment: .leading, spacing: 11) {
                     settingsAgentsSection
+                    settingsProviderQuotaSection
                     settingsDiagnosticsSection
                     settingsPricingSection
                 }
@@ -1978,6 +2145,7 @@ struct PanelView: View {
         }
         .onAppear {
             loginItem.refresh()
+            loadProviderSettings()
             if let cfg = SyncManager.loadConfig() {
                 if let persistedID = Self.validSyncDeviceID(cfg.device_id) {
                     configuredDeviceID = persistedID
@@ -2115,6 +2283,10 @@ struct PanelView: View {
                 settingsRow("Claude", tint: Theme.claude, isOn: $showClaude)
                 settingsRow("Codex", tint: Theme.codex, isOn: $showCodex)
                 settingsRow("Gemini / Antigravity", tint: Theme.gemini, isOn: $showGemini)
+                settingsRow("Cursor", tint: Theme.cursor, isOn: $showCursor)
+                settingsRow("Zed", tint: Theme.zed, isOn: $showZed)
+                settingsRow("Sub2API", tint: Theme.sub2api, isOn: $showSub2API)
+                settingsRow("z.ai / GLM", tint: Theme.zai, isOn: $showZai)
                 settingsRow("Grok", tint: Theme.grok, isOn: $showGrok)
                 settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
@@ -2136,6 +2308,189 @@ struct PanelView: View {
         .onChange(of: showQoder) { enabled in
             Self.setQoderIdeEnabled(enabled)
         }
+        .onChange(of: showGemini) { enabled in
+            Self.setProviderQuotaEnabled("antigravity", enabled)
+            store.refresh()
+        }
+        .onChange(of: showCursor) { enabled in
+            Self.setProviderQuotaEnabled("cursor", enabled)
+            store.refresh()
+        }
+        .onChange(of: showZed) { enabled in
+            Self.setProviderQuotaEnabled("zed", enabled)
+            store.refresh()
+        }
+        .onChange(of: showSub2API) { enabled in
+            Self.setProviderQuotaEnabled("sub2api", enabled)
+            store.refresh()
+        }
+        .onChange(of: showZai) { enabled in
+            Self.setProviderQuotaEnabled("zai", enabled)
+            store.refresh()
+        }
+    }
+
+    var settingsProviderQuotaSection: some View {
+        settingsSection("key.horizontal.fill", "Provider 额度") {
+            Text("Cursor 复用 Cursor.app 登录态，Zed 复用 Zed Keychain；两者无需在 Tokei 中保存密钥。显示对应卡片即允许查询。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
+            Text("Sub2API")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.sub2api)
+            providerSettingsField(
+                label: "Base URL",
+                placeholder: "https://api.example.com",
+                text: $sub2APIBaseURL
+            )
+            providerSettingsField(
+                label: "API Key",
+                placeholder: sub2APIKeyStored ? "已保存，留空不修改" : "Group API Key",
+                text: $sub2APIKey,
+                secure: true
+            )
+            if sub2APIKeyStored {
+                HStack {
+                    Spacer()
+                    settingsActionButton(icon: "trash", title: "清除 Sub2API 密钥") {
+                        clearProviderToken(.sub2api)
+                    }
+                }
+            }
+
+            thinDivider
+
+            Text("z.ai / GLM")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.zai)
+            HStack(spacing: 8) {
+                Text("区域")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(Theme.tTertiary)
+                    .frame(width: 52, alignment: .leading)
+                Picker("z.ai 区域", selection: $zaiRegion) {
+                    Text("Global").tag("global")
+                    Text("BigModel CN").tag("bigmodel-cn")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+            }
+            providerSettingsField(
+                label: "API Key",
+                placeholder: zaiKeyStored ? "已保存，留空不修改" : "Z_AI_API_KEY",
+                text: $zaiKey,
+                secure: true
+            )
+            if zaiKeyStored {
+                HStack {
+                    Spacer()
+                    settingsActionButton(icon: "trash", title: "清除 z.ai 密钥") {
+                        clearProviderToken(.zai)
+                    }
+                }
+            }
+
+            HStack {
+                settingsActionButton(icon: "checkmark.circle", title: "保存 Provider 设置") {
+                    saveProviderSettings()
+                }
+                Spacer()
+                if !providerSettingsResult.isEmpty {
+                    Text(providerSettingsResult)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(providerSettingsResult == "已保存" ? Color.green : Color.orange)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func providerSettingsField(
+        label: String,
+        placeholder: String,
+        text: Binding<String>,
+        secure: Bool = false
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 9.5))
+                .foregroundStyle(Theme.tTertiary)
+                .frame(width: 52, alignment: .leading)
+            Group {
+                if secure {
+                    SecureField(placeholder, text: text)
+                } else {
+                    TextField(placeholder, text: text)
+                }
+            }
+            .textFieldStyle(.plain)
+            .font(.system(size: 9.5, design: .monospaced))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+        }
+    }
+
+    private func loadProviderSettings() {
+        sub2APIBaseURL = SyncManager.providerSetting("sub2api_base_url") ?? ""
+        zaiRegion = SyncManager.providerSetting("zai_region") ?? "global"
+        sub2APIKeyStored = ProviderCredentialStore.token(for: .sub2api) != nil
+        zaiKeyStored = ProviderCredentialStore.token(for: .zai) != nil
+    }
+
+    private func saveProviderSettings() {
+        let baseURL = sub2APIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard baseURL.isEmpty || Self.validSub2APIBaseURL(baseURL) else {
+            providerSettingsResult = "Sub2API URL 仅支持 HTTPS 或本机 HTTP"
+            return
+        }
+        let savedURL = SyncManager.setProviderSetting(
+            baseURL.isEmpty ? nil : baseURL,
+            forKey: "sub2api_base_url"
+        )
+        let savedRegion = SyncManager.setProviderSetting(zaiRegion, forKey: "zai_region")
+        let savedSub2APIKey = sub2APIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || ProviderCredentialStore.setToken(sub2APIKey, for: .sub2api)
+        let savedZaiKey = zaiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || ProviderCredentialStore.setToken(zaiKey, for: .zai)
+        guard savedURL, savedRegion, savedSub2APIKey, savedZaiKey else {
+            providerSettingsResult = "保存失败"
+            return
+        }
+        sub2APIKey = ""
+        zaiKey = ""
+        loadProviderSettings()
+        providerSettingsResult = "已保存"
+        store.refresh()
+    }
+
+    private func clearProviderToken(_ provider: ProviderSecret) {
+        guard ProviderCredentialStore.setToken("", for: provider) else {
+            providerSettingsResult = "清除失败"
+            return
+        }
+        loadProviderSettings()
+        providerSettingsResult = "已清除"
+        store.refresh()
+    }
+
+    private static func validSub2APIBaseURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else { return false }
+        if scheme == "https" { return true }
+        guard scheme == "http" else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
     var settingsPrivacySection: some View {
@@ -2176,6 +2531,10 @@ struct PanelView: View {
         SyncManager.setQwenWorkQuotaEnabled(enabled)
     }
 
+    private static func setProviderQuotaEnabled(_ provider: String, _ enabled: Bool) {
+        SyncManager.setProviderQuotaEnabled(provider, enabled: enabled)
+    }
+
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
     /// 修复:showQoder 默认开启,但 .onChange 不会在启动时触发,
     /// 导致 qoder_ide_enabled 从未写入、Python 端一直不采集 Qoder IDE 数据。
@@ -2194,6 +2553,22 @@ struct PanelView: View {
     static func syncQwenWorkQuotaConfigOnLaunch() {
         let enabled = UserDefaults.standard.object(forKey: "qwenWorkQuotaEnabled") as? Bool ?? false
         setQwenWorkQuotaEnabled(enabled)
+    }
+
+    /// 新 Provider 默认关闭；Antigravity 跟随现有 Gemini / Antigravity 卡片开关。
+    static func syncProviderQuotaConfigOnLaunch() {
+        let defaults = UserDefaults.standard
+        let settings: [(String, String, Bool)] = [
+            ("antigravity", "showGemini", true),
+            ("cursor", "showCursor", false),
+            ("zed", "showZed", false),
+            ("sub2api", "showSub2API", false),
+            ("zai", "showZai", false),
+        ]
+        for (provider, key, fallback) in settings {
+            let enabled = defaults.object(forKey: key) as? Bool ?? fallback
+            setProviderQuotaEnabled(provider, enabled)
+        }
     }
 
     var settingsPricingSection: some View {
@@ -2816,7 +3191,8 @@ struct PanelView: View {
 
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let tools = ["claude", "codex", "gemini", "grok", "qoder", "qoderwork", "hermes",
+            let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
+                         "sub2api", "zai", "grok", "qoder", "qoderwork", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "deepseek_harness",
                          "opencode", "qwencode", "qwenwork", "kimicode", "prime_agent"]
                 .filter { json[$0] != nil }

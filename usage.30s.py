@@ -10,7 +10,9 @@
 # (config grok_live_quota_enabled 或 TOKEI_GROK_LIVE_QUOTA=1)。
 # 千问办公额度同样默认关闭；开启后仅访问官方桌面端的 127.0.0.1 MCP 适配器，
 # 不读取或解密账号凭据 (config qwenwork_quota_enabled 或 TOKEI_QWENWORK_QUOTA=1)。
-# 仅 --update-prices 显式联网更新价格表:
+# Cursor / Zed / Sub2API / z.ai 额度默认关闭；开启卡片后才复用本机登录态或 Keychain
+# API Key 查询对应官方/自托管接口。Antigravity 额度只探测已运行的 127.0.0.1 服务。
+# --update-prices 仍只在用户显式触发时更新价格表。
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
@@ -28,6 +30,8 @@ import json
 import math
 import re
 import sqlite3
+import subprocess
+import threading
 from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 
@@ -175,6 +179,7 @@ CODEX_RESET_CARDS_CACHE = _writable_path("codex_reset_cards_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
+PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -4143,6 +4148,1194 @@ def scan_qwenwork_quota():
     return fallback or {}
 
 
+# ---------- CodexBar-compatible provider quotas ----------
+# Remote providers are opt-in. Antigravity is the exception: it only probes an
+# already-running loopback language server and never starts the app/CLI.
+_PROVIDER_QUOTA_TTL = 300
+_PROVIDER_QUOTA_FALLBACK_TTL = 3600
+_PROVIDER_QUOTA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_PROVIDER_QUOTA_CACHE_LOCK = threading.Lock()
+_PROVIDER_QUOTA_ENV = {
+    "cursor": "TOKEI_CURSOR_QUOTA",
+    "zed": "TOKEI_ZED_QUOTA",
+    "sub2api": "TOKEI_SUB2API_QUOTA",
+    "zai": "TOKEI_ZAI_QUOTA",
+    "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
+}
+
+
+def _provider_quota_enabled(provider):
+    env_key = _PROVIDER_QUOTA_ENV.get(provider)
+    env = os.environ.get(env_key) if env_key else None
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    default = provider == "antigravity"
+    return bool(_tokei_config().get(f"{provider}_quota_enabled", default))
+
+
+def _provider_config_string(env_key, config_key):
+    value = os.environ.get(env_key)
+    if not isinstance(value, str) or not value.strip():
+        value = _tokei_config().get(config_key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _provider_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _provider_integer(value):
+    number = _provider_number(value)
+    return int(number) if number is not None and number.is_integer() else None
+
+
+def _provider_percent(value):
+    number = _provider_number(value)
+    return round(max(0.0, min(100.0, number)), 6) if number is not None else None
+
+
+def _provider_epoch(value):
+    number = _provider_number(value)
+    if number is not None:
+        if number > 100_000_000_000:
+            number /= 1000.0
+        return int(number) if number > 0 else None
+    parsed = parse_ts(value) if isinstance(value, str) else None
+    return int(parsed.timestamp()) if parsed else None
+
+
+def _provider_money(value, unit="USD"):
+    number = _provider_number(value)
+    if number is None:
+        return None
+    if str(unit or "USD").upper() == "USD":
+        return f"${number:,.2f}"
+    return f"{number:,.2f} {unit}"
+
+
+def _provider_window(window_id, title, used_pct=None, reset=None, window_minutes=None,
+                     detail=None, usage_known=True):
+    return {
+        "id": str(window_id),
+        "title": str(title),
+        "used_pct": _provider_percent(used_pct),
+        "reset": _provider_epoch(reset),
+        "window_minutes": int(window_minutes) if isinstance(window_minutes, (int, float))
+        and window_minutes > 0 else None,
+        "detail": str(detail) if detail else None,
+        "usage_known": bool(usage_known),
+    }
+
+
+def _provider_credential_marker(provider, *parts):
+    material = "\0".join(str(part or "") for part in (provider,) + parts)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=False):
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+    entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
+    if not isinstance(entry, dict) or entry.get("marker") != marker:
+        return None
+    fetched_at = _provider_number(entry.get("fetched_at"))
+    quota = entry.get("quota")
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if fetched_at is None or not isinstance(quota, dict):
+        return None
+    age = now_epoch - int(fetched_at)
+    if age < -300 or age > max_age:
+        return None
+    out = json.loads(json.dumps(quota))
+    if stale:
+        out["stale"] = True
+        out["source"] = "cache"
+    return out
+
+
+def _save_provider_quota_cache(provider, marker, quota, fetched_at=None):
+    if not isinstance(quota, dict) or not quota.get("available"):
+        return
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+        if not isinstance(root, dict):
+            root = {}
+        providers = root.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+        providers[provider] = {
+            "marker": marker,
+            "fetched_at": int(fetched_at if fetched_at is not None else datetime.now().timestamp()),
+            "quota": quota,
+        }
+        root = {"version": 1, "providers": providers}
+        try:
+            _atomic_write_json(PROVIDER_QUOTA_CACHE, root)
+            os.chmod(PROVIDER_QUOTA_CACHE, 0o600)
+        except OSError:
+            pass
+
+
+def _provider_json_request(url, *, headers=None, method="GET", body=None, timeout=5,
+                           max_bytes=_PROVIDER_QUOTA_MAX_RESPONSE_BYTES,
+                           allow_insecure_loopback_tls=False):
+    import ssl
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    raw_body = None
+    request_headers = dict(headers or {})
+    if body is not None:
+        raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    request_headers.setdefault("Accept", "application/json")
+    request = urllib.request.Request(
+        url, data=raw_body, headers=request_headers, method=method)
+    context = None
+    parsed = urlsplit(url)
+    if allow_insecure_loopback_tls and parsed.scheme == "https" \
+            and parsed.hostname in {"127.0.0.1", "::1", "localhost"}:
+        context = ssl._create_unverified_context()
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, response_headers, new_url):
+            return None
+
+    handlers = [NoRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    opener = urllib.request.build_opener(*handlers)
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            data = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        error.close()
+        raise RuntimeError(f"HTTP {status}") from error
+    if len(data) > max_bytes:
+        raise ValueError("provider response too large")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError("provider response was not valid JSON") from error
+
+
+# ----- Cursor -----
+
+
+def _cursor_app_auth_paths():
+    return _path_candidates(
+        "TOKEI_CURSOR_AUTH_DB",
+        os.path.join(HOME, "Library", "Application Support", "Cursor",
+                     "User", "globalStorage", "state.vscdb"),
+        os.path.join(HOME, ".config", "Cursor", "User",
+                     "globalStorage", "state.vscdb"))
+
+
+def _cursor_app_session(path=None, now_epoch=None):
+    db_path = path or _first_existing_file(_cursor_app_auth_paths())
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    try:
+        connection = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True, timeout=0.25)
+        row = connection.execute(
+            "SELECT value FROM ItemTable WHERE key = ? LIMIT 1",
+            ("cursorAuth/accessToken",)).fetchone()
+        connection.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    token = row[0]
+    if isinstance(token, bytes):
+        token = token.decode("utf-8", "ignore")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    token = token.strip()
+    claims = _decode_jwt_claims(token) or {}
+    subject = claims.get("sub") if isinstance(claims.get("sub"), str) else None
+    user_id = subject.rsplit("|", 1)[-1] if subject else None
+    if not user_id or not re.fullmatch(r"[A-Za-z0-9._-]+", user_id):
+        return None
+    expiration = _provider_number(claims.get("exp"))
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if expiration is None or expiration <= now_epoch + 60:
+        return None
+    email = claims.get("email") if isinstance(claims.get("email"), str) else None
+    return {
+        "cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
+        "account": email.strip() if email and email.strip() else subject,
+        "subject": subject,
+        "user_id": user_id,
+        "marker": _provider_credential_marker("cursor", subject, token),
+    }
+
+
+def _cursor_cookie_session(cookie):
+    if not isinstance(cookie, str) or not cookie.strip():
+        return None
+    from urllib.parse import unquote
+
+    account = subject = user_id = None
+    for component in cookie.split(";"):
+        name, separator, value = component.strip().partition("=")
+        if separator and name == "WorkosCursorSessionToken":
+            token = unquote(value).split("::")[-1]
+            claims = _decode_jwt_claims(token) or {}
+            subject = claims.get("sub") if isinstance(claims.get("sub"), str) else None
+            user_id = subject.rsplit("|", 1)[-1] if subject else None
+            email = claims.get("email")
+            account = email.strip() if isinstance(email, str) and email.strip() else subject
+            break
+    return {
+        "cookie": cookie.strip(),
+        "account": account,
+        "subject": subject,
+        "user_id": user_id,
+        "marker": _provider_credential_marker("cursor", cookie.strip()),
+    }
+
+
+def _cursor_session():
+    manual = _provider_config_string("TOKEI_CURSOR_COOKIE", "cursor_cookie")
+    return _cursor_cookie_session(manual) if manual else _cursor_app_session()
+
+
+def _cursor_plan_name(raw):
+    names = {
+        "enterprise": "Enterprise", "express": "Start", "free": "Free",
+        "free_trial": "Pro Trial", "hobby": "Hobby", "pro": "Pro",
+        "pro_student": "Pro", "pro_plus": "Pro+", "team": "Team",
+        "ultra": "Ultra",
+    }
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = names.get(raw.strip().lower(), raw.strip())
+    return f"Cursor {value}"
+
+
+def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, user_info=None,
+                            identity=None, updated=None):
+    if not isinstance(summary, dict):
+        return {}
+    individual = summary.get("individualUsage") if isinstance(
+        summary.get("individualUsage"), dict) else {}
+    team = summary.get("teamUsage") if isinstance(summary.get("teamUsage"), dict) else {}
+    plan = individual.get("plan") if isinstance(individual.get("plan"), dict) else {}
+    overall = individual.get("overall") if isinstance(individual.get("overall"), dict) else {}
+    pooled = team.get("pooled") if isinstance(team.get("pooled"), dict) else {}
+
+    plan_used = _provider_number(plan.get("used")) or 0.0
+    plan_limit = _provider_number(plan.get("limit")) or 0.0
+    auto_pct = _provider_percent(plan.get("autoPercentUsed"))
+    api_pct = _provider_percent(plan.get("apiPercentUsed"))
+    total_pct = _provider_percent(plan.get("totalPercentUsed"))
+    if total_pct is None and auto_pct is not None and api_pct is not None:
+        total_pct = _provider_percent((auto_pct + api_pct) / 2)
+    if total_pct is None:
+        total_pct = api_pct if api_pct is not None else auto_pct
+    if total_pct is None and plan_limit > 0:
+        total_pct = _provider_percent(plan_used / plan_limit * 100)
+    if total_pct is None:
+        for block in (overall, pooled):
+            used = _provider_number(block.get("used"))
+            limit = _provider_number(block.get("limit"))
+            if used is not None and limit is not None and limit > 0:
+                total_pct = _provider_percent(used / limit * 100)
+                plan_used, plan_limit = used, limit
+                break
+    total_pct = total_pct if total_pct is not None else 0.0
+
+    request_block = request_usage.get("gpt-4") if isinstance(request_usage, dict) \
+        and isinstance(request_usage.get("gpt-4"), dict) else {}
+    requests_used = _provider_number(
+        request_block.get("numRequestsTotal") if request_block.get("numRequestsTotal") is not None
+        else request_block.get("numRequests"))
+    requests_limit = _provider_number(request_block.get("maxRequestUsage"))
+    legacy = requests_used is not None and requests_limit is not None and requests_limit > 0
+
+    cycle_start = _provider_epoch(summary.get("billingCycleStart"))
+    cycle_end = _provider_epoch(summary.get("billingCycleEnd"))
+    window_minutes = int((cycle_end - cycle_start) / 60) \
+        if cycle_start and cycle_end and cycle_end > cycle_start else None
+    if legacy:
+        total_pct = _provider_percent(requests_used / requests_limit * 100)
+        primary_detail = f"{int(requests_used)} / {int(requests_limit)} requests"
+    else:
+        primary_detail = (
+            f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}"
+            if plan_limit > 0 else None)
+
+    windows = [_provider_window(
+        "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
+    if not legacy:
+        if auto_pct is not None:
+            windows.append(_provider_window(
+                "cursor-auto", "Cursor 模型", auto_pct, cycle_end, window_minutes))
+        if api_pct is not None:
+            windows.append(_provider_window(
+                "cursor-api", "第三方模型", api_pct, cycle_end, window_minutes))
+        if isinstance(sand_usage, dict) and sand_usage.get("hasNonZeroIncludedLimit") is True:
+            sand_pct = _provider_percent(sand_usage.get("usagePercent"))
+            if sand_pct is not None:
+                sand_start = _provider_epoch(sand_usage.get("currentPeriodStart"))
+                sand_reset = _provider_epoch(sand_usage.get("nextResetTimestampUtc"))
+                sand_minutes = int((sand_reset - sand_start) / 60) \
+                    if sand_start and sand_reset and sand_reset > sand_start else None
+                windows.append(_provider_window(
+                    "cursor-grok-bot", "Grok Bot", sand_pct, sand_reset, sand_minutes))
+
+    details = []
+    if plan_limit > 0 and not legacy:
+        details.append({
+            "label": "套餐用量",
+            "value": f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}",
+        })
+    on_demand = individual.get("onDemand") if isinstance(individual.get("onDemand"), dict) else {}
+    team_on_demand = team.get("onDemand") if isinstance(team.get("onDemand"), dict) else {}
+    on_used = _provider_number(on_demand.get("used")) or 0.0
+    on_limit = _provider_number(on_demand.get("limit"))
+    if not on_limit or on_limit <= 0:
+        team_limit = _provider_number(team_on_demand.get("limit"))
+        if team_limit and team_limit > 0:
+            on_used = _provider_number(team_on_demand.get("used")) or 0.0
+            on_limit = team_limit
+    if on_limit and on_limit > 0:
+        details.append({
+            "label": "按量预算",
+            "value": f"{_provider_money(on_used / 100)} / {_provider_money(on_limit / 100)}",
+        })
+
+    user_info = user_info if isinstance(user_info, dict) else {}
+    identity = identity if isinstance(identity, dict) else {}
+    account = user_info.get("email") or identity.get("account")
+    return {
+        "available": True,
+        "plan": _cursor_plan_name(summary.get("membershipType")),
+        "account": account,
+        "windows": windows,
+        "details": details,
+        "source": "cursor-api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_cursor_quota(session=None):
+    session = session or _cursor_session()
+    if not session:
+        return {}
+    marker = session["marker"]
+    cached = _cached_provider_quota("cursor", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    headers = {"Cookie": session["cookie"]}
+    base = "https://cursor.com"
+    try:
+        summary = _provider_json_request(base + "/api/usage-summary", headers=headers)
+        user_info = None
+        try:
+            user_info = _provider_json_request(base + "/api/auth/me", headers=headers)
+        except Exception:
+            pass
+        request_usage = None
+        user_id = (user_info or {}).get("sub") if isinstance(user_info, dict) else None
+        user_id = user_id or session.get("subject") or session.get("user_id")
+        if isinstance(user_id, str) and user_id:
+            user_id = user_id.rsplit("|", 1)[-1]
+            from urllib.parse import quote
+            try:
+                request_usage = _provider_json_request(
+                    base + "/api/usage?user=" + quote(user_id, safe=""), headers=headers)
+            except Exception:
+                pass
+        sand_usage = None
+        try:
+            sand_usage = _provider_json_request(
+                base + "/api/dashboard/get-sand-usage-status",
+                headers={**headers, "Origin": base}, method="POST", body={})
+        except Exception:
+            pass
+        quota = _normalize_cursor_quota(
+            summary, request_usage=request_usage, sand_usage=sand_usage,
+            user_info=user_info, identity=session)
+        _save_provider_quota_cache("cursor", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "cursor", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_cursor_quota():
+    return fetch_cursor_quota() if _provider_quota_enabled("cursor") else {}
+
+
+# ----- Zed -----
+
+
+def _zed_connection_settings(settings):
+    settings = settings if isinstance(settings, dict) else {}
+    credentials = settings.get("credentials_url")
+    server = settings.get("server_url")
+    credentials = credentials.strip() if isinstance(credentials, str) and credentials.strip() else None
+    server = server.strip().rstrip("/") if isinstance(server, str) and server.strip() else "https://zed.dev"
+    service = credentials or server
+    trusted = server in {"https://zed.dev", "https://staging.zed.dev"}
+    if not trusted and credentials and credentials.rstrip("/") != server:
+        return None
+    from urllib.parse import urlsplit
+    parsed = urlsplit(server)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password \
+            or parsed.query or parsed.fragment:
+        return None
+    api_base = "https://cloud.zed.dev" if trusted else server
+    return {"service": service, "api_url": api_base + "/client/users/me"}
+
+
+def _load_zed_connection_settings(path=None):
+    path = path or _provider_config_string(
+        "TOKEI_ZED_SETTINGS", "zed_settings_path") \
+        or os.path.join(HOME, ".config", "zed", "settings.json")
+    settings = _load_json(path, {}) if os.path.isfile(path) else {}
+    return _zed_connection_settings(settings)
+
+
+def _zed_plan_name(raw):
+    names = {
+        "zed_free": "Zed Free", "zed_pro": "Zed Pro",
+        "zed_pro_trial": "Zed Pro Trial", "zed_student": "Zed Student",
+        "zed_business": "Zed Business",
+    }
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip()
+    return names.get(value.lower(), " ".join(word.capitalize() for word in value.split("_")))
+
+
+def _normalize_zed_quota(payload, updated=None):
+    if not isinstance(payload, dict):
+        return {}
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    usage = plan.get("usage") if isinstance(plan.get("usage"), dict) else {}
+    predictions = usage.get("edit_predictions") if isinstance(
+        usage.get("edit_predictions"), dict) else {}
+    used = max(0.0, _provider_number(predictions.get("used")) or 0.0)
+    limit_value = predictions.get("limit")
+    if isinstance(limit_value, dict):
+        limit_value = limit_value.get("limited")
+    windows = []
+    if isinstance(limit_value, str) and limit_value.lower() == "unlimited":
+        windows.append(_provider_window(
+            "zed-predictions", "Edit Predictions", 0, detail="Unlimited"))
+    else:
+        limit = _provider_number(limit_value)
+        if limit is not None and limit > 0:
+            clamped = min(used, limit)
+            windows.append(_provider_window(
+                "zed-predictions", "Edit Predictions", clamped / limit * 100,
+                detail=f"{int(clamped)} / {int(limit)} predictions"))
+
+    period = plan.get("subscription_period") if isinstance(
+        plan.get("subscription_period"), dict) else {}
+    start = _provider_epoch(period.get("started_at"))
+    end = _provider_epoch(period.get("ended_at"))
+    now = int(updated if updated is not None else datetime.now().timestamp())
+    if start and end and end > start:
+        windows.append(_provider_window(
+            "zed-cycle", "订阅周期", (now - start) / (end - start) * 100, end,
+            int((end - start) / 60)))
+    if plan.get("has_overdue_invoices") is True:
+        windows.append(_provider_window(
+            "zed-overdue", "账单", None, detail="Overdue invoices", usage_known=False))
+
+    details = []
+    if isinstance(user.get("name"), str) and user["name"].strip():
+        details.append({"label": "账号", "value": user["name"].strip()})
+    return {
+        "available": bool(windows or plan),
+        "plan": _zed_plan_name(plan.get("plan_v3")),
+        "account": user.get("github_login"),
+        "windows": windows,
+        "details": details,
+        "source": "zed-cloud",
+        "updated": now,
+        "stale": False,
+    }
+
+
+def fetch_zed_quota():
+    user_id = _provider_config_string("TOKEI_ZED_USER_ID", "zed_user_id")
+    token = _provider_config_string("TOKEI_ZED_ACCESS_TOKEN", "zed_access_token")
+    connection = _load_zed_connection_settings()
+    if not user_id or not token or not connection:
+        return {}
+    marker = _provider_credential_marker(
+        "zed", user_id, token, connection["service"], connection["api_url"])
+    cached = _cached_provider_quota("zed", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    try:
+        payload = _provider_json_request(
+            connection["api_url"], headers={"Authorization": f"{user_id} {token}"})
+        quota = _normalize_zed_quota(payload)
+        _save_provider_quota_cache("zed", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "zed", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_zed_quota():
+    return fetch_zed_quota() if _provider_quota_enabled("zed") else {}
+
+
+# ----- sub2api -----
+
+
+def _local_timezone_name():
+    configured = os.environ.get("TZ")
+    if configured and configured.strip():
+        return configured.strip()
+    try:
+        target = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in target:
+            return target.split(marker, 1)[1]
+    except OSError:
+        pass
+    zone = datetime.now().astimezone().tzinfo
+    return getattr(zone, "key", None) or datetime.now().astimezone().tzname() or "UTC"
+
+
+def _sub2api_usage_url(base_url, timezone_name=None):
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+    import ipaddress
+    from urllib.parse import urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(base_url.strip())
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname \
+            or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = parsed.hostname.lower() == "localhost"
+        if not loopback:
+            return None
+    path = parsed.path.rstrip("/")
+    if not re.search(r"/v1(?:/usage)?$", path):
+        path += "/v1"
+    if not path.endswith("/usage"):
+        path += "/usage"
+    query = urlencode({"days": 30, "timezone": timezone_name or _local_timezone_name()})
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+
+
+def _normalize_sub2api_quota(data, updated=None):
+    if not isinstance(data, dict) or data.get("isValid") is False:
+        return {}
+    unit = data.get("unit") if isinstance(data.get("unit"), str) else "USD"
+    windows = []
+
+    def add_window(window_id, title, used, limit, minutes=None, reset=None, value_unit=None):
+        used_number = _provider_number(used)
+        limit_number = _provider_number(limit)
+        if used_number is None or limit_number is None or limit_number <= 0:
+            return
+        detail = f"{_provider_money(used_number, value_unit or unit)} / " \
+            f"{_provider_money(limit_number, value_unit or unit)}"
+        windows.append(_provider_window(
+            window_id, title, used_number / limit_number * 100, reset, minutes, detail))
+
+    subscription = data.get("subscription") if isinstance(data.get("subscription"), dict) else None
+    quota = data.get("quota") if isinstance(data.get("quota"), dict) else None
+    if subscription:
+        add_window("sub2api-daily", "日额度", subscription.get("daily_usage_usd"),
+                   subscription.get("daily_limit_usd"), 1440)
+        add_window("sub2api-weekly", "周额度", subscription.get("weekly_usage_usd"),
+                   subscription.get("weekly_limit_usd"), 10080)
+        add_window("sub2api-monthly", "月额度", subscription.get("monthly_usage_usd"),
+                   subscription.get("monthly_limit_usd"), 43200)
+    elif quota:
+        quota_unit = quota.get("unit") if isinstance(quota.get("unit"), str) else unit
+        add_window("sub2api-quota", "额度", quota.get("used"), quota.get("limit"),
+                   value_unit=quota_unit)
+
+    rate_minutes = {"5h": 300, "1d": 1440, "7d": 10080}
+    rate_titles = {"5h": "5h 额度", "1d": "日限额", "7d": "周限额"}
+    rates = data.get("rate_limits") if isinstance(data.get("rate_limits"), list) else []
+    for index, rate in enumerate(rates):
+        if not isinstance(rate, dict):
+            continue
+        name = str(rate.get("window") or f"rate-{index}")
+        add_window(
+            f"sub2api-{name}", rate_titles.get(name.lower(), f"{name} 限额"),
+            rate.get("used"), rate.get("limit"), rate_minutes.get(name.lower()),
+            rate.get("reset_at"))
+
+    details = []
+    balance = _provider_number(data.get("balance"))
+    if balance is not None:
+        details.append({"label": "余额", "value": _provider_money(balance, unit)})
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    for key, label in (("today", "今日"), ("total", "累计")):
+        row = usage.get(key) if isinstance(usage.get(key), dict) else None
+        if not row:
+            continue
+        requests = 0 if row.get("requests") is None else _provider_integer(row.get("requests"))
+        tokens = 0 if row.get("total_tokens") is None else _provider_integer(row.get("total_tokens"))
+        if requests is None or tokens is None:
+            raise ValueError(f"sub2api {key} usage counts must be integers")
+        cost = _provider_number(row.get("actual_cost")) or 0
+        details.append({"label": f"{label}请求", "value": f"{requests:,}"})
+        token_row = {"label": f"{label} Token", "value": f"{tokens:,}"}
+        if cost:
+            token_row["secondary"] = _provider_money(cost)
+        details.append(token_row)
+
+    expiration = (subscription or {}).get("expires_at") or data.get("expires_at")
+    expiration_epoch = _provider_epoch(expiration)
+    if expiration_epoch:
+        details.append({"label": "套餐到期", "value": str(expiration_epoch)})
+    plan_name = data.get("planName") if isinstance(data.get("planName"), str) else None
+    return {
+        "available": bool(windows or details or plan_name),
+        "plan": plan_name,
+        "account": None,
+        "windows": windows,
+        "details": details,
+        "source": "sub2api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_sub2api_quota():
+    api_key = _provider_config_string("SUB2API_API_KEY", "sub2api_api_key")
+    base_url = _provider_config_string("SUB2API_BASE_URL", "sub2api_base_url")
+    usage_url = _sub2api_usage_url(base_url) if base_url else None
+    if not api_key or not usage_url:
+        return {}
+    marker = _provider_credential_marker("sub2api", api_key, usage_url)
+    cached = _cached_provider_quota("sub2api", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    try:
+        payload = _provider_json_request(
+            usage_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
+        if isinstance(payload, dict) and payload.get("isValid") is False:
+            raise PermissionError("sub2api rejected the API key")
+        quota = _normalize_sub2api_quota(payload)
+        _save_provider_quota_cache("sub2api", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "sub2api", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_sub2api_quota():
+    return fetch_sub2api_quota() if _provider_quota_enabled("sub2api") else {}
+
+
+# ----- z.ai / GLM -----
+
+
+def _zai_quota_url(url, scope="personal"):
+    if scope != "team":
+        return url
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parsed = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+             if key != "type"]
+    query.append(("type", "2"))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+def _zai_limit(raw):
+    if not isinstance(raw, dict) or raw.get("type") not in {
+            "TOKENS_LIMIT", "CREDIT_LIMIT", "TIME_LIMIT"}:
+        return None
+    unit = _provider_integer(raw.get("unit"))
+    number = _provider_integer(raw.get("number"))
+    percent_raw = _provider_integer(raw.get("percentage"))
+    percent = _provider_percent(percent_raw)
+    if unit is None or number is None or percent is None:
+        return None
+    usage = _provider_number(raw.get("usage"))
+    current = _provider_number(raw.get("currentValue"))
+    remaining = _provider_number(raw.get("remaining"))
+    if usage is not None and usage > 0:
+        used = None
+        if remaining is not None:
+            used = max(usage - remaining, current if current is not None else usage - remaining)
+        elif current is not None:
+            used = current
+        if used is not None:
+            percent = _provider_percent(max(0, min(usage, used)) / usage * 100)
+    multipliers = {1: 1440, 3: 60, 5: 1, 6: 10080}
+    unit_int, number_int = unit, number
+    minutes = number_int * multipliers[unit_int] \
+        if number_int > 0 and unit_int in multipliers else None
+    if raw.get("type") == "TIME_LIMIT" and unit_int == 5 and number_int == 1:
+        minutes = 30 * 24 * 60
+    details = raw.get("usageDetails") if isinstance(raw.get("usageDetails"), list) else []
+    return {
+        "raw": raw, "usage": usage, "current": current, "remaining": remaining,
+        "percent": percent, "window_minutes": minutes,
+        "reset": _provider_epoch(raw.get("nextResetTime")), "details": details,
+    }
+
+
+def _zai_limit_detail(limit):
+    parts = []
+    if limit.get("usage") is not None:
+        parts.append(f"{limit['usage']:g} limit")
+    if limit.get("remaining") is not None:
+        parts.append(f"{limit['remaining']:g} remaining")
+    return " · ".join(parts) or None
+
+
+def _normalize_zai_quota(payload, *, region="global", balance=None, updated=None):
+    if not isinstance(payload, dict) or payload.get("success") is not True \
+            or _provider_number(payload.get("code")) != 200:
+        return {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    limits = [_zai_limit(item) for item in data.get("limits", [])]
+    limits = [item for item in limits if item]
+    token_limits = sorted(
+        [item for item in limits if item["raw"].get("type") in {"TOKENS_LIMIT", "CREDIT_LIMIT"}],
+        key=lambda item: item.get("window_minutes") or sys.maxsize)
+    time_limits = [item for item in limits if item["raw"].get("type") == "TIME_LIMIT"]
+    token_limit = token_limits[-1] if token_limits else None
+    session_limit = token_limits[0] if len(token_limits) >= 2 else None
+    time_limit = time_limits[-1] if time_limits else None
+    primary = session_limit or token_limit or time_limit
+    windows = []
+    if primary:
+        windows.append(_provider_window(
+            "zai-primary", "会话额度" if session_limit else "额度", primary["percent"],
+            primary.get("reset"), primary.get("window_minutes"), _zai_limit_detail(primary)))
+    if session_limit and token_limit:
+        windows.append(_provider_window(
+            "zai-secondary", "周期额度", token_limit["percent"], token_limit.get("reset"),
+            token_limit.get("window_minutes"), _zai_limit_detail(token_limit)))
+    if time_limit and (token_limit or session_limit):
+        windows.append(_provider_window(
+            "zai-mcp", "MCP", time_limit["percent"], time_limit.get("reset"),
+            time_limit.get("window_minutes"), _zai_limit_detail(time_limit)))
+
+    details = []
+    if token_limit:
+        label = "Credit quota" if token_limit["raw"].get("type") == "CREDIT_LIMIT" else "Token quota"
+        details.append({"label": label, "value": f"{token_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(token_limit)})
+    if session_limit:
+        label = "Session credit quota" if session_limit["raw"].get("type") == "CREDIT_LIMIT" \
+            else "Session token quota"
+        details.append({"label": label, "value": f"{session_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(session_limit)})
+    if time_limit:
+        details.append({"label": "MCP quota", "value": f"{time_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(time_limit)})
+        for item in time_limit.get("details", [])[:20]:
+            if isinstance(item, dict) and isinstance(item.get("modelCode"), str):
+                value = _provider_number(item.get("usage"))
+                if value is not None and value >= 0:
+                    details.append({"label": item["modelCode"], "value": f"{int(value):,}"})
+
+    if region == "bigmodel-cn" and isinstance(balance, dict) and balance.get("success") is True:
+        balance_data = balance.get("data") if isinstance(balance.get("data"), dict) else {}
+        available = _provider_number(balance_data.get("availableBalance"))
+        current = _provider_number(balance_data.get("balance"))
+        amount = available if available is not None else current
+        if amount is not None:
+            secondary = []
+            for key, label in (("rechargeAmount", "recharged"),
+                               ("giveAmount", "granted"),
+                               ("totalSpendAmount", "spent")):
+                value = _provider_number(balance_data.get(key))
+                if value is not None and (key != "giveAmount" or value > 0):
+                    secondary.append(f"{label} ¥{value:.2f}")
+            row = {"label": "Account balance", "value": f"¥{amount:.2f}"}
+            if secondary:
+                row["secondary"] = " · ".join(secondary)
+            details.append(row)
+
+    plan_name = next((data.get(key).strip() for key in (
+        "planName", "plan", "plan_type", "packageName", "level")
+        if isinstance(data.get(key), str) and data.get(key).strip()), None)
+    return {
+        "available": bool(windows or details or plan_name),
+        "plan": plan_name,
+        "account": None,
+        "windows": windows,
+        "details": details,
+        "source": "zai-api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_zai_quota():
+    region = (_provider_config_string("Z_AI_REGION", "zai_region") or "global").lower()
+    if region not in {"global", "bigmodel-cn"}:
+        return {}
+    scope = (_provider_config_string("Z_AI_USAGE_SCOPE", "zai_usage_scope") or "personal").lower()
+    if scope not in {"personal", "team"}:
+        return {}
+    api_key = _provider_config_string("Z_AI_API_KEY", "zai_api_key")
+    if not api_key and region == "bigmodel-cn":
+        api_key = _provider_config_string("BIGMODEL_API_KEY", "zai_api_key")
+    organization = _provider_config_string("Z_AI_ORGANIZATION", "zai_organization")
+    project = _provider_config_string("Z_AI_PROJECT", "zai_project")
+    if not api_key or (scope == "team" and (not organization or not project)):
+        return {}
+    base = "https://open.bigmodel.cn" if region == "bigmodel-cn" else "https://api.z.ai"
+    quota_url = _zai_quota_url(base + "/api/monitor/usage/quota/limit", scope)
+    marker = _provider_credential_marker(
+        "zai", api_key, region, scope, organization, project, quota_url)
+    cached = _cached_provider_quota("zai", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if scope == "team":
+        headers["Bigmodel-Organization"] = organization
+        headers["Bigmodel-Project"] = project
+    try:
+        payload = _provider_json_request(quota_url, headers=headers)
+        balance = None
+        if region == "bigmodel-cn":
+            try:
+                balance = _provider_json_request(
+                    "https://www.bigmodel.cn/api/biz/account/query-customer-account-report",
+                    headers=headers, timeout=5)
+            except Exception:
+                pass
+        quota = _normalize_zai_quota(payload, region=region, balance=balance)
+        _save_provider_quota_cache("zai", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "zai", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_zai_quota():
+    return fetch_zai_quota() if _provider_quota_enabled("zai") else {}
+
+
+# ----- Antigravity loopback quota -----
+
+
+def _antigravity_extract_flag(command, flag):
+    match = re.search(re.escape(flag) + r"(?:=|\s+)([^\s]+)", command, re.I)
+    return match.group(1) if match else None
+
+
+def _antigravity_process_kind(command):
+    lower = command.lower()
+    language_server = re.search(
+        r"(^|[/\\])language(?:_|-)server(?:[_-][a-z0-9]+)*(?:\.exe)?(?:\s|$)", lower)
+    app_match = ("--app_data_dir" in lower and "antigravity" in lower) or any(
+        marker in lower for marker in ("antigravity.app/", "/gemini.app/",
+                                       "antigravity ide.app/"))
+    if language_server and app_match:
+        return "ide"
+    if re.search(r"(^|[/\\])(antigravity-cli|antigravity_cli|agy)(?:\s|[/\\]|$)", lower):
+        return "cli"
+    return None
+
+
+def _antigravity_process_infos(output):
+    results = []
+    for line in str(output or "").splitlines():
+        match = re.match(r"^\s*(\d+)\s+(.+)$", line)
+        if not match:
+            continue
+        pid, command = int(match.group(1)), match.group(2)
+        kind = _antigravity_process_kind(command)
+        if not kind:
+            continue
+        csrf = _antigravity_extract_flag(command, "--csrf_token")
+        if kind != "cli" and not csrf:
+            continue
+        extension_port = _provider_integer(
+            _antigravity_extract_flag(command, "--extension_server_port"))
+        if extension_port is not None and not 0 < extension_port <= 65535:
+            extension_port = None
+        results.append({
+            "pid": pid, "kind": kind, "csrf_token": csrf or "",
+            "extension_port": extension_port,
+            "extension_csrf_token": _antigravity_extract_flag(
+                command, "--extension_server_csrf_token"),
+        })
+    return results
+
+
+def _antigravity_running_processes():
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-ax", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return _antigravity_process_infos(result.stdout)
+
+
+def _antigravity_listening_ports(pid):
+    lsof = next((path for path in ("/usr/sbin/lsof", "/usr/bin/lsof")
+                 if os.path.isfile(path) and os.access(path, os.X_OK)), None)
+    if not lsof:
+        return []
+    try:
+        result = subprocess.run(
+            [lsof, "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted({int(value) for value in re.findall(r":(\d+)\s+\(LISTEN\)", result.stdout)})
+
+
+def _antigravity_endpoints(process):
+    endpoints = []
+    extension_port = process.get("extension_port")
+    if extension_port:
+        for token in (process.get("extension_csrf_token"), process.get("csrf_token")):
+            if token is not None:
+                endpoints.append(("http", extension_port, token, True))
+    for port in _antigravity_listening_ports(process["pid"]):
+        endpoints.append(("https", port, process.get("csrf_token") or "",
+                          process.get("kind") != "cli"))
+    unique = []
+    for endpoint in endpoints:
+        if endpoint not in unique:
+            unique.append(endpoint)
+    return unique
+
+
+def _antigravity_request(endpoint, path, body):
+    scheme, port, csrf, requires_csrf = endpoint
+    headers = {"Connect-Protocol-Version": "1"}
+    if requires_csrf:
+        headers["X-Codeium-Csrf-Token"] = csrf
+    return _provider_json_request(
+        f"{scheme}://127.0.0.1:{port}{path}", headers=headers, method="POST", body=body,
+        timeout=2, allow_insecure_loopback_tls=True)
+
+
+def _antigravity_remaining(value):
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("remainingFraction")
+    if raw is None and value.get("case") == "remainingFraction":
+        raw = value.get("value")
+    number = _provider_number(raw)
+    return max(0.0, min(1.0, number)) if number is not None else None
+
+
+def _normalize_antigravity_quota_summary(payload, updated=None):
+    root = payload.get("response") if isinstance(payload, dict) \
+        and isinstance(payload.get("response"), dict) else payload
+    groups = root.get("groups") if isinstance(root, dict) and isinstance(root.get("groups"), list) else []
+    windows = []
+    for group_index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            continue
+        display = str(group.get("displayName") or f"Group {group_index + 1}")
+        lower_group = display.lower()
+        if "gemini" in lower_group:
+            family, family_order = "Gemini", 0
+        elif "claude" in lower_group or "gpt" in lower_group or "third" in lower_group:
+            family, family_order = "Claude/GPT", 1
+        else:
+            family, family_order = display, 2 + group_index
+        for bucket_index, bucket in enumerate(group.get("buckets") or []):
+            if not isinstance(bucket, dict) or bucket.get("disabled") is True:
+                continue
+            bucket_id = str(bucket.get("bucketId") or f"bucket-{bucket_index}")
+            cadence = (bucket_id + " " + str(bucket.get("displayName") or "")).lower()
+            normalized = cadence.replace("_", "-")
+            if any(marker in normalized for marker in ("5h", "5-hour", "five hour",
+                                                        "five-hour", "session")):
+                cadence_title, minutes, cadence_order = "5h", 300, 0
+            elif any(marker in normalized for marker in ("weekly", "week", "7d")):
+                cadence_title, minutes, cadence_order = "周", 10080, 1
+            else:
+                cadence_title, minutes, cadence_order = str(
+                    bucket.get("displayName") or bucket_id), None, 2
+            remaining = _antigravity_remaining(bucket.get("remaining"))
+            windows.append((family_order, cadence_order, bucket_index, _provider_window(
+                "antigravity-" + bucket_id, f"{family} {cadence_title}",
+                (1 - remaining) * 100 if remaining is not None else None,
+                bucket.get("resetTime"), minutes, bucket.get("description"),
+                usage_known=remaining is not None)))
+    windows.sort(key=lambda item: item[:3])
+    rows = [item[3] for item in windows]
+    return {
+        "available": bool(rows),
+        "plan": None, "account": None, "windows": rows, "details": [],
+        "source": "antigravity-local",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def _normalize_antigravity_user_status(payload, updated=None):
+    if not isinstance(payload, dict):
+        return {}
+    status = payload.get("userStatus") if isinstance(payload.get("userStatus"), dict) else payload
+    config_data = status.get("cascadeModelConfigData") if isinstance(
+        status.get("cascadeModelConfigData"), dict) else {}
+    configs = config_data.get("clientModelConfigs")
+    if not isinstance(configs, list):
+        configs = payload.get("clientModelConfigs") if isinstance(
+            payload.get("clientModelConfigs"), list) else []
+    windows = []
+    for index, config in enumerate(configs):
+        if not isinstance(config, dict) or not isinstance(config.get("quotaInfo"), dict):
+            continue
+        info = config["quotaInfo"]
+        remaining = _provider_number(info.get("remainingFraction"))
+        if remaining is None:
+            continue
+        label = config.get("label")
+        model = config.get("modelOrAlias") if isinstance(config.get("modelOrAlias"), dict) else {}
+        model_id = model.get("model") or f"model-{index}"
+        windows.append(_provider_window(
+            "antigravity-model-" + str(model_id), str(label or model_id),
+            (1 - max(0, min(1, remaining))) * 100, info.get("resetTime")))
+    windows.sort(key=lambda row: (-(row.get("used_pct") or 0), row["title"]))
+    tier = status.get("userTier") if isinstance(status.get("userTier"), dict) else {}
+    plan_status = status.get("planStatus") if isinstance(status.get("planStatus"), dict) else {}
+    plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
+    plan = next((value.strip() for value in (
+        tier.get("name"), plan_info.get("planName"), plan_info.get("planDisplayName"),
+        plan_info.get("displayName"), plan_info.get("productName"),
+        plan_info.get("planShortName")) if isinstance(value, str) and value.strip()), None)
+    account = status.get("email") if isinstance(status.get("email"), str) else None
+    return {
+        "available": bool(windows), "plan": plan, "account": account,
+        "windows": windows[:12], "details": [], "source": "antigravity-local",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_antigravity_quota():
+    paths = {
+        "summary": "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        "status": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
+        "models": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
+    }
+    metadata = {"metadata": {
+        "ideName": "antigravity", "extensionName": "antigravity",
+        "ideVersion": "unknown", "locale": "en",
+    }}
+    last_error = None
+    for process in _antigravity_running_processes():
+        endpoints = _antigravity_endpoints(process)
+        if not endpoints:
+            continue
+        marker = _provider_credential_marker(
+            "antigravity", process.get("pid"), process.get("csrf_token"), endpoints)
+        cached = _cached_provider_quota("antigravity", marker, _PROVIDER_QUOTA_TTL)
+        if cached:
+            return cached
+        for endpoint in endpoints:
+            try:
+                summary_payload = _antigravity_request(
+                    endpoint, paths["summary"], {"forceRefresh": True})
+                quota = _normalize_antigravity_quota_summary(summary_payload)
+                if quota.get("available"):
+                    try:
+                        identity_payload = _antigravity_request(endpoint, paths["status"], metadata)
+                        identity = _normalize_antigravity_user_status(identity_payload)
+                        quota["plan"] = identity.get("plan")
+                        quota["account"] = identity.get("account")
+                    except Exception:
+                        pass
+                    _save_provider_quota_cache("antigravity", marker, quota)
+                    return quota
+            except Exception as error:
+                last_error = error
+        for path, body in ((paths["status"], metadata), (paths["models"], metadata)):
+            for endpoint in endpoints:
+                try:
+                    quota = _normalize_antigravity_user_status(
+                        _antigravity_request(endpoint, path, body))
+                    if quota.get("available"):
+                        _save_provider_quota_cache("antigravity", marker, quota)
+                        return quota
+                except Exception as error:
+                    last_error = error
+        fallback = _cached_provider_quota(
+            "antigravity", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+    if last_error:
+        raise last_error
+    return {}
+
+
+def scan_antigravity_quota():
+    return fetch_antigravity_quota() if _provider_quota_enabled("antigravity") else {}
+
+
+def scan_provider_quotas(errors=None):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    all_scans = {
+        "cursor": scan_cursor_quota,
+        "zed": scan_zed_quota,
+        "sub2api": scan_sub2api_quota,
+        "zai": scan_zai_quota,
+        "antigravity": scan_antigravity_quota,
+    }
+    result = {name: {} for name in all_scans}
+    scans = {name: scan for name, scan in all_scans.items()
+             if _provider_quota_enabled(name)}
+    if not scans:
+        return result
+    with ThreadPoolExecutor(max_workers=len(scans), thread_name_prefix="tokei-quota") as pool:
+        futures = {pool.submit(scan): name for name, scan in scans.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                value = future.result()
+                result[name] = value if isinstance(value, dict) else {}
+            except Exception as error:
+                if errors is not None:
+                    errors[f"{name}_quota"] = f"{type(error).__name__}: {error}"
+    return result
+
+
 def scan_grok(bounds, cache=None):
     ledger_touch("grok")
     cache = cache if cache is not None else {"v": _SCAN_CACHE_VERSION}
@@ -7398,6 +8591,7 @@ def compute():
     grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
     qwenwork_quota = _safe_scan(
         "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
+    provider_quotas = scan_provider_quotas(errors)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
@@ -7423,6 +8617,11 @@ def compute():
         "gemini": {
             "ranges": granges,
         },
+        "antigravity": provider_quotas["antigravity"],
+        "cursor": provider_quotas["cursor"],
+        "zed": provider_quotas["zed"],
+        "sub2api": provider_quotas["sub2api"],
+        "zai": provider_quotas["zai"],
         "grok": {
             "ranges": kranges,
             "model": gk["model"],
@@ -7614,6 +8813,15 @@ def _write_sync_snapshot(sync_dir, device_id, payload):
         return False
 
 
+def _sync_safe_usage_payload(payload):
+    snapshot = dict(payload)
+    # Provider quotas are account-local, are not merged by SyncManager, and may
+    # contain an email/login label. Keep them in the local cache only.
+    for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
+        snapshot.pop(key, None)
+    return snapshot
+
+
 def _write_configured_sync_snapshot(d):
     cfg = _load_tokei_config()
     if not cfg:
@@ -7626,16 +8834,17 @@ def _write_configured_sync_snapshot(d):
         return False
 
     import time
-    d["_device"] = device_id
-    d["_ts"] = int(time.time())
-    d["_range_bounds"] = range_boundaries()
+    snapshot = _sync_safe_usage_payload(d)
+    snapshot["_device"] = device_id
+    snapshot["_ts"] = int(time.time())
+    snapshot["_range_bounds"] = range_boundaries()
     cache = _load_scan_cache()
-    d["_dashboard"] = {
+    snapshot["_dashboard"] = {
         "daily": build_daily_costs("all", refresh=False, _cache=cache).get("daily", []),
         "wrapped": {p: build_wrapped(p, refresh=False, _cache=cache)
                     for p in ["all", "1d", "7d", "30d", "365d"]},
     }
-    return _write_sync_snapshot(sync_dir, device_id, d)
+    return _write_sync_snapshot(sync_dir, device_id, snapshot)
 
 
 def main_json():
