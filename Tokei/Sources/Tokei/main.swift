@@ -304,28 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         if let u = store.usage {
             let ud = UserDefaults.standard
-            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的来源。
-            if MenuBarQuotaSource.claude.isEnabled,
-               u.claude.q5_stale != true,
-               let q5 = u.claude.q5 {
-                let remaining = 100 - q5
-                metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
-            if MenuBarQuotaSource.codex.isEnabled,
-               u.codex.pw_stale != true,
-               let quota = u.codex.pw {
-                let remaining = 100 - quota
-                metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
-            if MenuBarQuotaSource.grok.isEnabled,
-               u.grok.stale != true,
-               let pct = u.grok.pct {
-                let remaining = 100 - pct
-                metrics.append(.init(kind: .grok, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
+            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的窗口。
+            metrics = MenuBarQuotaSource.metrics(in: u)
             if metrics.isEmpty {
                 // 用户把额度来源全部关掉时：只保留图标，不再回退显示今日 token 总量。
                 let anyQuotaSourceOn = MenuBarQuotaSource.allCases.contains { $0.isEnabled }
@@ -392,13 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         b.contentTintColor = nil
         fitStatusItemWidth(b)
         var summaryParts = displayedMetrics.map { metric in
-            let name: String
-            switch metric.kind {
-            case .claude: name = "Claude"
-            case .codex: name = "Codex"
-            case .grok: name = "Grok"
-            case .total: name = "今日"
-            }
+            let name = metric.kind.displayName
             if metric.remaining != nil {
                 return "\(name) 剩余 \(metric.value)%"
             }
