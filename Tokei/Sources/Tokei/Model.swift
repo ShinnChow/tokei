@@ -507,6 +507,7 @@ struct HermesRange: Codable {
     var models: [TokenModelStat] = []
 }
 struct TokenModelStat: Codable, Identifiable {
+    var modelId: String?
     var name: String
     var `in`: Int
     var out: Int
@@ -516,10 +517,11 @@ struct TokenModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double = 0
     var pout: Double = 0
-    var id: String { name }
+    var id: String { modelId ?? name }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId)
         name = try c.decode(String.self, forKey: .name)
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
@@ -529,6 +531,11 @@ struct TokenModelStat: Codable, Identifiable {
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelId = "model_id"
+        case name, `in`, out, cr, cw, reason, cost, pin, pout
     }
 }
 struct HermesRanges: Codable {

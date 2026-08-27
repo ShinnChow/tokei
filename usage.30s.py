@@ -313,6 +313,32 @@ def _known_id_or_raw(model: str):
     return s
 
 
+def _model_identity_id(model: str):
+    """Resolve only exact catalog identities; never guess an unknown model family."""
+    s = (model or "").strip()
+    if not s or s.lower() == "<synthetic>":
+        return None
+    if s in _OV_ALIASES:
+        return _OV_ALIASES[s]
+    norm = _normalize(s)
+    if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
+        return norm
+    for model_id, entry in _PRICING_DB.items():
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("canonical_slug")
+        if isinstance(slug, str) and _normalize(slug) == norm:
+            return model_id
+    return s
+
+
+def _exact_pricing_id(model: str):
+    """Return a catalog pricing ID without family-based fallback."""
+    if model and (model in _OV_MODELS or model in _PRICING_DB or model in _DEFAULT_PRICES):
+        return model
+    return None
+
+
 def _has_known_price(model: str):
     return _pricing_id(model) is not None
 
@@ -479,7 +505,7 @@ _SCAN_CACHE_DIR = os.environ.get("TOKEI_CACHE_DIR") or os.path.join(
 _DEFAULT_SCAN_CACHE_FILE = os.path.join(
     _SCAN_CACHE_DIR, "scan_cache.json")
 _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
-_SCAN_CACHE_VERSION = 20
+_SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
 _CODEX_PARSER_VERSION = 3
@@ -975,10 +1001,12 @@ def _format_token_models(models, include_prices=True):
     sort_key = (lambda kv: -kv[1].get("cost", 0)) if include_prices else (
         lambda kv: -token_total(kv[1]))
     for n, v in sorted(models.items(), key=sort_key):
-        price_id = _pricing_id(n) if include_prices else None
+        model_id = _model_identity_id(n)
+        price_id = _exact_pricing_id(model_id) if include_prices else None
         p = _raw_price(price_id) if price_id else {
             "in": 0.0, "out": 0.0, "cache_read": 0.0, "cache_write": 0.0}
-        result.append({"name": nice_model(n), "in": v.get("in", 0), "out": v.get("out", 0),
+        result.append({"model_id": model_id, "name": nice_model(model_id),
+                       "in": v.get("in", 0), "out": v.get("out", 0),
                         "cr": v.get("cr", 0), "cw": v.get("cw", 0), "reason": v.get("reason", 0),
                         "cost": v.get("cost", 0), "pin": p["in"], "pout": p["out"]})
     return result
@@ -4737,7 +4765,8 @@ def _scan_hermes_db(db_path, _sq):
             cr = int(row.get("cache_read_tokens") or 0)
             cw = int(row.get("cache_write_tokens") or 0)
             reason = int(row.get("reasoning_tokens") or 0)
-            _add_token_usage(day, inp, out, cr, cw, reason, row_cost(row), row.get("model"))
+            _add_token_usage(day, inp, out, cr, cw, reason, row_cost(row),
+                             _model_identity_id(row.get("model")))
             day["hours"][local_dt.hour] += inp + out + cr + cw + reason
             if session_id in sessions:
                 day_sessions.setdefault(dk, set()).add(session_id)
@@ -5163,13 +5192,14 @@ def scan_openclaw(bounds, cache):
                             if inp == 0 and out == 0:
                                 continue
                             model = msg.get("model", "")
-                            cid = _resolve_id(model)
+                            model_id = _model_identity_id(model)
+                            pricing_id = _exact_pricing_id(model_id)
                             cost_obj = u.get("cost")
                             raw_cost = float((cost_obj or {}).get("total", 0) or 0)
                             if raw_cost > 0:
                                 cost = raw_cost
-                            elif cid:
-                                p = _raw_price(model)
+                            elif pricing_id:
+                                p = _raw_price(pricing_id)
                                 cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
                             else:
                                 cost = 0.0
@@ -5180,7 +5210,7 @@ def scan_openclaw(bounds, cache):
                             day["in"] += inp; day["out"] += out
                             day["cr"] += cr; day["cw"] += cw; day["cost"] += cost
                             day["hours"][dt.hour] += inp + out + cr + cw
-                            mn = cid or model or "unknown"
+                            mn = model_id or model or "unknown"
                             mm = day["models"].setdefault(
                                 mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
                                      "reason": 0, "cost": 0.0})
@@ -7510,7 +7540,10 @@ def _recalc_costs(result):
             total_cost = 0.0
             for m in r["models"]:
                 name = m.get("name", "")
-                price_id = _pricing_id(name)
+                model_id = m.get("model_id")
+                price_id = (_exact_pricing_id(model_id) if isinstance(model_id, str) else None)
+                if not price_id:
+                    price_id = _pricing_id(name)
                 authoritative_cost = float(m.get("cost", 0) or 0)
                 if tool_key == "hermes" and authoritative_cost:
                     total_cost += authoritative_cost
@@ -7844,9 +7877,14 @@ def update_prices():
         pr = m.get("pricing") or {}
         if not mtok(pr, "prompt") and not mtok(pr, "completion"):
             continue                              # 跳过无价(免费/路由占位)条目
-        models[m["id"]] = {"in": mtok(pr, "prompt"), "out": mtok(pr, "completion"),
-                           "cache_read": mtok(pr, "input_cache_read"),
-                           "cache_write": mtok(pr, "input_cache_write")}
+        entry = {"in": mtok(pr, "prompt"), "out": mtok(pr, "completion"),
+                 "cache_read": mtok(pr, "input_cache_read"),
+                 "cache_write": mtok(pr, "input_cache_write")}
+        for field in ("name", "canonical_slug", "owned_by"):
+            value = m.get(field)
+            if isinstance(value, str) and value.strip():
+                entry[field] = value.strip()
+        models[m["id"]] = entry
     payload = {"_meta": {"source": "openrouter/api/v1/models",
                          "updated_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z"),
                          "count": len(models)},
