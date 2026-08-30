@@ -569,7 +569,7 @@ struct TokenModelStat: Codable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
-        case name, `in`, out, cr, cw, reason, cost, pin, pout
+        case name, tokens, `in`, out, cr, cw, reason, cost, pin, pout
     }
 }
 struct HermesRanges: Codable {
