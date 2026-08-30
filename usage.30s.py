@@ -180,6 +180,7 @@ CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
+ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -5369,6 +5370,11 @@ def scan_zai_quota():
 
 # ----- Antigravity loopback quota -----
 
+# 没装/没开 Antigravity 时 ps 全表扫描恒为空,但每 30 秒一个 tick 都要付一次
+# spawn(30ms+)。扫空后在这段时间内不重扫;90 秒也把新启动 Antigravity 的
+# 发现延迟压在两三个 tick 内。
+_ANTIGRAVITY_SCAN_MISS_TTL = 90
+
 
 def _antigravity_extract_flag(command, flag):
     match = re.search(re.escape(flag) + r"(?:=|\s+)([^\s]+)", command, re.I)
@@ -5415,14 +5421,43 @@ def _antigravity_process_infos(output):
     return results
 
 
-def _antigravity_running_processes():
+def _antigravity_scan_recently_empty(now_epoch=None):
+    """上一轮 ps 扫空后的 TTL 内直接判定没跑,省掉每 tick 一次 ps 进程。"""
+    root = _load_json(ANTIGRAVITY_SCAN_CACHE, {})
+    empty_at = _provider_number(root.get("empty_at")) if isinstance(root, dict) else None
+    if empty_at is None:
+        return False
+    now = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    return 0 <= now - int(empty_at) < _ANTIGRAVITY_SCAN_MISS_TTL
+
+
+def _record_antigravity_scan(found, now_epoch=None):
+    if found:
+        try:
+            os.remove(ANTIGRAVITY_SCAN_CACHE)
+        except OSError:
+            pass
+        return
+    try:
+        _atomic_write_json(ANTIGRAVITY_SCAN_CACHE, {
+            "empty_at": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
+        })
+    except OSError:
+        pass
+
+
+def _antigravity_running_processes(now_epoch=None):
+    if _antigravity_scan_recently_empty(now_epoch):
+        return []
     try:
         result = subprocess.run(
             ["/bin/ps", "-ax", "-o", "pid=,command="],
             capture_output=True, text=True, timeout=2, check=False)
     except (OSError, subprocess.SubprocessError):
         return []
-    return _antigravity_process_infos(result.stdout)
+    processes = _antigravity_process_infos(result.stdout)
+    _record_antigravity_scan(bool(processes), now_epoch)
+    return processes
 
 
 def _antigravity_listening_ports(pid):

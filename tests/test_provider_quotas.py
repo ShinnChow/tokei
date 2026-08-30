@@ -27,18 +27,22 @@ class ProviderQuotaTests(unittest.TestCase):
     def setUp(self):
         self.old_user_dir = USAGE._USER_DIR
         self.old_cache = getattr(USAGE, "PROVIDER_QUOTA_CACHE", None)
+        self.old_scan_cache = getattr(USAGE, "ANTIGRAVITY_SCAN_CACHE", None)
         self.old_env = dict(USAGE.os.environ)
 
     def tearDown(self):
         USAGE._USER_DIR = self.old_user_dir
         if self.old_cache is not None:
             USAGE.PROVIDER_QUOTA_CACHE = self.old_cache
+        if self.old_scan_cache is not None:
+            USAGE.ANTIGRAVITY_SCAN_CACHE = self.old_scan_cache
         USAGE.os.environ.clear()
         USAGE.os.environ.update(self.old_env)
 
     def isolate_cache(self, root):
         USAGE._USER_DIR = str(root)
         USAGE.PROVIDER_QUOTA_CACHE = str(root / "provider_quota_cache.json")
+        USAGE.ANTIGRAVITY_SCAN_CACHE = str(root / "antigravity_scan_cache.json")
 
     def test_provider_queries_are_opt_in_except_local_antigravity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -511,6 +515,40 @@ class ProviderQuotaTests(unittest.TestCase):
         self.assertEqual([row["used_pct"] for row in quota["windows"]], [9.0, 18.0, 27.0, 36.0])
         self.assertEqual(quota["windows"][0]["window_minutes"], 300)
         self.assertEqual(quota["windows"][1]["window_minutes"], 10080)
+
+    def test_antigravity_scan_skips_ps_after_an_empty_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            with mock.patch.object(
+                    USAGE.subprocess, "run", return_value=mock.Mock(stdout="")) as run:
+                self.assertEqual(USAGE._antigravity_running_processes(now_epoch=1000), [])
+                self.assertEqual(run.call_count, 1)
+
+                self.assertEqual(USAGE._antigravity_running_processes(now_epoch=1080), [])
+                self.assertEqual(run.call_count, 1)
+
+                USAGE._antigravity_running_processes(
+                    now_epoch=1000 + USAGE._ANTIGRAVITY_SCAN_MISS_TTL)
+                self.assertEqual(run.call_count, 2)
+
+                USAGE._antigravity_running_processes(now_epoch=500)
+                self.assertEqual(run.call_count, 3)
+
+    def test_antigravity_scan_cache_never_hides_a_running_process(self):
+        output = ("321 /Applications/Antigravity.app/Contents/Resources/language_server_macos_arm "
+                  "--csrf_token language-token --app_data_dir antigravity")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            Path(USAGE.ANTIGRAVITY_SCAN_CACHE).write_text(
+                json.dumps({"empty_at": 900}), encoding="utf-8")
+            with mock.patch.object(
+                    USAGE.subprocess, "run", return_value=mock.Mock(stdout=output)) as run:
+                processes = USAGE._antigravity_running_processes(now_epoch=2000)
+                self.assertEqual([item["pid"] for item in processes], [321])
+                self.assertFalse(Path(USAGE.ANTIGRAVITY_SCAN_CACHE).exists())
+
+                USAGE._antigravity_running_processes(now_epoch=2001)
+                self.assertEqual(run.call_count, 2)
 
     def test_antigravity_request_is_loopback_only_and_sends_csrf(self):
         with mock.patch.object(USAGE, "_provider_json_request", return_value={}) as request:
