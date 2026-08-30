@@ -18,6 +18,9 @@ class PricingCacheTests(unittest.TestCase):
         return io.BytesIO(json.dumps({
             "data": [{
                 "id": "test/model",
+                "name": "Test Model",
+                "canonical_slug": "test/model-2026",
+                "owned_by": "test-owner",
                 "pricing": {
                     "prompt": prompt,
                     "completion": "0.000002",
@@ -34,6 +37,9 @@ class PricingCacheTests(unittest.TestCase):
                 "out": 2.0,
                 "cache_read": 0.5,
                 "cache_write": 0.8,
+                "name": "Test Model",
+                "canonical_slug": "test/model-2026",
+                "owned_by": "test-owner",
             },
         }
 
@@ -54,7 +60,10 @@ class PricingCacheTests(unittest.TestCase):
 
             self.assertTrue(scan_cache.exists())
             self.assertTrue(json.loads(scan_cache.read_text(encoding="utf-8"))["sentinel"])
-            self.assertIn("test/model", json.loads(pricing.read_text(encoding="utf-8"))["models"])
+            saved = json.loads(pricing.read_text(encoding="utf-8"))["models"]["test/model"]
+            self.assertEqual(saved["name"], "Test Model")
+            self.assertEqual(saved["canonical_slug"], "test/model-2026")
+            self.assertEqual(saved["owned_by"], "test-owner")
 
     def test_changed_price_update_invalidates_cost_cache(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -13,6 +13,7 @@ struct PanelView: View {
     @State private var cursorModelsOpen = false
     @State private var zaiModelsOpen = false
     @State private var grokModelsOpen = false
+    @State private var hermesModelsOpen = false
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
@@ -22,6 +23,7 @@ struct PanelView: View {
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
     @State private var kimiCodeModelsOpen = false
+    @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
     @State private var trailProjects: [TrailProject]?
@@ -404,14 +406,14 @@ struct PanelView: View {
             ToolCardItem(id: "qodercli", name: "Qoder CLI", visible: showQoderCli, active: qclir.calls > 0,
                          tint: Theme.qodercli, content: AnyView(qodercliBlock(u.qodercli, qclir))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
-                         tint: Theme.hermes, content: AnyView(hermesBlock(hr))),
+                         tint: Theme.hermes, content: AnyView(hermesBlock(hr, modelsOpen: $hermesModelsOpen))),
             ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
                          tint: Theme.zcode, content: AnyView(tokenUsageBlock(title: "ZCode", zr, tint: Theme.zcode, modelsOpen: $zcodeModelsOpen, toolID: "zcode"))),
             ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
                          tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen, toolID: "mimocode"))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw,
                          active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw > 0,
-                         tint: Theme.openclaw, content: AnyView(openclawBlock(lr))),
+                         tint: Theme.openclaw, content: AnyView(openclawBlock(lr, modelsOpen: $openClawModelsOpen))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen, toolID: "pi"))),
             ToolCardItem(id: "prime_agent", name: "Prime Agent", visible: showPrimeAgent, active: par.sessions > 0,
@@ -1421,7 +1423,7 @@ struct PanelView: View {
 
     // MARK: - Hermes 卡片
     @ViewBuilder
-    func hermesBlock(_ r: HermesRange) -> some View {
+    func hermesBlock(_ r: HermesRange, modelsOpen: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Hermes", tint: Theme.hermes, sessions: r.sessions, toolID: "hermes")
             if r.sessions > 0 {
@@ -1436,6 +1438,9 @@ struct PanelView: View {
                     if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
                     return items
                 }(), tint: Theme.hermes)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.hermes)
+                }
             } else {
                 emptyHint
             }
@@ -1444,7 +1449,7 @@ struct PanelView: View {
 
     // MARK: - OpenClaw 卡片
     @ViewBuilder
-    func openclawBlock(_ r: OpenClawRange) -> some View {
+    func openclawBlock(_ r: OpenClawRange, modelsOpen: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions, toolID: "openclaw")
             if r.in + r.out + r.cr + r.cw > 0 {
@@ -1459,6 +1464,9 @@ struct PanelView: View {
                     if r.tasks > 0 { items.append(.init("checklist", "任务", "\(r.tasks)")) }
                     return items
                 }(), tint: Theme.openclaw)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw)
+                }
             } else if r.tasks > 0 {
                 HStack(spacing: 16) {
                     VStack(alignment: .leading, spacing: 2) {

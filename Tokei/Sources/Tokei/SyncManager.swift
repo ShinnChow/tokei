@@ -683,13 +683,22 @@ final class SyncManager {
 
     private static func mergeTokenModels(_ dst: inout [TokenModelStat], _ src: [TokenModelStat]) {
         for m in src {
-            if let idx = dst.firstIndex(where: { $0.name == m.name }) {
+            let index: Int?
+            if let modelId = m.modelId {
+                index = dst.firstIndex { $0.modelId == modelId }
+            } else {
+                index = dst.firstIndex { $0.modelId == nil && $0.name == m.name }
+            }
+            if let idx = index {
                 dst[idx].in += m.in
                 dst[idx].out += m.out
                 dst[idx].cr += m.cr
                 dst[idx].cw += m.cw
                 dst[idx].reason += m.reason
                 dst[idx].cost += m.cost
+                if dst[idx].name == "未知" && m.name != "未知" {
+                    dst[idx].name = m.name
+                }
             } else {
                 dst.append(m)
             }
