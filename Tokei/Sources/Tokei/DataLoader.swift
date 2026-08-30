@@ -669,6 +669,9 @@ final class DataLoader {
         }
         var environment = ProcessInfo.processInfo.environment
         environment["TOKEI_DSH_DECOMPRESSED_DIR"] = deepSeekSessions.path
+        for (key, value) in ProviderCredentialStore.environmentOverrides() {
+            environment[key] = value
+        }
         proc.environment = environment
         let outPipe = Pipe()
         let errPipe = Pipe()

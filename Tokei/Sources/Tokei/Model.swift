@@ -188,6 +188,9 @@ struct GeminiRange: Codable {
     var cost: Double
     var models: [GeminiModelStat] = []
     var sessions: Int = 0
+
+    var totalTokens: Int { self.in + out + cached + thoughts }
+    var hasUsage: Bool { sessions > 0 || totalTokens > 0 }
 }
 
 struct GeminiRanges: Codable {
@@ -198,6 +201,35 @@ struct GeminiRanges: Codable {
     var month: GeminiRange
     var year: GeminiRange
     var all: GeminiRange?
+
+    /// A zero-activity selected range should not hide a recent local session.
+    /// Return the nearest useful range together with its real label so the UI
+    /// never presents yesterday/week data as today's data.
+    func displayRange(for preferred: RangeKey) -> (range: GeminiRange, key: RangeKey) {
+        let order: [RangeKey]
+        switch preferred {
+        case .today:
+            order = [.today, .yesterday, .week, .month, .year, .all]
+        case .yesterday:
+            order = [.yesterday, .today, .week, .month, .year, .all]
+        case .week:
+            order = [.week, .today, .yesterday, .month, .year, .all]
+        case .lastWeek:
+            order = [.lastWeek, .week, .month, .year, .all, .today, .yesterday]
+        case .month:
+            order = [.month, .year, .all, .week, .today, .yesterday]
+        case .year:
+            order = [.year, .all, .month, .week, .today, .yesterday]
+        case .all:
+            order = [.all, .year, .month, .week, .today, .yesterday]
+        }
+        for key in order {
+            let candidate = get(key)
+            if candidate.hasUsage { return (candidate, key) }
+        }
+        return (get(preferred), preferred)
+    }
+
     func get(_ k: RangeKey) -> GeminiRange {
         switch k {
         case .today: return today; case .yesterday: return yesterday
@@ -508,6 +540,7 @@ struct HermesRange: Codable {
 }
 struct TokenModelStat: Codable, Identifiable {
     var name: String
+    var tokens: Int?
     var `in`: Int
     var out: Int
     var cr: Int = 0
@@ -521,6 +554,7 @@ struct TokenModelStat: Codable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens)
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
         cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
@@ -604,6 +638,7 @@ struct OpenClawRanges: Codable {
 struct OpenClawStat: Codable { var ranges: OpenClawRanges }
 
 struct TokenUsageRange: Codable {
+    var tokens: Int
     var hit: Double
     var `in`: Int
     var out: Int
@@ -611,11 +646,24 @@ struct TokenUsageRange: Codable {
     var cw: Int
     var reason: Int
     var cost: Double
+    var requests: Int
     var sessions: Int = 0
     var models: [TokenModelStat] = []
+    var coverage: String?
 
-    init(hit: Double = 0, `in` input: Int = 0, out: Int = 0, cr: Int = 0, cw: Int = 0,
-         reason: Int = 0, cost: Double = 0, sessions: Int = 0, models: [TokenModelStat] = []) {
+    var totalTokens: Int {
+        tokens > 0 ? tokens : `in` + out + cr + cw + reason
+    }
+
+    var hasComponents: Bool {
+        `in` + out + cr + cw + reason > 0
+    }
+
+    init(tokens: Int = 0, hit: Double = 0, `in` input: Int = 0, out: Int = 0,
+         cr: Int = 0, cw: Int = 0, reason: Int = 0, cost: Double = 0,
+         requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
+         coverage: String? = nil) {
+        self.tokens = tokens
         self.hit = hit
         self.in = input
         self.out = out
@@ -623,12 +671,15 @@ struct TokenUsageRange: Codable {
         self.cw = cw
         self.reason = reason
         self.cost = cost
+        self.requests = requests
         self.sessions = sessions
         self.models = models
+        self.coverage = coverage
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
         hit = try c.decodeIfPresent(Double.self, forKey: .hit) ?? 0
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
@@ -636,8 +687,10 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
+        coverage = try c.decodeIfPresent(String.self, forKey: .coverage)
     }
 }
 struct TokenUsageRanges: Codable {
@@ -748,6 +801,67 @@ struct QwenWorkQuota: Codable {
     }
 }
 
+struct ProviderQuotaWindow: Codable, Identifiable {
+    var id = ""
+    var title = ""
+    var used_pct: Double?
+    var reset: Int?
+    var window_minutes: Int?
+    var detail: String?
+    var usage_known = true
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? id
+        used_pct = try? c.decodeIfPresent(Double.self, forKey: .used_pct)
+        reset = try? c.decodeIfPresent(Int.self, forKey: .reset)
+        window_minutes = try? c.decodeIfPresent(Int.self, forKey: .window_minutes)
+        detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+        usage_known = (try? c.decodeIfPresent(Bool.self, forKey: .usage_known)) ?? true
+    }
+}
+
+struct ProviderQuotaDetail: Codable {
+    var label = ""
+    var value = ""
+    var secondary: String?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        value = try c.decodeIfPresent(String.self, forKey: .value) ?? ""
+        secondary = try? c.decodeIfPresent(String.self, forKey: .secondary)
+    }
+}
+
+struct ProviderQuotaStat: Codable {
+    var available = false
+    var plan: String?
+    var account: String?
+    var windows: [ProviderQuotaWindow] = []
+    var details: [ProviderQuotaDetail] = []
+    var usage: TokenUsageStat? = nil
+    var source: String?
+    var updated: Int?
+    var stale = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = (try? c.decodeIfPresent(Bool.self, forKey: .available)) ?? false
+        plan = try? c.decodeIfPresent(String.self, forKey: .plan)
+        account = try? c.decodeIfPresent(String.self, forKey: .account)
+        windows = (try? c.decodeIfPresent([ProviderQuotaWindow].self, forKey: .windows)) ?? []
+        details = (try? c.decodeIfPresent([ProviderQuotaDetail].self, forKey: .details)) ?? []
+        usage = try? c.decodeIfPresent(TokenUsageStat.self, forKey: .usage)
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+        updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -768,11 +882,16 @@ struct Usage: Codable {
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
     var kimicode: TokenUsageStat
+    var antigravity: ProviderQuotaStat
+    var cursor: ProviderQuotaStat
+    var zed: ProviderQuotaStat
+    var sub2api: ProviderQuotaStat
+    var zai: ProviderQuotaStat
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, prime_agent
+        case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -800,6 +919,11 @@ struct Usage: Codable {
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
         kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
+        antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
+        cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
+        zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()
+        sub2api = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .sub2api) ?? ProviderQuotaStat()
+        zai = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zai) ?? ProviderQuotaStat()
     }
 }
 

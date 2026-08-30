@@ -145,6 +145,38 @@ class DashboardCacheTests(unittest.TestCase):
         self.assertEqual(wrapped["total_cost"], 7.25)
         self.assertEqual(sum(wrapped["hours"]), 255)
 
+    def test_account_provider_models_are_reported_without_double_counting_local_totals(self):
+        today = date.today().isoformat()
+        cache = {
+            "v": USAGE._SCAN_CACHE_VERSION,
+            "_dirty": False,
+            USAGE._CURSOR_PROVIDER_DAYS_CACHE_KEY: {
+                today: {
+                    "tokens": 160, "in": 100, "out": 20, "cr": 30, "cw": 10,
+                    "cost": 0.25, "requests": 2, "hours": [160] + [0] * 23,
+                    "models": {"gpt-5.6-sol-medium": {
+                        "tokens": 160, "in": 100, "out": 20, "cr": 30, "cw": 10,
+                        "reason": 0, "cost": 0.25,
+                    }},
+                },
+            },
+            USAGE._ZAI_PROVIDER_DAYS_CACHE_KEY: {
+                today: {
+                    "tokens": 500, "hours": [0] * 24,
+                    "models": {"glm-5.3": {"tokens": 500}},
+                },
+            },
+        }
+
+        result = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
+
+        self.assertEqual(result["daily"], [])
+        self.assertEqual(sum(model["tokens"] for model in result["provider_models"]), 660)
+        self.assertEqual(
+            {model["tool"] for model in result["provider_models"]},
+            {"cursor", "zai"},
+        )
+
     def test_swift_all_device_qoderwork_tokens_are_preserved(self):
         root = Path(__file__).resolve().parents[1]
         model = (root / "Tokei/Sources/Tokei/Model.swift").read_text()

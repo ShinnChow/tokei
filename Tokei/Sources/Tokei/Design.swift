@@ -32,6 +32,10 @@ enum Theme {
     static let claude = Color(red: 0.92, green: 0.52, blue: 0.40)   // 柔珊瑚
     static let codex  = Color(red: 0.42, green: 0.68, blue: 0.98)   // 天青
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
+    static let cursor = Color(red: 0.72, green: 0.77, blue: 0.90)   // 光标银蓝
+    static let zed = Color(red: 0.93, green: 0.38, blue: 0.30)      // Zed 珊瑚红
+    static let sub2api = Color(red: 0.18, green: 0.78, blue: 0.85)  // API 青
+    static let zai = Color(red: 0.38, green: 0.67, blue: 0.98)      // GLM 蓝
     static let grok   = Color(red: 0.65, green: 0.68, blue: 0.75)   // 冷灰银
     static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
     static let qoderwork = Color(red: 0.75, green: 0.65, blue: 0.30)  // 暗琥珀

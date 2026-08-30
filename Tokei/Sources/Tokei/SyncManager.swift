@@ -256,6 +256,57 @@ final class SyncManager {
         } ?? false
     }
 
+    private static let providerQuotaIDs: Set<String> = [
+        "cursor", "zed", "sub2api", "zai", "antigravity",
+    ]
+    private static let providerSettingKeys: Set<String> = [
+        "sub2api_base_url", "zai_region", "zai_usage_scope",
+        "zai_organization", "zai_project",
+    ]
+
+    @discardableResult
+    static func setProviderQuotaEnabled(_ provider: String, enabled: Bool) -> Bool {
+        guard providerQuotaIDs.contains(provider) else { return false }
+        return setConfigValue(enabled, forKey: "\(provider)_quota_enabled")
+    }
+
+    static func providerSetting(_ key: String) -> String? {
+        guard providerSettingKeys.contains(key),
+              let data = try? Data(contentsOf: configPath),
+              let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = dictionary[key] as? String else { return nil }
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    @discardableResult
+    static func setProviderSetting(_ value: String?, forKey key: String) -> Bool {
+        guard providerSettingKeys.contains(key) else { return false }
+        let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stored = (cleaned?.isEmpty == false) ? cleaned : nil
+        return setConfigValue(stored, forKey: key)
+    }
+
+    private static func setConfigValue(_ value: Any?, forKey key: String) -> Bool {
+        withConfigLock {
+            var dictionary: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                let data = try Data(contentsOf: configPath)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                dictionary = object
+            }
+            if let value {
+                dictionary[key] = value
+            } else {
+                dictionary.removeValue(forKey: key)
+            }
+            try writeConfigDictionary(dictionary)
+            return true
+        } ?? false
+    }
+
     // MARK: - Read peers
 
     func loadPeers() -> PeerLoadReport {
