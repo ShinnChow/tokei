@@ -126,6 +126,7 @@ open Tokei.app
 证书，让 Keychain 中的 Provider 密钥在重复构建后仍可访问；没有证书时会回退到
 ad-hoc 签名。可用 `TOKEI_CODESIGN_IDENTITY=- bash package.sh` 强制 ad-hoc，或用
 `TOKEI_CODESIGN_IDENTITY="证书名称" bash package.sh` 指定签名身份。
+这套自动探测只作用于本地源码构建；官方发布的 DMG 一律是 ad-hoc 签名。
 
 </details>
 

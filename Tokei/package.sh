@@ -84,6 +84,8 @@ PLIST
 # A stable local signing identity keeps macOS Keychain ACLs valid across
 # rebuilds. Prefer Developer ID, then Apple Development; CI can force ad-hoc
 # signing with TOKEI_CODESIGN_IDENTITY=-.
+# 注意：自动探测只服务本地开发。release.sh 固定传 TOKEI_CODESIGN_IDENTITY=-,
+# 发布产物不会带上构建机上的个人证书。
 CODESIGN_IDENTITY="${TOKEI_CODESIGN_IDENTITY:-auto}"
 if [ "$CODESIGN_IDENTITY" = "auto" ]; then
     CODESIGN_IDENTITY=""
