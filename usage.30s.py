@@ -7021,6 +7021,7 @@ def _parse_prime_session_file(path):
 
 
 def scan_prime_agent(bounds, cache):
+    ledger_touch("prime_agent")
     fc = cache.setdefault("prime_agent", {})
     B = _empty_token_ranges()
     roots = _prime_agent_session_dirs()
@@ -7059,25 +7060,48 @@ def scan_prime_agent(bounds, cache):
             fc.pop(path, None)
             changed = True
     used = set()
+    days = {}
+    sessions = {}
+    day_projects = {}
     for path, entry in canonical.values():
+        sid = entry.get("sid") or path
+        proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         for event in entry.get("events", []):
             if event.get("key") in used:
                 continue
             used.add(event.get("key"))
-            day = B["all"]
+            day = days.setdefault(event["date"], _empty_token_day())
             _add_token_usage(day, event.get("in", 0), event.get("out", 0),
                              event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
                              event.get("cost", 0), event.get("model"))
-            for key in classify_date(date.fromisoformat(event["date"]), bounds):
-                if key == "all":
-                    continue
-                _add_token_usage(B[key], event.get("in", 0), event.get("out", 0),
-                                 event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
-                                 event.get("cost", 0), event.get("model"))
-                B[key]["sessions"].add(entry.get("sid") or path)
-        B["all"]["sessions"].add(entry.get("sid") or path)
+            sessions.setdefault(event["date"], set()).add(sid)
+            if proj_name:
+                day_projects.setdefault(event["date"], set()).add(proj_name)
+        B["all"]["sessions"].add(sid)
     if changed:
         cache["_dirty"] = True
+    # 项目名随天入账本(同 scan_claude):日志被清理后仍能回答"那天在干什么"。
+    for day_key, names in day_projects.items():
+        days[day_key]["projects"] = sorted(names)[:3]
+
+    # 会话数只能来自现存日志(被清日志无从归属)
+    for day_key in days:
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            if range_key == "all":
+                continue
+            B[range_key]["sessions"].update(sessions.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("prime_agent", days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
     return {"ranges": B}
 
 
