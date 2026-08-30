@@ -7061,7 +7061,7 @@ def scan_prime_agent(bounds, cache):
             changed = True
     used = set()
     days = {}
-    sessions = {}
+    day_sessions = {}
     day_projects = {}
     for path, entry in canonical.values():
         sid = entry.get("sid") or path
@@ -7070,38 +7070,37 @@ def scan_prime_agent(bounds, cache):
             if event.get("key") in used:
                 continue
             used.add(event.get("key"))
-            day = days.setdefault(event["date"], _empty_token_day())
+            day_key = event.get("date")
+            try:
+                date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            day = days.setdefault(day_key, _empty_token_day())
             _add_token_usage(day, event.get("in", 0), event.get("out", 0),
                              event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
                              event.get("cost", 0), event.get("model"))
-            sessions.setdefault(event["date"], set()).add(sid)
+            hour = event.get("hour")
+            if isinstance(hour, int) and 0 <= hour < 24:
+                day["hours"][hour] += token_total(event)
+            day_sessions.setdefault(day_key, set()).add(sid)
             if proj_name:
-                day_projects.setdefault(event["date"], set()).add(proj_name)
+                day_projects.setdefault(day_key, set()).add(proj_name)
         B["all"]["sessions"].add(sid)
     if changed:
         cache["_dirty"] = True
-    # 项目名随天入账本(同 scan_claude):日志被清理后仍能回答"那天在干什么"。
-    for day_key, names in day_projects.items():
-        days[day_key]["projects"] = sorted(names)[:3]
-
-    # 会话数只能来自现存日志(被清日志无从归属)
-    for day_key in days:
-        try:
-            day_date = date.fromisoformat(day_key)
-        except ValueError:
-            continue
-        for range_key in classify_date(day_date, bounds):
-            if range_key == "all":
-                continue
-            B[range_key]["sessions"].update(sessions.get(day_key, set()))
+    # 会话与项目名随天入账本:日志被清理后,那天的会话数与"在干什么"仍答得出。
+    for day_key, day in days.items():
+        day["sessions"] = sorted(day_sessions.get(day_key, set()))
+        day["projects"] = sorted(day_projects.get(day_key, set()))[:3]
 
     for day_key, day in ledger_reconcile("prime_agent", days).items():
         try:
             day_date = date.fromisoformat(day_key)
-        except ValueError:
+        except (TypeError, ValueError):
             continue
         for range_key in classify_date(day_date, bounds):
             _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
     return {"ranges": B}
 
 
@@ -10339,8 +10338,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             tok = token_total(day)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            total_tokens += tok
-            total_cost += day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
             add_hours(dk, day.get("hours"))
             for mn, mv in day.get("models", {}).items():
