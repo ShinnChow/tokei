@@ -698,10 +698,7 @@ struct PanelView: View {
         quota: ProviderQuotaStat,
         displayedRange: RangeKey? = nil
     ) -> some View {
-        let usageLabel: String = {
-            guard let displayedRange, displayedRange != sel else { return sel.label }
-            return "\(displayedRange.label)（\(sel.label)无用量）"
-        }()
+        let usageLabel = (displayedRange ?? sel).label
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions,
                      toolID: r.hasUsage ? "gemini" : nil)

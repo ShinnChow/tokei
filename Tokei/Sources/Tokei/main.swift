@@ -54,7 +54,7 @@ final class Store: ObservableObject {
             }
         }
         allDevicesUsage = allDevices
-        applyDisplayMode(updateStatusTitle: false)
+        applyDisplayMode()
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
