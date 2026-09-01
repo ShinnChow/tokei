@@ -198,6 +198,34 @@ class GrokBotTests(unittest.TestCase):
 
         helper.assert_called_once_with()
 
+    def test_recent_usage_cache_survives_missing_authorization_marker(self):
+        now = datetime.now().astimezone().replace(microsecond=0)
+        cached = USAGE._grok_bot_provider_data({
+            "quotaFetched": True,
+            "usageFetched": True,
+            "updated": int(now.timestamp()),
+            "sandUsage": {
+                "hasNonZeroIncludedLimit": True,
+                "usagePercent": 25,
+            },
+            "usageEventsDisplay": [{
+                "timestamp": str(int(now.timestamp() * 1000)),
+                "model": "grok-bot-default",
+                "tokenUsage": {"inputTokens": 100, "outputTokens": 20},
+            }],
+        })
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")):
+            USAGE._save_provider_quota_cache("grok_bot", "old-marker", cached)
+            with mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="a" * 64), \
+                    mock.patch.object(USAGE, "_grok_bot_authorization_generation", return_value=None), \
+                    mock.patch.object(USAGE, "_cursor_session", return_value=None):
+                quota = USAGE.fetch_grok_bot_quota()
+
+        self.assertTrue(quota["stale"])
+        self.assertEqual(quota["source"], "cache")
+        self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 120)
+
     def test_confirmed_empty_native_quota_does_not_fall_back_to_cursor(self):
         payload = {"hasNonZeroIncludedLimit": False, "usagePercent": 0}
         with tempfile.TemporaryDirectory() as tmp, \

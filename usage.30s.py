@@ -4451,6 +4451,28 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     return out
 
 
+def _latest_cached_provider_quota(provider, max_age, now_epoch=None, stale=False):
+    """Return a recent aggregate when the credential marker is temporarily unavailable."""
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+    entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    fetched_at = _provider_number(entry.get("fetched_at"))
+    quota = entry.get("quota")
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if fetched_at is None or not isinstance(quota, dict):
+        return None
+    age = now_epoch - int(fetched_at)
+    if age < -300 or age > max_age:
+        return None
+    out = json.loads(json.dumps(quota))
+    if stale:
+        out["stale"] = True
+        out["source"] = "cache"
+    return out
+
+
 def _save_provider_quota_cache(provider, marker, quota, fetched_at=None):
     usage = quota.get("usage") if isinstance(quota, dict) else None
     usage_ranges = usage.get("ranges") if isinstance(usage, dict) else None
@@ -5116,7 +5138,8 @@ def scan_cursor_quota():
 
 
 def fetch_grok_bot_quota(session=None):
-    native_fallback = {}
+    native_fallback = _latest_cached_provider_quota(
+        "grok_bot", _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) or {}
     if session is None:
         account_id = _grok_bot_active_account_id()
         authorization_generation = _grok_bot_authorization_generation()
@@ -5128,7 +5151,8 @@ def fetch_grok_bot_quota(session=None):
             if cached:
                 return cached
             native_fallback = _cached_provider_quota(
-                "grok_bot", native_marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) or {}
+                "grok_bot", native_marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
+                or native_fallback
             recent_attempt = _provider_quota_recent_attempt_result(
                 "grok_bot", native_marker, _PROVIDER_QUOTA_TTL)
             if recent_attempt == "empty":
