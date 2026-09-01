@@ -38,6 +38,30 @@ class DashboardCacheTests(unittest.TestCase):
         USAGE._cache_dashboard_days(cache, USAGE._GROK_DAYS_CACHE_KEY, days)
         self.assertFalse(cache["_dirty"])
 
+    def test_grok_bot_provider_days_are_merged_without_deleting_history(self):
+        cache = {
+            "_dirty": False,
+            USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY: {
+                "2025-12-31": {"tokens": 100},
+                "2026-09-01": {"tokens": 200},
+            },
+        }
+
+        USAGE._merge_dashboard_days(
+            cache,
+            USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
+            {"2026-09-01": {"tokens": 250}},
+        )
+
+        self.assertEqual(
+            cache[USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY],
+            {
+                "2025-12-31": {"tokens": 100},
+                "2026-09-01": {"tokens": 250},
+            },
+        )
+        self.assertTrue(cache["_dirty"])
+
     def test_wrapped_uses_cached_grok_days(self):
         today = date.today().isoformat()
         cache = {

@@ -226,7 +226,7 @@ class GrokBotTests(unittest.TestCase):
         self.assertEqual(quota["source"], "cache")
         self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 120)
 
-    def test_historical_usage_outlives_short_quota_fallback(self):
+    def test_historical_usage_has_no_quota_expiry(self):
         now = datetime.now().astimezone().replace(microsecond=0)
         cached = USAGE._grok_bot_provider_data({
             "quotaFetched": True,
@@ -246,7 +246,7 @@ class GrokBotTests(unittest.TestCase):
                 mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")):
             USAGE._save_provider_quota_cache(
                 "grok_bot", "old-marker", cached,
-                fetched_at=int(now.timestamp()) - 2 * 60 * 60,
+                fetched_at=int(now.timestamp()) - 400 * 24 * 60 * 60,
             )
             with mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="a" * 64), \
                     mock.patch.object(USAGE, "_grok_bot_authorization_generation", return_value=None), \

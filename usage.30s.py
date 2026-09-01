@@ -855,6 +855,15 @@ def _cache_dashboard_days(cache, key, days):
         cache["_dirty"] = True
 
 
+def _merge_dashboard_days(cache, key, days):
+    if not isinstance(days, dict) or not days:
+        return
+    existing = cache.get(key)
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(days)
+    _cache_dashboard_days(cache, key, merged)
+
+
 def _empty_claude():
     ranges = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0,
                   "models": {}, "sessions": set()} for k in RANGE_KEYS}
@@ -4257,7 +4266,6 @@ def scan_qwenwork_quota():
 # already-running loopback language server and never starts the app/CLI.
 _PROVIDER_QUOTA_TTL = 300
 _PROVIDER_QUOTA_FALLBACK_TTL = 3600
-_GROK_BOT_USAGE_FALLBACK_TTL = 7 * 24 * 60 * 60
 _PROVIDER_QUOTA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _PROVIDER_QUOTA_CACHE_LOCK = threading.Lock()
 _PROVIDER_QUOTA_ENV = {
@@ -4452,8 +4460,8 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     return out
 
 
-def _latest_cached_provider_quota(provider, max_age, now_epoch=None, stale=False):
-    """Return a recent aggregate when the credential marker is temporarily unavailable."""
+def _latest_cached_provider_quota(provider, max_age=None, now_epoch=None, stale=False):
+    """Return the latest aggregate, optionally enforcing a maximum age."""
     with _PROVIDER_QUOTA_CACHE_LOCK:
         root = _load_json(PROVIDER_QUOTA_CACHE, {})
     entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
@@ -4465,7 +4473,7 @@ def _latest_cached_provider_quota(provider, max_age, now_epoch=None, stale=False
     if fetched_at is None or not isinstance(quota, dict):
         return None
     age = now_epoch - int(fetched_at)
-    if age < -300 or age > max_age:
+    if age < -300 or (max_age is not None and age > max_age):
         return None
     out = json.loads(json.dumps(quota))
     if stale:
@@ -5140,7 +5148,7 @@ def scan_cursor_quota():
 
 def _grok_bot_usage_only_fallback():
     cached = _latest_cached_provider_quota(
-        "grok_bot", _GROK_BOT_USAGE_FALLBACK_TTL, stale=True)
+        "grok_bot", max_age=None, stale=True)
     usage = cached.get("usage") if isinstance(cached, dict) else None
     ranges = usage.get("ranges") if isinstance(usage, dict) else None
     if not isinstance(ranges, dict) or not any(
@@ -9600,9 +9608,20 @@ def compute():
     _cache_dashboard_days(
         cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
         ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
-    _cache_dashboard_days(
+    _merge_dashboard_days(
         cache, _GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
         ((provider_quotas.get("grok_bot") or {}).get("usage") or {}).get("days", {}))
+    grok_bot_days = cache.get(_GROK_BOT_PROVIDER_DAYS_CACHE_KEY)
+    if isinstance(grok_bot_days, dict) and grok_bot_days:
+        grok_bot_quota = dict(provider_quotas.get("grok_bot") or {})
+        if not grok_bot_quota:
+            grok_bot_quota = {
+                "available": False, "plan": None, "account": None,
+                "windows": [], "details": [], "source": "cache",
+                "updated": None, "stale": True,
+            }
+        grok_bot_quota["usage"] = _provider_usage_from_days(grok_bot_days)
+        provider_quotas["grok_bot"] = grok_bot_quota
     _save_scan_cache(cache)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
