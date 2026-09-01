@@ -598,12 +598,20 @@ class ProviderQuotaTests(unittest.TestCase):
             "sub2api": {"available": True},
             "zai": {"available": True},
             "antigravity": {"account": "gemini@example.com"},
+            "grok_bot": {
+                "ranges": {"today": {"sessions": 1}},
+                "quota": {
+                    "available": True,
+                    "usage": {"ranges": {"today": {"tokens": 99}}},
+                },
+            },
         }
         snapshot = USAGE._sync_safe_usage_payload(payload)
 
         self.assertIn("claude", snapshot)
         for provider in ("cursor", "zed", "sub2api", "zai", "antigravity"):
             self.assertNotIn(provider, snapshot)
+        self.assertEqual(snapshot["grok_bot"], payload["grok_bot"])
         self.assertIn("cursor", payload)
 
 

@@ -191,6 +191,8 @@ struct DashboardView: View {
              usage.sub2api.usage?.ranges.get(range), Theme.sub2api),
             ("zai", "z.ai / GLM", usage.zai,
              usage.zai.usage?.ranges.get(range), Theme.zai),
+            ("grok_bot", "Grok Bot", usage.grokBot.quota,
+             usage.grokBot.quota.usage?.ranges.get(range), Theme.grokBot),
         ]
         return candidates.compactMap { candidate in
             guard candidate.quota.available else { return nil }
@@ -256,7 +258,9 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("账号额度")
                 .font(.system(size: 13, weight: .bold))
-            Text("额度来自本机账号登录态；账号用量单独展示，不并入本地工具总计")
+            Text(store.syncEnabled && store.showAllDevices
+                 ? "额度来自多设备中最新的账号快照；账号用量单独展示"
+                 : "额度来自本机账号登录态；账号用量单独展示")
                 .font(.system(size: 9))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(items) { item in
@@ -439,6 +443,7 @@ struct DashboardView: View {
         case "gemini": return Theme.gemini
         case "cursor": return Theme.cursor
         case "zai": return Theme.zai
+        case "grok_bot": return Theme.grokBot
         case "grok": return Theme.grok
         case "qoder": return Theme.qoder
         case "hermes": return Theme.hermes
@@ -835,8 +840,10 @@ struct DashboardView: View {
     func applyCachedScope(animated: Bool) {
         let update = {
             let fallback = DashboardData(daily: baseDaily, models: baseModels)
-            providerModels = baseProviderModels
-            if let scoped = scopedUsage() {
+            let scoped = scopedUsage()
+            let providerUsage = scoped ?? store.localUsage ?? store.usage
+            providerModels = providerModelsForCurrentScope(usage: providerUsage)
+            if let scoped {
                 let scopedDaily = allDeviceDaily(period: wrappedPeriod)
                 daily = scopedDaily
                 models = Self.dashboardData(from: scoped, period: wrappedPeriod, fallback: fallback).models
@@ -856,6 +863,31 @@ struct DashboardView: View {
         } else {
             update()
         }
+    }
+
+    private func providerModelsForCurrentScope(usage: Usage?) -> [ModelCost] {
+        var result = baseProviderModels.filter { $0.tool != "grok_bot" }
+        guard let range = usage?.grokBot.quota.usage?.ranges.get(providerRangeKey) else {
+            return result
+        }
+        result.append(contentsOf: range.models.map { model in
+            let tokens = model.tokens ?? (model.in + model.out + model.cr + model.cw + model.reason)
+            let outputThousands = Double(model.out) / 1_000
+            return ModelCost(
+                name: "\(model.name) (Grok Bot 账号)",
+                cost: model.cost,
+                tool: "grok_bot",
+                input: model.in,
+                out: model.out,
+                cr: model.cr,
+                cw: model.cw,
+                reason: model.reason,
+                tokens: tokens,
+                cost_per_k: outputThousands > 0 ? model.cost / outputThousands : 0,
+                out_ratio: tokens > 0 ? Double(model.out) / Double(tokens) * 100 : 0
+            )
+        })
+        return result
     }
 
     private func scopedUsage() -> Usage? {

@@ -540,6 +540,7 @@ _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
 _CURSOR_PROVIDER_DAYS_CACHE_KEY = "_cursor_provider_days"
 _ZAI_PROVIDER_DAYS_CACHE_KEY = "_zai_provider_days"
+_GROK_BOT_PROVIDER_DAYS_CACHE_KEY = "_grok_bot_provider_days"
 
 
 def _remove_codex_event_cache_dir():
@@ -9551,6 +9552,9 @@ def compute():
     _cache_dashboard_days(
         cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
         ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
+    _cache_dashboard_days(
+        cache, _GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("grok_bot") or {}).get("usage") or {}).get("days", {}))
     _save_scan_cache(cache)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
@@ -9790,6 +9794,9 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    # Grok Bot has no account label in its normalized output. Its official
+    # aggregate stays in the snapshot so peers can adopt the freshest copy;
+    # SyncManager replaces this quota instead of adding account totals.
     return snapshot
 
 
@@ -10657,7 +10664,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     provider_models = {}
     for cache_key, tool, suffix in (
             (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
-            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号")):
+            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号"),
+            (_GROK_BOT_PROVIDER_DAYS_CACHE_KEY, "grok_bot", "Grok Bot 账号")):
         for day_key, day in (cache.get(cache_key) or {}).items():
             if cutoff and day_key < cutoff or not isinstance(day, dict):
                 continue

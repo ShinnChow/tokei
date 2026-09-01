@@ -434,6 +434,12 @@ final class SyncManager {
             mergeRanges(&u.grok.ranges, peer.usage.grok.ranges, pairs)
             u.grok.model = mergeModelName(u.grok.model, peer.usage.grok.model)
             mergeRanges(&u.grokBot.ranges, peer.usage.grokBot.ranges, pairs)
+            if shouldReplaceProviderQuota(
+                current: u.grokBot.quota,
+                candidate: peer.usage.grokBot.quota
+            ) {
+                u.grokBot.quota = peer.usage.grokBot.quota
+            }
             mergeRanges(&u.qoderwork.ranges, peer.usage.qoderwork.ranges, pairs)
             mergeRanges(&u.qoder.ranges, peer.usage.qoder.ranges, pairs)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
@@ -450,6 +456,25 @@ final class SyncManager {
             mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
         }
         return u
+    }
+
+    private static func shouldReplaceProviderQuota(
+        current: ProviderQuotaStat,
+        candidate: ProviderQuotaStat
+    ) -> Bool {
+        let currentHasData = current.available || current.usage != nil
+            || !current.windows.isEmpty || !current.details.isEmpty
+        let candidateHasData = candidate.available || candidate.usage != nil
+            || !candidate.windows.isEmpty || !candidate.details.isEmpty
+        guard candidateHasData else { return false }
+        guard currentHasData else { return true }
+
+        let currentUpdated = current.updated ?? 0
+        let candidateUpdated = candidate.updated ?? 0
+        if candidateUpdated == currentUpdated {
+            return current.stale && !candidate.stale
+        }
+        return candidateUpdated > currentUpdated
     }
 
     private static func rangePairs(for peer: PeerDevice, now: Date = Date()) -> [(src: RangeKey, dst: RangeKey)] {
