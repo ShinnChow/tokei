@@ -4257,6 +4257,7 @@ def scan_qwenwork_quota():
 # already-running loopback language server and never starts the app/CLI.
 _PROVIDER_QUOTA_TTL = 300
 _PROVIDER_QUOTA_FALLBACK_TTL = 3600
+_GROK_BOT_USAGE_FALLBACK_TTL = 7 * 24 * 60 * 60
 _PROVIDER_QUOTA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _PROVIDER_QUOTA_CACHE_LOCK = threading.Lock()
 _PROVIDER_QUOTA_ENV = {
@@ -5137,9 +5138,32 @@ def scan_cursor_quota():
     return fetch_cursor_quota() if _provider_quota_enabled("cursor") else {}
 
 
+def _grok_bot_usage_only_fallback():
+    cached = _latest_cached_provider_quota(
+        "grok_bot", _GROK_BOT_USAGE_FALLBACK_TTL, stale=True)
+    usage = cached.get("usage") if isinstance(cached, dict) else None
+    ranges = usage.get("ranges") if isinstance(usage, dict) else None
+    if not isinstance(ranges, dict) or not any(
+            isinstance(row, dict) and _provider_usage_int(row.get("tokens")) > 0
+            for row in ranges.values()):
+        return {}
+    return {
+        "available": False,
+        "plan": None,
+        "account": None,
+        "windows": [],
+        "details": [],
+        "usage": usage,
+        "source": "cache",
+        "updated": cached.get("updated"),
+        "stale": True,
+    }
+
+
 def fetch_grok_bot_quota(session=None):
     native_fallback = _latest_cached_provider_quota(
-        "grok_bot", _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) or {}
+        "grok_bot", _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
+        or _grok_bot_usage_only_fallback()
     if session is None:
         account_id = _grok_bot_active_account_id()
         authorization_generation = _grok_bot_authorization_generation()
