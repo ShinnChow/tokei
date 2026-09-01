@@ -191,8 +191,6 @@ struct DashboardView: View {
              usage.sub2api.usage?.ranges.get(range), Theme.sub2api),
             ("zai", "z.ai / GLM", usage.zai,
              usage.zai.usage?.ranges.get(range), Theme.zai),
-            ("grok_bot", "Grok Bot", usage.grokBot.quota,
-             usage.grokBot.quota.usage?.ranges.get(range), Theme.grokBot),
         ]
         return candidates.compactMap { candidate in
             guard candidate.quota.available else { return nil }
@@ -258,9 +256,7 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("账号额度")
                 .font(.system(size: 13, weight: .bold))
-            Text(store.syncEnabled && store.showAllDevices
-                 ? "额度来自多设备中最新的账号快照；账号用量单独展示"
-                 : "额度来自本机账号登录态；账号用量单独展示")
+            Text("额度来自本机账号登录态；账号用量单独展示，不并入本地工具总计")
                 .font(.system(size: 9))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(items) { item in
@@ -842,15 +838,17 @@ struct DashboardView: View {
             let fallback = DashboardData(daily: baseDaily, models: baseModels)
             let scoped = scopedUsage()
             let providerUsage = scoped ?? store.localUsage ?? store.usage
-            providerModels = providerModelsForCurrentScope(usage: providerUsage)
+            let grokBotModels = grokBotModelsForCurrentScope(usage: providerUsage)
+            providerModels = baseProviderModels.filter { $0.tool != "grok_bot" }
             if let scoped {
                 let scopedDaily = allDeviceDaily(period: wrappedPeriod)
                 daily = scopedDaily
-                models = Self.dashboardData(from: scoped, period: wrappedPeriod, fallback: fallback).models
+                models = Self.dashboardData(from: scoped, period: wrappedPeriod, fallback: fallback)
+                    .models.filter { $0.tool != "grok_bot" } + grokBotModels
                 wrapped = allDeviceWrapped(from: scoped, period: wrappedPeriod, daily: scopedDaily)
             } else {
                 daily = baseDaily
-                models = baseModels
+                models = baseModels.filter { $0.tool != "grok_bot" } + grokBotModels
                 wrapped = baseWrapped
             }
             if !daily.isEmpty || !models.isEmpty || !providerModels.isEmpty
@@ -865,16 +863,15 @@ struct DashboardView: View {
         }
     }
 
-    private func providerModelsForCurrentScope(usage: Usage?) -> [ModelCost] {
-        var result = baseProviderModels.filter { $0.tool != "grok_bot" }
+    private func grokBotModelsForCurrentScope(usage: Usage?) -> [ModelCost] {
         guard let range = usage?.grokBot.quota.usage?.ranges.get(providerRangeKey) else {
-            return result
+            return baseModels.filter { $0.tool == "grok_bot" }
         }
-        result.append(contentsOf: range.models.map { model in
+        return range.models.map { model in
             let tokens = model.tokens ?? (model.in + model.out + model.cr + model.cw + model.reason)
             let outputThousands = Double(model.out) / 1_000
             return ModelCost(
-                name: "\(model.name) (Grok Bot 账号)",
+                name: model.name,
                 cost: model.cost,
                 tool: "grok_bot",
                 input: model.in,
@@ -886,8 +883,7 @@ struct DashboardView: View {
                 cost_per_k: outputThousands > 0 ? model.cost / outputThousands : 0,
                 out_ratio: tokens > 0 ? Double(model.out) / Double(tokens) * 100 : 0
             )
-        })
-        return result
+        }
     }
 
     private func scopedUsage() -> Usage? {

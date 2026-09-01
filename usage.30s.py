@@ -10685,44 +10685,52 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                            "reason": v.get("reason", 0), "tokens": total_tok, "tool": v["tool"],
                            "cost_per_k": cost_per_k, "out_ratio": out_ratio})
 
-    provider_models = {}
-    for cache_key, tool, suffix in (
-            (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
-            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号"),
-            (_GROK_BOT_PROVIDER_DAYS_CACHE_KEY, "grok_bot", "Grok Bot 账号")):
-        for day_key, day in (cache.get(cache_key) or {}).items():
-            if cutoff and day_key < cutoff or not isinstance(day, dict):
-                continue
-            for raw_name, raw_usage in (day.get("models") or {}).items():
-                if not isinstance(raw_usage, dict):
+    def account_model_rows(specs):
+        aggregated = {}
+        for cache_key, tool, suffix in specs:
+            for day_key, day in (cache.get(cache_key) or {}).items():
+                if cutoff and day_key < cutoff or not isinstance(day, dict):
                     continue
-                name = f"{nice_model(raw_name)} ({suffix})"
-                model = provider_models.setdefault(
-                    name,
-                    {"name": name, "cost": 0.0, "in": 0, "out": 0,
-                     "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
-                     "tool": tool})
-                components = {field: _provider_usage_int(raw_usage.get(field))
-                              for field in _PROVIDER_USAGE_FIELDS}
-                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
-                    or sum(components.values())
-                for field, value in components.items():
-                    model[field] += value
-                cost = _provider_number(raw_usage.get("cost")) or 0.0
-                if cost >= 0:
-                    model["cost"] += cost
+                for raw_name, raw_usage in (day.get("models") or {}).items():
+                    if not isinstance(raw_usage, dict):
+                        continue
+                    display_name = nice_model(raw_name)
+                    name = f"{display_name} ({suffix})" if suffix else display_name
+                    model = aggregated.setdefault(
+                        name,
+                        {"name": name, "cost": 0.0, "in": 0, "out": 0,
+                         "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
+                         "tool": tool})
+                    components = {field: _provider_usage_int(raw_usage.get(field))
+                                  for field in _PROVIDER_USAGE_FIELDS}
+                    model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                        or sum(components.values())
+                    for field, value in components.items():
+                        model[field] += value
+                    cost = _provider_number(raw_usage.get("cost")) or 0.0
+                    if cost >= 0:
+                        model["cost"] += cost
 
-    provider_model_list = []
-    for model in sorted(
-            provider_models.values(), key=lambda item: (-item["tokens"], item["name"])):
-        out_k = model["out"] / 1000 if model["out"] else 0
-        provider_model_list.append({
-            **model,
-            "cost": round(model["cost"], 2),
-            "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
-            "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
-            if model["tokens"] > 0 else 0,
-        })
+        rows = []
+        for model in sorted(
+                aggregated.values(), key=lambda item: (-item["tokens"], item["name"])):
+            out_k = model["out"] / 1000 if model["out"] else 0
+            rows.append({
+                **model,
+                "cost": round(model["cost"], 2),
+                "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
+                "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
+                if model["tokens"] > 0 else 0,
+            })
+        return rows
+
+    model_list.extend(account_model_rows((
+        (_GROK_BOT_PROVIDER_DAYS_CACHE_KEY, "grok_bot", None),
+    )))
+    provider_model_list = account_model_rows((
+        (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
+        (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号"),
+    ))
 
     return {"daily": daily, "models": model_list, "provider_models": provider_model_list}
 

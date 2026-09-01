@@ -181,16 +181,16 @@ class DashboardCacheTests(unittest.TestCase):
         result = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
 
         self.assertEqual(result["daily"], [])
-        self.assertEqual(sum(model["tokens"] for model in result["provider_models"]), 1000)
+        self.assertEqual(sum(model["tokens"] for model in result["provider_models"]), 660)
         self.assertEqual(
             {model["tool"] for model in result["provider_models"]},
-            {"cursor", "zai", "grok_bot"},
+            {"cursor", "zai"},
         )
 
         grok_bot = next(
-            model for model in result["provider_models"] if model["tool"] == "grok_bot"
+            model for model in result["models"] if model["tool"] == "grok_bot"
         )
-        self.assertEqual(grok_bot["name"], "Grok Code Fast 1 (Grok Bot 账号)")
+        self.assertEqual(grok_bot["name"], "Grok Code Fast 1")
         self.assertEqual(grok_bot["cost"], 0.75)
 
     def test_swift_dashboard_uses_synced_grok_bot_provider_data(self):
@@ -198,9 +198,9 @@ class DashboardCacheTests(unittest.TestCase):
         dashboard = (root / "Tokei/Sources/Tokei/DashboardView.swift").read_text()
         sync = (root / "Tokei/Sources/Tokei/SyncManager.swift").read_text()
 
-        self.assertIn('(\"grok_bot\", \"Grok Bot\", usage.grokBot.quota', dashboard)
+        self.assertNotIn('(\"grok_bot\", \"Grok Bot\", usage.grokBot.quota', dashboard)
         self.assertIn('case \"grok_bot\": return Theme.grokBot', dashboard)
-        self.assertIn('providerModelsForCurrentScope(usage:', dashboard)
+        self.assertIn('grokBotModelsForCurrentScope(usage:', dashboard)
         self.assertIn('u.grokBot.quota = peer.usage.grokBot.quota', sync)
 
     def test_swift_all_device_qoderwork_tokens_are_preserved(self):
