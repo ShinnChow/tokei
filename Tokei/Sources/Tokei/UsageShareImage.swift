@@ -125,6 +125,7 @@ enum UsageShareImage {
         case "Codex": return Theme.codex
         case "Gemini": return Theme.gemini
         case "Grok": return Theme.grok
+        case "Grok Bot": return Theme.grokBot
         case "Qoder Desktop": return Theme.qoder
         case "QoderWork": return Theme.qoderwork
         case "Qoder CLI": return Theme.qodercli
@@ -134,6 +135,7 @@ enum UsageShareImage {
         case "OpenClaw": return Theme.openclaw
         case "Pi": return Theme.pi
         case "WorkBuddy": return Theme.workbuddy
+        case "WorkBuddy Intl.": return Theme.workbuddyAI
         case "OpenCode": return Theme.opencode
         case "Qwen Code": return Theme.qwencode
         default: return Theme.tTertiary

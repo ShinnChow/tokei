@@ -451,6 +451,8 @@ class GrokQuotaTests(unittest.TestCase):
                                    return_value=USAGE._empty_pi()), \
                  mock.patch.object(USAGE, "scan_workbuddy",
                                    return_value=USAGE._empty_workbuddy()), \
+                 mock.patch.object(USAGE, "scan_workbuddy_ai",
+                                   return_value=USAGE._empty_workbuddy()), \
                  mock.patch.object(USAGE, "scan_opencode",
                                    return_value=USAGE._empty_opencode()), \
                  mock.patch.object(USAGE, "scan_qwencode",

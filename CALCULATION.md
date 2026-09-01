@@ -11,6 +11,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Claude Code | `~/.claude/*/*.jsonl` | JSONL, `type=assistant` 行含 `message.usage` |
 | Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` / `~/.gemini/*/chats/session-*.json` | SQLite (`gen_metadata` protobuf) / JSON (`messages[].tokens`) |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl` + `sessions/*/*/{summary,signals}.json` | JSONL, `shell.turn.inference_done` + 会话指标 |
+| Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob` | JSON 快照；会话、消息、响应、工具调用、时间 |
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` | SQLite, `chat_message.token_info` / `model_info` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` | JSONL, 会话/调用/工具/时长；文本量估算 Token |
@@ -19,6 +20,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` | JSONL, assistant `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
+| WorkBuddy Intl. | `~/.workbuddy-ai/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
@@ -149,6 +151,11 @@ Tokei 优先读取逐请求日志以获得进行中会话和小时分布。旧�
 旧版 `inference_done` 没有 token 字段，只在卡片中降级展示上下文快照；上下文快照不会计入
 Dashboard、Wrapped 或项目 token 总量。
 
+**Grok Bot** — 同一 `requestId` 下可能连续写入多条流式 `send-message` 事件，响应次数按
+`requestId` 去重；用户消息按稳定 entry id 去重。多个持久化键保存同一份 transcript 时，
+再按首尾 entry 边界去重。当前快照没有 Token、模型或成本字段，这三项保持未知，文本长度
+不会参与 Token 估算。
+
 **Qoder** — `inputTokens` / `outputTokens` 目前全为 0,仅 `durationMs` 和 `contextUsageRatio` 有值。
 
 **OpenClaw** — Session JSONL 的 `message.usage` 提供输入、输出、缓存读写和成本；
@@ -161,7 +168,7 @@ Dashboard、Wrapped 或项目 token 总量。
 
 两种公式,取决于 `input` 是否包含缓存:
 
-### Claude / Grok Build / Hermes / Pi / WorkBuddy / OpenCode / Qwen Code(input 不含缓存)
+### Claude / Grok Build / Hermes / Pi / WorkBuddy / WorkBuddy Intl. / OpenCode / Qwen Code(input 不含缓存)
 
 ```
 hit% = cache_read / (cache_read + cache_write + input) × 100
@@ -319,6 +326,17 @@ Codex 刷新登录 Token 后立即重试。
 1. 始终优先解析本地日志
 2. 仅当用户开启实时查询时，才请求账单接口覆盖为最新值
 3. 失败时回退到本地日志或短缓存，不报错
+
+### Grok Bot
+
+本地活动采集不访问网络。官方用量查询默认关闭；开启并明确授权后，Tokei 优先通过
+macOS Keychain 读取 Grok Bot 的 Electron Safe Storage 密钥，在内存中解密当前账号的
+短期 access token，再请求固定的官方 Sand usage status 与 usage-events 地址。用量请求固定
+`clientType=sand`，只统计 Grok Bot 产生的 Token、缓存、模型和成本，避免混入同账号的 Cursor
+调用；账号标识、邮箱、会话内容和登录 Token 都不会写入 Tokei 输出。常规刷新使用禁止弹窗的
+Keychain 查询，授权失效时静默降级。成功结果缓存 5 分钟，失败时最多沿用 1 小时缓存。首次授权
+会由新进程再次验证长期权限，只有系统弹窗选择“始终允许”后才显示授权成功。没有授权时仍可
+回退到可复用的 Cursor 登录态，本地会话活动始终正常显示。
 
 ### 千问办公（QwenWork）
 

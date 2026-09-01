@@ -869,11 +869,33 @@ struct ProviderQuotaStat: Codable {
     }
 }
 
+struct GrokBotStat: Codable {
+    var ranges: QoderRanges
+    var quota: ProviderQuotaStat
+
+    static var empty: GrokBotStat {
+        GrokBotStat(ranges: .empty, quota: ProviderQuotaStat())
+    }
+
+    init(ranges: QoderRanges, quota: ProviderQuotaStat) {
+        self.ranges = ranges
+        self.quota = quota
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = (try? c.decodeIfPresent(QoderRanges.self, forKey: .ranges)) ?? .empty
+        quota = (try? c.decodeIfPresent(ProviderQuotaStat.self, forKey: .quota))
+            ?? ProviderQuotaStat()
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
     var gemini: GeminiStat
     var grok: GrokStat
+    var grokBot: GrokBotStat
     var qoderwork: QoderStat
     var qoder: QoderIdeStat
     var qodercli: QoderStat
@@ -884,6 +906,7 @@ struct Usage: Codable {
     var pi: TokenUsageStat
     var prime_agent: TokenUsageStat
     var workbuddy: TokenUsageStat
+    var workbuddyAI: TokenUsageStat
     var deepseekHarness: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
@@ -896,8 +919,10 @@ struct Usage: Codable {
     var zai: ProviderQuotaStat
 
     enum CodingKeys: String, CodingKey {
-        case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
-        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
+        case claude, codex, gemini, grok, grokBot = "grok_bot"
+        case qoder, qoderwork, qodercli, hermes, zcode, mimocode
+        case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
+        case deepseekHarness = "deepseek_harness", opencode, qwencode
         case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
@@ -907,6 +932,7 @@ struct Usage: Codable {
         codex = try c.decode(CodexStat.self, forKey: .codex)
         gemini = try c.decode(GeminiStat.self, forKey: .gemini)
         grok = try c.decode(GrokStat.self, forKey: .grok)
+        grokBot = try c.decodeIfPresent(GrokBotStat.self, forKey: .grokBot) ?? .empty
         qoderwork = (try? c.decodeIfPresent(QoderStat.self, forKey: .qoderwork))
             ?? (try? c.decodeIfPresent(QoderStat.self, forKey: .qoder))
             ?? QoderStat(ranges: .empty, model: nil)
@@ -921,6 +947,7 @@ struct Usage: Codable {
         pi = try c.decodeIfPresent(TokenUsageStat.self, forKey: .pi) ?? TokenUsageStat(ranges: .empty)
         prime_agent = try c.decodeIfPresent(TokenUsageStat.self, forKey: .prime_agent) ?? TokenUsageStat(ranges: .empty)
         workbuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddy) ?? TokenUsageStat(ranges: .empty)
+        workbuddyAI = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddyAI) ?? TokenUsageStat(ranges: .empty)
         deepseekHarness = try c.decodeIfPresent(TokenUsageStat.self, forKey: .deepseekHarness) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)

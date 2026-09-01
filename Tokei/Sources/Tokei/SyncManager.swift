@@ -257,7 +257,7 @@ final class SyncManager {
     }
 
     private static let providerQuotaIDs: Set<String> = [
-        "cursor", "zed", "sub2api", "zai", "antigravity",
+        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity",
     ]
     private static let providerSettingKeys: Set<String> = [
         "sub2api_base_url", "zai_region", "zai_usage_scope",
@@ -433,6 +433,7 @@ final class SyncManager {
             mergeRanges(&u.gemini.ranges, peer.usage.gemini.ranges, pairs)
             mergeRanges(&u.grok.ranges, peer.usage.grok.ranges, pairs)
             u.grok.model = mergeModelName(u.grok.model, peer.usage.grok.model)
+            mergeRanges(&u.grokBot.ranges, peer.usage.grokBot.ranges, pairs)
             mergeRanges(&u.qoderwork.ranges, peer.usage.qoderwork.ranges, pairs)
             mergeRanges(&u.qoder.ranges, peer.usage.qoder.ranges, pairs)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
@@ -442,6 +443,7 @@ final class SyncManager {
             mergeRanges(&u.pi.ranges, peer.usage.pi.ranges, pairs)
             mergeRanges(&u.prime_agent.ranges, peer.usage.prime_agent.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
+            mergeRanges(&u.workbuddyAI.ranges, peer.usage.workbuddyAI.ranges, pairs)
             mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
@@ -577,6 +579,7 @@ final class SyncManager {
             d.sessions += s.sessions
             d.calls += s.calls; d.sub_agents += s.sub_agents
             d.turns += s.turns; d.duration += s.duration
+            d.tools += s.tools; d.est += s.est
             d.ctx = weightedAverage(d.ctx, originalSessions, s.ctx, s.sessions)
             dst.set(pair.dst, d)
         }

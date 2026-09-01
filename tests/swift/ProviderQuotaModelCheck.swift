@@ -68,6 +68,24 @@ struct ProviderQuotaModelCheck {
         try expect(empty.windows.isEmpty, "empty windows")
         try expect(empty.details.isEmpty, "empty details")
 
+        let grokBot = try JSONDecoder().decode(GrokBotStat.self, from: Data("""
+        {
+          "ranges": {
+            "today": {"sessions": 1, "calls": 2, "turns": 2, "tools": 1, "duration": 4},
+            "yesterday": {}, "week": {}, "last_week": {},
+            "month": {}, "year": {}
+          },
+          "quota": {
+            "available": true,
+            "plan": "X Premium+",
+            "windows": [{"id": "grok-bot-period", "title": "本周期额度", "used_pct": 12.5}]
+          }
+        }
+        """.utf8))
+        try expect(grokBot.ranges.today.calls == 2, "Grok Bot response count")
+        try expect(grokBot.ranges.today.tools == 1, "Grok Bot tool count")
+        try expect(grokBot.quota.windows.first?.used_pct == 12.5, "Grok Bot quota")
+
         let geminiRanges = try JSONDecoder().decode(GeminiRanges.self, from: Data("""
         {
           "today": {"hit": 0, "in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0, "models": [], "sessions": 0},

@@ -13,12 +13,14 @@ struct PanelView: View {
     @State private var cursorModelsOpen = false
     @State private var zaiModelsOpen = false
     @State private var grokModelsOpen = false
+    @State private var grokBotModelsOpen = false
     @State private var hermesModelsOpen = false
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
     @State private var piModelsOpen = false
     @State private var primeAgentModelsOpen = false
     @State private var workBuddyModelsOpen = false
+    @State private var workBuddyAIModelsOpen = false
     @State private var deepSeekHarnessModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
@@ -49,6 +51,7 @@ struct PanelView: View {
     @AppStorage("showSub2API") private var showSub2API = false
     @AppStorage("showZai") private var showZai = false
     @AppStorage("showGrok") private var showGrok = true
+    @AppStorage("showGrokBot") private var showGrokBot = true
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
     @AppStorage("showQoderCli") private var showQoderCli = true
@@ -59,6 +62,7 @@ struct PanelView: View {
     @AppStorage("showPi") private var showPi = true
     @AppStorage("showPrimeAgent") private var showPrimeAgent = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
+    @AppStorage("showWorkBuddyAI") private var showWorkBuddyAI = true
     @AppStorage("showDeepSeekHarness") private var showDeepSeekHarness = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
@@ -66,6 +70,8 @@ struct PanelView: View {
     @AppStorage("showKimiCode") private var showKimiCode = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
+    /// 默认关闭：显式授权后复用 Grok Bot 或 Cursor 登录态查询官方额度。
+    @AppStorage("grokBotQuotaEnabled") private var grokBotQuotaEnabled = false
     /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
@@ -82,18 +88,22 @@ struct PanelView: View {
     private var toolVisibility: UsageToolVisibility {
         UsageToolVisibility(
             claude: showClaude, codex: showCodex, gemini: showGemini, grok: showGrok,
+            grokBot: showGrokBot,
             qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
             hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
             openclaw: showOpenClaw, pi: showPi, primeAgent: showPrimeAgent,
-            workbuddy: showWorkBuddy, deepseekHarness: showDeepSeekHarness,
+            workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
+            deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode
         )
     }
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showCursor, showZed, showSub2API, showZai,
-         showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
-         showOpenClaw, showPi, showWorkBuddy, showDeepSeekHarness, showOpenCode, showQwenCode,
+         showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showHermes,
+         showZcode, showMimoCode,
+         showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
+         showOpenCode, showQwenCode,
          showQwenWork, showKimiCode, showPrimeAgent].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
@@ -325,13 +335,32 @@ struct PanelView: View {
         let cr = u.claude.ranges.get(sel), xr = u.codex.ranges.get(sel)
         let geminiDisplay = u.gemini.ranges.displayRange(for: sel)
         let kr = u.grok.ranges.get(sel)
+        let grokBotDisplay: (key: RangeKey, range: QoderRange, usage: TokenUsageRange) = {
+            let selected = u.grokBot.ranges.get(sel)
+            let selectedUsage = u.grokBot.quota.usage?.ranges.get(sel) ?? TokenUsageRange()
+            if selected.sessions > 0 || selected.calls > 0 || selected.turns > 0 ||
+                selectedUsage.totalTokens > 0 || selectedUsage.requests > 0 {
+                return (sel, selected, selectedUsage)
+            }
+            for key in [RangeKey.today, .yesterday, .week, .lastWeek, .month, .year, .all]
+                where key != sel {
+                let candidate = u.grokBot.ranges.get(key)
+                let candidateUsage = u.grokBot.quota.usage?.ranges.get(key) ?? TokenUsageRange()
+                if candidate.sessions > 0 || candidate.calls > 0 || candidate.turns > 0 ||
+                    candidateUsage.totalTokens > 0 || candidateUsage.requests > 0 {
+                    return (key, candidate, candidateUsage)
+                }
+            }
+            return (sel, selected, selectedUsage)
+        }()
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
         let qclir = u.qodercli.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
         let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let par = u.prime_agent.ranges.get(sel)
-        let wr = u.workbuddy.ranges.get(sel), or = u.opencode.ranges.get(sel)
+        let wr = u.workbuddy.ranges.get(sel), wair = u.workbuddyAI.ranges.get(sel)
+        let or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
         let claudeQuotaState = SubscriptionQuotaState.resolve([
             (value: u.claude.q5, stale: u.claude.q5_stale),
@@ -399,6 +428,23 @@ struct PanelView: View {
                             hasUsage: kr.sessions > 0 || kr.usage_calls > 0
                          ) ? .compactStatus : .standard,
                          content: AnyView(grokBlock(u.grok, kr))),
+            ToolCardItem(id: "grok-bot", name: "Grok Bot", visible: showGrokBot,
+                         active: grokBotDisplay.range.sessions > 0 ||
+                             grokBotDisplay.range.calls > 0 ||
+                             grokBotDisplay.usage.totalTokens > 0 ||
+                             grokBotDisplay.usage.requests > 0 ||
+                             u.grokBot.quota.available,
+                         tint: Theme.grokBot,
+                         presentation: grokBotDisplay.range.sessions == 0 &&
+                             grokBotDisplay.range.calls == 0 &&
+                             grokBotDisplay.range.turns == 0 &&
+                             grokBotDisplay.usage.totalTokens == 0 &&
+                             grokBotDisplay.usage.requests == 0 &&
+                             u.grokBot.quota.available
+                             ? .compactStatus : .standard,
+                         content: AnyView(grokBotBlock(
+                            u.grokBot, grokBotDisplay.range, grokBotDisplay.usage,
+                            displayedRange: grokBotDisplay.key))),
             ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder, active: qr.calls > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
             ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
@@ -420,6 +466,12 @@ struct PanelView: View {
                          tint: Theme.primeAgent, content: AnyView(tokenUsageBlock(title: "Prime Agent", par, tint: Theme.primeAgent, modelsOpen: $primeAgentModelsOpen, toolID: "prime_agent"))),
             ToolCardItem(id: "workbuddy", name: "WorkBuddy", visible: showWorkBuddy, active: wr.sessions > 0,
                          tint: Theme.workbuddy, content: AnyView(tokenUsageBlock(title: "WorkBuddy", wr, tint: Theme.workbuddy, modelsOpen: $workBuddyModelsOpen, toolID: "workbuddy"))),
+            ToolCardItem(id: "workbuddy-ai", name: "WorkBuddy Intl.",
+                         visible: showWorkBuddyAI, active: wair.sessions > 0,
+                         tint: Theme.workbuddyAI,
+                         content: AnyView(tokenUsageBlock(
+                            title: "WorkBuddy Intl.", wair, tint: Theme.workbuddyAI,
+                            modelsOpen: $workBuddyAIModelsOpen, toolID: "workbuddy-ai"))),
             ToolCardItem(id: "deepseek_harness", name: "DeepSeek Harness", visible: showDeepSeekHarness,
                          active: dshr.sessions > 0, tint: Theme.deepseekHarness,
                          content: AnyView(tokenUsageBlock(title: "DeepSeek Harness", dshr,
@@ -772,7 +824,8 @@ struct PanelView: View {
     func providerTokenUsageContent(
         _ r: TokenUsageRange,
         modelsOpen: Binding<Bool>?,
-        tint: Color
+        tint: Color,
+        periodLabel: String? = nil
     ) -> some View {
         var top: [Metric] = []
         if r.cost > 0 {
@@ -796,7 +849,7 @@ struct PanelView: View {
         return VStack(alignment: .leading, spacing: 9) {
             CostHeadline(
                 value: Fmt.human(r.totalTokens),
-                caption: "\(r.coverage ?? sel.label) 账号总量",
+                caption: "\(r.coverage ?? periodLabel ?? sel.label) 账号总量",
                 tint: tint
             )
             Text("账号级用量 · 单列统计，避免与本地工具日志重复计算")
@@ -806,7 +859,12 @@ struct PanelView: View {
                 metricGrid(top, hit: r.hit, extra: details, tint: tint)
             }
             if !r.models.isEmpty, let modelsOpen {
-                tokenModelDisclosure(r.models, open: modelsOpen, tint: tint)
+                tokenModelDisclosure(
+                    r.models,
+                    open: modelsOpen,
+                    tint: tint,
+                    periodLabel: periodLabel
+                )
             }
         }
     }
@@ -913,6 +971,77 @@ struct PanelView: View {
             return Fmt.reset(epoch)
         }
         return detail.value
+    }
+
+    // MARK: - Grok Bot 卡片
+    @ViewBuilder
+    func grokBotBlock(
+        _ stat: GrokBotStat,
+        _ r: QoderRange,
+        _ usage: TokenUsageRange,
+        displayedRange: RangeKey
+    ) -> some View {
+        let hasActivity = r.sessions > 0 || r.calls > 0 || r.turns > 0
+        let hasUsage = usage.totalTokens > 0 || usage.requests > 0
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Grok Bot", tint: Theme.grokBot, sessions: r.sessions,
+                     toolID: hasActivity && displayedRange == sel ? "grok-bot" : nil)
+            if hasUsage {
+                if displayedRange != sel {
+                    Text("\(sel.label)暂无活动，显示\(displayedRange.label)最近记录")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                providerTokenUsageContent(
+                    usage,
+                    modelsOpen: $grokBotModelsOpen,
+                    tint: Theme.grokBot,
+                    periodLabel: displayedRange.label
+                )
+                if hasActivity {
+                    Text("本地记录 · \(r.turns) 条消息 · \(r.calls) 次响应")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+            } else if hasActivity {
+                if displayedRange != sel {
+                    Text("\(sel.label)暂无活动，显示\(displayedRange.label)最近记录")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                CostHeadline(
+                    value: Fmt.human(r.calls > 0 ? r.calls : r.turns),
+                    caption: "\(displayedRange.label) 响应",
+                    tint: Theme.grokBot
+                )
+                metricGrid({
+                    var items: [Metric] = [
+                        .init("bubble.left", "你的消息", Fmt.human(r.turns)),
+                        .init("sparkles", "响应", Fmt.human(r.calls)),
+                    ]
+                    if r.tools > 0 {
+                        items.append(.init("wrench.and.screwdriver", "工具调用", Fmt.human(r.tools)))
+                    }
+                    if r.duration > 0 {
+                        items.append(.init("clock", "活跃", Fmt.duration(r.duration * 1000)))
+                    }
+                    return items
+                }(), tint: Theme.grokBot)
+                Text("本地活动 · 授权后显示官方 Token、模型和成本")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(Theme.tTertiary)
+            } else if !stat.quota.available {
+                emptyHint
+            }
+            if stat.quota.available {
+                if hasActivity || hasUsage { thinDivider }
+                providerQuotaContent(stat.quota, tint: Theme.grokBot)
+            } else if grokBotQuotaEnabled {
+                Text("尚未读取到官方数据，请在设置中重新授权 Grok Bot")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.tTertiary)
+            }
+        }
     }
 
     // MARK: - Grok 卡片
@@ -1742,7 +1871,8 @@ struct PanelView: View {
     @ViewBuilder
     func tokenModelDisclosure(_ models: [TokenModelStat], open: Binding<Bool>, tint: Color,
                               reasonIncludedInOutput: Bool = false,
-                              inclusiveIO: Bool = false) -> some View {
+                              inclusiveIO: Bool = false,
+                              periodLabel: String? = nil) -> some View {
         Button {
             open.wrappedValue.toggle()
         } label: {
@@ -1762,7 +1892,7 @@ struct PanelView: View {
         .buttonStyle(.plain)
         if open.wrappedValue {
             VStack(alignment: .leading, spacing: 6) {
-                Text("按模型 · \(sel.label)")
+                Text("按模型 · \(periodLabel ?? sel.label)")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in
@@ -1779,34 +1909,40 @@ struct PanelView: View {
                                 else { expandedModels.insert(m.id) }
                             }
                         } label: {
-                            HStack(spacing: 7) {
+                            HStack(alignment: .top, spacing: 7) {
                                 if hasBreakdown {
                                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                                         .font(.system(size: 7, weight: .bold))
                                         .foregroundStyle(Theme.tTertiary)
-                                        .frame(width: 8)
+                                        .frame(width: 8, height: 16)
                                 } else {
-                                    Color.clear.frame(width: 8, height: 8)
+                                    Color.clear.frame(width: 8, height: 16)
                                 }
                                 Circle().fill(tint.opacity(0.7)).frame(width: 5, height: 5)
+                                    .padding(.top, 5)
                                 Text(m.name).font(.system(size: 11.5)).foregroundStyle(Theme.tPrimary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                Text(Fmt.human(total))
-                                    .font(.system(size: 9.5, design: .monospaced))
-                                    .foregroundStyle(Theme.tTertiary)
-                                if hit > 0 {
-                                    Text(String(format: "%.0f%%", hit))
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .layoutPriority(1)
+                                Spacer(minLength: 6)
+                                HStack(spacing: 6) {
+                                    Text(Fmt.human(total))
                                         .font(.system(size: 9.5, design: .monospaced))
                                         .foregroundStyle(Theme.tTertiary)
-                                        .padding(.horizontal, 4).padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                                    if hit > 0 {
+                                        Text(String(format: "%.0f%%", hit))
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundStyle(Theme.tTertiary)
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                                    }
+                                    if m.cost > 0 {
+                                        Text(String(format: "$%.2f", m.cost))
+                                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(Theme.tPrimary)
+                                    }
                                 }
-                                if m.cost > 0 {
-                                    Text(String(format: "$%.2f", m.cost))
-                                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                                        .foregroundStyle(Theme.tPrimary)
-                                }
+                                .fixedSize(horizontal: true, vertical: false)
                             }
                             .contentShape(Rectangle())
                         }
@@ -1866,30 +2002,36 @@ struct PanelView: View {
                                 else { expandedModels.insert(m.id) }
                             }
                         } label: {
-                            HStack(spacing: 7) {
+                            HStack(alignment: .top, spacing: 7) {
                                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                                     .font(.system(size: 7, weight: .bold))
                                     .foregroundStyle(Theme.tTertiary)
-                                    .frame(width: 8)
+                                    .frame(width: 8, height: 16)
                                 Circle().fill(tint.opacity(0.7)).frame(width: 5, height: 5)
+                                    .padding(.top, 5)
                                 Text(m.name).font(.system(size: 11.5)).foregroundStyle(Theme.tPrimary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 4)
-                                if m.total > 0 {
-                                    Text(Fmt.human(m.total))
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundStyle(Theme.tTertiary)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .layoutPriority(1)
+                                Spacer(minLength: 6)
+                                HStack(spacing: 6) {
+                                    if m.total > 0 {
+                                        Text(Fmt.human(m.total))
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundStyle(Theme.tTertiary)
+                                    }
+                                    if m.hit > 0 {
+                                        Text(String(format: "%.0f%%", m.hit))
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundStyle(Theme.tTertiary)
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                                    }
+                                    Text(String(format: "$%.2f", m.cost))
+                                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                        .foregroundStyle(Theme.tPrimary)
                                 }
-                                if m.hit > 0 {
-                                    Text(String(format: "%.0f%%", m.hit))
-                                        .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundStyle(Theme.tTertiary)
-                                        .padding(.horizontal, 4).padding(.vertical, 1)
-                                        .background(Capsule().fill(Color.primary.opacity(0.06)))
-                                }
-                                Text(String(format: "$%.2f", m.cost))
-                                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(Theme.tPrimary)
+                                .fixedSize(horizontal: true, vertical: false)
                             }
                             .contentShape(Rectangle())
                         }
@@ -2220,6 +2362,8 @@ struct PanelView: View {
     @State private var zaiKey = ""
     @State private var zaiKeyStored = false
     @State private var providerSettingsResult = ""
+    @State private var grokBotAuthorizing = false
+    @State private var grokBotAuthorizationResult = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @State private var configuredDeviceID: String?
@@ -2441,6 +2585,7 @@ struct PanelView: View {
                 settingsRow("Sub2API", tint: Theme.sub2api, isOn: $showSub2API)
                 settingsRow("z.ai / GLM", tint: Theme.zai, isOn: $showZai)
                 settingsRow("Grok", tint: Theme.grok, isOn: $showGrok)
+                settingsRow("Grok Bot", tint: Theme.grokBot, isOn: $showGrokBot)
                 settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
                 settingsRow("Qoder CLI", tint: Theme.qodercli, isOn: $showQoderCli)
@@ -2451,6 +2596,7 @@ struct PanelView: View {
                 settingsRow("Pi", tint: Theme.pi, isOn: $showPi)
                 settingsRow("Prime Agent", tint: Theme.primeAgent, isOn: $showPrimeAgent)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
+                settingsRow("WorkBuddy Intl.", tint: Theme.workbuddyAI, isOn: $showWorkBuddyAI)
                 settingsRow("DeepSeek Harness", tint: Theme.deepseekHarness, isOn: $showDeepSeekHarness)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
@@ -2656,6 +2802,32 @@ struct PanelView: View {
 
             thinDivider
 
+            settingsToggleRow("Grok Bot 额度查询", isOn: $grokBotQuotaEnabled)
+            Text("开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用或授权失效时需确认一次系统授权；Tokei 只读取额度所需信息，登录 Token 仅在内存中使用。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            if grokBotQuotaEnabled {
+                HStack(spacing: 8) {
+                    settingsActionButton(
+                        icon: "key.fill",
+                        title: grokBotAuthorizing ? "等待授权…" : "授权 Grok Bot"
+                    ) {
+                        authorizeGrokBotQuota()
+                    }
+                    .disabled(grokBotAuthorizing)
+                    if grokBotAuthorizing { ProgressView().controlSize(.mini) }
+                    if !grokBotAuthorizationResult.isEmpty {
+                        Text(grokBotAuthorizationResult)
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(Theme.tTertiary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+
+            thinDivider
+
             settingsToggleRow("千问办公额度查询", isOn: $qwenWorkQuotaEnabled)
             Text("默认关闭。开启后，Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。Tokei 不读取或保存登录凭据，需保持千问办公已登录并运行。")
                 .font(.system(size: 8.5))
@@ -2664,6 +2836,10 @@ struct PanelView: View {
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)
+            store.refresh()
+        }
+        .onChange(of: grokBotQuotaEnabled) { enabled in
+            Self.setProviderQuotaEnabled("grok_bot", enabled)
             store.refresh()
         }
         .onChange(of: qwenWorkQuotaEnabled) { enabled in
@@ -2686,6 +2862,42 @@ struct PanelView: View {
 
     private static func setProviderQuotaEnabled(_ provider: String, _ enabled: Bool) {
         SyncManager.setProviderQuotaEnabled(provider, enabled: enabled)
+    }
+
+    private func authorizeGrokBotQuota() {
+        guard !grokBotAuthorizing, let executable = Bundle.main.executableURL else { return }
+        grokBotAuthorizing = true
+        grokBotAuthorizationResult = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            func run(_ argument: String) -> Bool {
+                let process = Process()
+                process.executableURL = executable
+                process.arguments = [argument]
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    return process.terminationStatus == 0
+                } catch {
+                    return false
+                }
+            }
+            let interactiveSucceeded = run("--grok-bot-authorize")
+            let persistentSucceeded = interactiveSucceeded && run("--grok-bot-verify")
+            DispatchQueue.main.async {
+                grokBotAuthorizing = false
+                if persistentSucceeded {
+                    grokBotAuthorizationResult = "授权成功，可在 Grok Bot 卡片查看"
+                    store.refresh()
+                } else if interactiveSucceeded {
+                    grokBotAuthorizationResult = "仅允许了本次读取，请重新授权并选择“始终允许”"
+                } else {
+                    grokBotAuthorizationResult = "未授权，或 Grok Bot 尚未登录"
+                }
+            }
+        }
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -2714,6 +2926,7 @@ struct PanelView: View {
         let settings: [(String, String, Bool)] = [
             ("antigravity", "showGemini", true),
             ("cursor", "showCursor", false),
+            ("grok_bot", "grokBotQuotaEnabled", false),
             ("zed", "showZed", false),
             ("sub2api", "showSub2API", false),
             ("zai", "showZai", false),
@@ -3358,8 +3571,9 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
-                         "sub2api", "zai", "grok", "qoder", "qoderwork", "hermes",
-                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "deepseek_harness",
+                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "hermes",
+                         "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
+                         "deepseek_harness",
                          "opencode", "qwencode", "qwenwork", "kimicode", "prime_agent"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")

@@ -6,6 +6,7 @@ struct UsageToolVisibility: Equatable {
     var codex = true
     var gemini = true
     var grok = true
+    var grokBot = true
     var qoder = true
     var qoderwork = true
     var qodercli = true
@@ -16,6 +17,7 @@ struct UsageToolVisibility: Equatable {
     var pi = true
     var primeAgent = true
     var workbuddy = true
+    var workbuddyAI = true
     var deepseekHarness = true
     var opencode = true
     var qwencode = true
@@ -201,6 +203,27 @@ enum UsageSummaryBuilder {
             )
             if !line.isEmpty { lines.append(line) }
         }
+        if visibility.grokBot {
+            let r = usage.grokBot.ranges.get(range)
+            let accountUsage = usage.grokBot.quota.usage?.ranges.get(range)
+                ?? TokenUsageRange()
+            let line = Line(
+                id: "grok-bot", name: "Grok Bot",
+                cost: accountUsage.cost > 0 ? accountUsage.cost : nil,
+                tokens: accountUsage.totalTokens > 0 ? accountUsage.totalTokens : nil,
+                sessions: r.sessions,
+                calls: accountUsage.requests > 0
+                    ? accountUsage.requests
+                    : (r.calls > 0 ? r.calls : nil),
+                input: accountUsage.hasComponents ? accountUsage.in : nil,
+                output: accountUsage.hasComponents ? accountUsage.out : nil,
+                cacheRead: accountUsage.cr > 0 ? accountUsage.cr : nil,
+                cacheWrite: accountUsage.cw > 0 ? accountUsage.cw : nil,
+                reason: nil, hit: nil,
+                extra: r.turns > 0 ? "\(r.turns) 条消息" : nil
+            )
+            if !line.isEmpty { lines.append(line) }
+        }
         if visibility.qoder {
             let r = usage.qoder.ranges.get(range)
             let line = Line(
@@ -268,6 +291,10 @@ enum UsageSummaryBuilder {
         }
         if visibility.workbuddy {
             appendTokenTool(&lines, id: "workbuddy", name: "WorkBuddy", range: usage.workbuddy.ranges.get(range))
+        }
+        if visibility.workbuddyAI {
+            appendTokenTool(&lines, id: "workbuddy-ai", name: "WorkBuddy Intl.",
+                            range: usage.workbuddyAI.ranges.get(range))
         }
         if visibility.deepseekHarness {
             appendTokenTool(&lines, id: "deepseek_harness", name: "DeepSeek Harness",

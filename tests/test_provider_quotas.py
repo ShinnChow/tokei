@@ -49,6 +49,7 @@ class ProviderQuotaTests(unittest.TestCase):
             USAGE._USER_DIR = tmp
             Path(tmp, "config.json").write_text("{}", encoding="utf-8")
             self.assertFalse(USAGE._provider_quota_enabled("cursor"))
+            self.assertFalse(USAGE._provider_quota_enabled("grok_bot"))
             self.assertFalse(USAGE._provider_quota_enabled("zed"))
             self.assertFalse(USAGE._provider_quota_enabled("sub2api"))
             self.assertFalse(USAGE._provider_quota_enabled("zai"))

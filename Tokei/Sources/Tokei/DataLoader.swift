@@ -669,6 +669,7 @@ final class DataLoader {
         }
         var environment = ProcessInfo.processInfo.environment
         environment["TOKEI_DSH_DECOMPRESSED_DIR"] = deepSeekSessions.path
+        environment["TOKEI_GROK_BOT_HELPER"] = Bundle.main.executablePath
         for (key, value) in ProviderCredentialStore.environmentOverrides() {
             environment[key] = value
         }
