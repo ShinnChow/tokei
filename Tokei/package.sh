@@ -43,13 +43,16 @@ swift build -c release
 
 APP="Tokei.app"
 BIN="$(swift build -c release --show-bin-path)/Tokei"
+GROK_BOT_HELPER="$(swift build -c release --show-bin-path)/TokeiGrokBotHelper"
 PROJ_DIR="$(dirname "$(pwd)")"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 
 # 二进制
 cp "$BIN" "$APP/Contents/MacOS/Tokei"
+cp "$GROK_BOT_HELPER" "$APP/Contents/Helpers/TokeiGrokBotHelper"
+chmod 755 "$APP/Contents/Helpers/TokeiGrokBotHelper"
 
 # 打包 Python 脚本和配置到 Resources
 cp "$PROJ_DIR/usage.30s.py" "$APP/Contents/Resources/"

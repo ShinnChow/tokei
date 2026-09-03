@@ -93,6 +93,7 @@ final class DataLoader {
     private static let claudeQuotaFullScanInterval = 6 * 60 * 60
     private static let claudeQuotaRetryScanInterval = 5 * 60
     private static let claudeCacheFileLimit = 16 * 1024 * 1024
+    private static let claudeQuotaScanLock = NSLock()
     private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
     private static let deepSeekPreparationLock = NSLock()
     private static let deepSeekMaxDecompressedSize = 2 * 1024 * 1024 * 1024
@@ -105,6 +106,10 @@ final class DataLoader {
     private static var claudeQuotaStateURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".tokei/claude_quota_swift_cache.json")
+    }
+
+    private static var claudeCLIQuotaEnabled: Bool {
+        UserDefaults.standard.object(forKey: "claudeCLIQuotaEnabled") as? Bool ?? false
     }
 
     private static func claudeCacheRecords() -> [ClaudeCacheRecord] {
@@ -220,6 +225,8 @@ final class DataLoader {
     }
 
     static func scanClaudeQuota(now: Date = Date()) -> [String: Any]? {
+        claudeQuotaScanLock.lock()
+        defer { claudeQuotaScanLock.unlock() }
         let nowEpoch = Int(now.timeIntervalSince1970)
         let records = claudeCacheRecords()
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
@@ -264,7 +271,7 @@ final class DataLoader {
             }
         }
 
-        return finishClaudeQuotaScan(
+        let desktopQuota = finishClaudeQuotaScan(
             records: records,
             original: original,
             state: &state,
@@ -274,6 +281,21 @@ final class DataLoader {
             initialScan: initialScan,
             nowEpoch: nowEpoch
         )
+        guard claudeCLIQuotaEnabled,
+              !hasFreshClaudeCoreQuota(desktopQuota),
+              let cliQuota = ClaudeCLIQuotaBridge.fetchQuota(now: now) else {
+            return desktopQuota
+        }
+        guard let desktopQuota else { return cliQuota }
+        let desktopUpdated = intValue(desktopQuota["q_updated"]) ?? 0
+        let cliUpdated = intValue(cliQuota["q_updated"]) ?? 0
+        return cliUpdated >= desktopUpdated ? cliQuota : desktopQuota
+    }
+
+    private static func hasFreshClaudeCoreQuota(_ quota: [String: Any]?) -> Bool {
+        guard let quota else { return false }
+        return numberValue(quota["q5"]) != nil && quota["q5_stale"] as? Bool != true &&
+            numberValue(quota["q7"]) != nil && quota["q7_stale"] as? Bool != true
     }
 
     private static func finishClaudeQuotaScan(
@@ -605,6 +627,17 @@ final class DataLoader {
         }
     }
 
+    private static func nativeClaudeQuotaJSON() -> String? {
+        guard let quota = scanClaudeQuota(),
+              JSONSerialization.isValidJSONObject(quota),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: quota,
+                  options: [.sortedKeys]
+              )
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     static func writeSyncSnapshot(_ completion: @escaping (Bool) -> Void) {
         DispatchQueue.global(qos: .utility).async {
             let result = runScriptRaw(args: ["--write-sync"], timeout: 120)
@@ -625,9 +658,12 @@ final class DataLoader {
 
     private static let syncSnapshotPython = """
     import importlib.util
+    import os
     import sys
 
-    script_path, device_id, sync_dir = sys.argv[1:4]
+    script_path, device_id, sync_dir, claude_quota = sys.argv[1:5]
+    if claude_quota:
+        os.environ["TOKEI_CLAUDE_QUOTA_JSON"] = claude_quota
     spec = importlib.util.spec_from_file_location("tokei_usage_sync", script_path)
     if spec is None or spec.loader is None:
         raise SystemExit(1)
@@ -642,17 +678,24 @@ final class DataLoader {
     """
 
     static func syncSnapshotCommand(deviceID: String, syncDir: String) -> SyncCommand {
+        let claudeQuota = nativeClaudeQuotaJSON() ?? ""
         if pythonPath == "/usr/bin/env" {
             return SyncCommand(
                 executable: "/usr/bin/env",
-                arguments: ["python3", "-c", syncSnapshotPython, scriptPath, deviceID, syncDir],
+                arguments: [
+                    "python3", "-c", syncSnapshotPython,
+                    scriptPath, deviceID, syncDir, claudeQuota,
+                ],
                 supervisorExecutable: "/usr/bin/env",
                 supervisorArguments: ["python3"]
             )
         }
         return SyncCommand(
             executable: pythonPath,
-            arguments: ["-c", syncSnapshotPython, scriptPath, deviceID, syncDir],
+            arguments: [
+                "-c", syncSnapshotPython,
+                scriptPath, deviceID, syncDir, claudeQuota,
+            ],
             supervisorExecutable: pythonPath
         )
     }
@@ -669,7 +712,13 @@ final class DataLoader {
         }
         var environment = ProcessInfo.processInfo.environment
         environment["TOKEI_DSH_DECOMPRESSED_DIR"] = deepSeekSessions.path
-        environment["TOKEI_GROK_BOT_HELPER"] = Bundle.main.executablePath
+        environment["TOKEI_GROK_BOT_HELPER"] =
+            GrokBotHelperManager.resolvedHelperURL()?.path ?? Bundle.main.executablePath
+        if let json = nativeClaudeQuotaJSON() {
+            environment["TOKEI_CLAUDE_QUOTA_JSON"] = json
+        } else {
+            environment.removeValue(forKey: "TOKEI_CLAUDE_QUOTA_JSON")
+        }
         for (key, value) in ProviderCredentialStore.environmentOverrides() {
             environment[key] = value
         }

@@ -74,6 +74,8 @@ struct PanelView: View {
     @AppStorage("grokBotQuotaEnabled") private var grokBotQuotaEnabled = false
     /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
+    /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
+    @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude5h.defaultsKey) private var menuBarQuotaClaude5h = true
@@ -568,8 +570,8 @@ struct PanelView: View {
             if compactExpired {
                 quotaStateNotice(
                     title: "额度数据已过期",
-                    detail: "等待 Claude Code 写入新的额度缓存，恢复后将自动展示。",
-                    source: "Claude Code 本地缓存",
+                    detail: "等待 Claude Code 更新额度，恢复后将自动展示。",
+                    source: "Claude Code 额度缓存",
                     updated: c.q_updated,
                     tint: Theme.claude,
                     warning: true
@@ -588,8 +590,8 @@ struct PanelView: View {
                 if quotaState == .expired {
                     quotaStateNotice(
                         title: "额度数据已过期",
-                        detail: "当前用量仍可查看；新额度缓存写入后会自动恢复。",
-                        source: "Claude Code 本地缓存",
+                        detail: "当前用量仍可查看；额度更新后会自动恢复。",
+                        source: "Claude Code 额度缓存",
                         updated: c.q_updated,
                         tint: Theme.claude,
                         warning: true
@@ -601,8 +603,10 @@ struct PanelView: View {
                 thinDivider
                 quotaStateNotice(
                     title: "暂未获取到额度数据",
-                    detail: "用量统计不受影响；检测到订阅额度后会自动展示。",
-                    source: "Claude Code 本地缓存",
+                    detail: claudeCLIQuotaEnabled
+                        ? "用量统计不受影响；登录态或网络恢复后会自动重试。"
+                        : "仅使用 CLI 时，可在「隐私与额度」开启 Claude Code CLI 额度查询。",
+                    source: "Claude Code 额度缓存",
                     updated: c.q_updated,
                     tint: Theme.claude
                 )
@@ -1037,7 +1041,7 @@ struct PanelView: View {
                 if hasActivity || hasUsage { thinDivider }
                 providerQuotaContent(stat.quota, tint: Theme.grokBot)
             } else if grokBotQuotaEnabled {
-                Text("尚未读取到官方数据，请在设置中重新授权 Grok Bot")
+                Text("官方数据暂时不可用，Tokei 将自动重试")
                     .font(.system(size: 9))
                     .foregroundStyle(Theme.tTertiary)
             }
@@ -2201,7 +2205,7 @@ struct PanelView: View {
             Spacer()
         }
         .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
-        .help(stale ? "等待 Claude Desktop 写入新的额度缓存" : "来自 Claude Desktop 本地缓存")
+        .help(stale ? "等待 Claude Code 更新额度" : "来自 Claude Code CLI 或 Desktop")
     }
 
     func codexQuotaStatus(_ stat: CodexStat) -> some View {
@@ -2794,6 +2798,14 @@ struct PanelView: View {
 
     var settingsPrivacySection: some View {
         settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("Claude Code CLI 额度查询", isOn: $claudeCLIQuotaEnabled)
+            Text("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
             settingsToggleRow("Grok 实时额度查询", isOn: $grokLiveQuotaEnabled)
             Text("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。")
                 .font(.system(size: 8.5))
@@ -2803,7 +2815,7 @@ struct PanelView: View {
             thinDivider
 
             settingsToggleRow("Grok Bot 额度查询", isOn: $grokBotQuotaEnabled)
-            Text("开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用或授权失效时需确认一次系统授权；Tokei 只读取额度所需信息，登录 Token 仅在内存中使用。")
+            Text("开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。")
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2833,6 +2845,9 @@ struct PanelView: View {
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: claudeCLIQuotaEnabled) { _ in
+            store.refresh()
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)
@@ -2865,7 +2880,11 @@ struct PanelView: View {
     }
 
     private func authorizeGrokBotQuota() {
-        guard !grokBotAuthorizing, let executable = Bundle.main.executableURL else { return }
+        guard !grokBotAuthorizing else { return }
+        guard let executable = GrokBotHelperManager.installIfNeeded() else {
+            grokBotAuthorizationResult = "授权助手不可用，请重新安装 Tokei"
+            return
+        }
         grokBotAuthorizing = true
         grokBotAuthorizationResult = ""
         DispatchQueue.global(qos: .userInitiated).async {

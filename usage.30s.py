@@ -4974,6 +4974,25 @@ def _grok_bot_helper_sand_usage():
     return payload if isinstance(payload, dict) else None
 
 
+def _grok_bot_repair_authorization_marker():
+    """Restore a missing local marker when Keychain access is still valid."""
+    helper = _grok_bot_helper_path()
+    if not helper:
+        return False
+    try:
+        result = subprocess.run(
+            [helper, "--grok-bot-verify"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and _grok_bot_authorization_generation() is not None
+
+
 def _grok_bot_usage_from_bridge(payload):
     if not isinstance(payload, dict) or payload.get("usageFetched") is not True:
         return None
@@ -5175,6 +5194,17 @@ def fetch_grok_bot_quota(session=None):
     if session is None:
         account_id = _grok_bot_active_account_id()
         authorization_generation = _grok_bot_authorization_generation()
+        if account_id and authorization_generation is None:
+            repair_marker = _provider_credential_marker(
+                "grok-bot-auth-repair-v1", account_id)
+            recent_repair = _provider_quota_recent_attempt_result(
+                "grok_bot_auth", repair_marker, _PROVIDER_QUOTA_TTL)
+            if recent_repair is None:
+                if _grok_bot_repair_authorization_marker():
+                    authorization_generation = _grok_bot_authorization_generation()
+                else:
+                    _save_provider_quota_attempt(
+                        "grok_bot_auth", repair_marker, result="failed")
         if account_id and authorization_generation is not None:
             native_marker = _provider_credential_marker(
                 "grok-bot-account-v1", account_id, authorization_generation)
@@ -9325,6 +9355,31 @@ def _claude_quota_with_freshness(snapshot, now=None):
     return result
 
 
+def _claude_quota_from_environment(now=None):
+    """Read the native Swift decoder result passed by Tokei.
+
+    The bundled app can decompress Chromium's zstd response without depending on
+    a user-installed Python module. Only quota percentages and reset timestamps
+    cross the process boundary.
+    """
+    raw = os.environ.get("TOKEI_CLAUDE_QUOTA_JSON")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    allowed = {
+        "q5", "q5_reset", "q7", "q7_reset", "qf", "qf_reset", "q_updated",
+    }
+    snapshot = {key: payload[key] for key in allowed if key in payload}
+    if not any(snapshot.get(key) is not None for key in ("q5", "q7", "qf")):
+        return None
+    return _claude_quota_with_freshness(snapshot, now=now)
+
+
 def _scan_claude_plan_raw(now=None):
     import time
     now = int(time.time()) if now is None else int(now)
@@ -9417,7 +9472,7 @@ def _scan_claude_plan_raw(now=None):
 
 
 def scan_claude_plan():
-    return _scan_claude_plan_raw()
+    return _claude_quota_from_environment() or _scan_claude_plan_raw()
 
 
 @_with_scan_cache_lock
@@ -11294,7 +11349,8 @@ def _load_dashboard_cache():
 # 推不出来,只能观测一次记一次 —— 见 _QUOTA_ANCHOR_FILE。
 # 周期边界落在半天,日级账本切不出来,所以整日部分取账本(权威,不受 CLI 清理旧日志
 # 影响),首尾半天取更细的来源:本机用带时间戳的事件缓存,peer 用日条目里的 hours[24]。
-_QUOTA_CYCLE_HISTORY = 8
+# 详情最多带回约一年的周周期；界面默认展示 8 个，其余由用户按需展开。
+_QUOTA_CYCLE_HISTORY = 52
 _QUOTA_WEEK_HOURS = 7 * 24
 _QUOTA_SELF_DEVICE = "本机"
 _QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")

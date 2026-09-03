@@ -47,11 +47,14 @@ private struct QuotaHistoryFrame {
 }
 
 struct QuotaHistoryView: View {
+    private static let collapsedCycleLimit = 8
+
     @ObservedObject var history: QuotaHistoryStore
     @ObservedObject private var detail = QuotaDetailRepository.shared
     @State private var tool: QuotaHistoryTool = .claude
     @State private var span: QuotaHistorySpan = .day
     @State private var cycleTool: String?
+    @State private var expandedCycleHistory: Set<String> = []
 
     /// 有周期数据的工具,固定顺序 —— 免得刷新一次卡片就换个位置。
     private var cycleTools: [String] {
@@ -160,7 +163,7 @@ struct QuotaHistoryView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: CGFloat(48 * (cycleTools.count + 1)))
+                .frame(width: CGFloat(54 * (cycleTools.count + 1) + 24))
                 .controlSize(.mini)
             }
         }
@@ -178,16 +181,24 @@ struct QuotaHistoryView: View {
         return text
     }
 
-    /// 一个 harness 一块:当前卡片紧跟它自己的历史,不和别的工具按日期混排。
+    /// 一个 harness 一块:当前周期和历史周期共用同一张卡片。
     @ViewBuilder
     private func cycleGroup(_ tool: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let cycle = currentCycle(tool) {
-                Card(tint: cycleTint(tool)) { cycleCard(cycle) }
+        let past = completedCycles(tool)
+        if let cycle = currentCycle(tool) {
+            Card(tint: cycleTint(tool)) {
+                VStack(alignment: .leading, spacing: 12) {
+                    cycleCard(cycle)
+                    if !past.isEmpty {
+                        Divider()
+                            .overlay(cycleTint(tool).opacity(0.18))
+                        completedCyclesSection(tool, past, compactTitle: true)
+                    }
+                }
             }
-            let past = completedCycles(tool)
-            if !past.isEmpty {
-                completedCyclesSection(tool, past)
+        } else if !past.isEmpty {
+            Card(tint: cycleTint(tool)) {
+                completedCyclesSection(tool, past, compactTitle: false)
             }
         }
     }
@@ -200,8 +211,8 @@ struct QuotaHistoryView: View {
     private func missingHint(_ tool: String) -> String {
         switch tool {
         case "claude":
-            return "Claude 还没有周额度卡片：Tokei 从 Claude 桌面版的用量缓存里读额度，"
-                + "打开一次桌面版并进入 Settings › Usage，约十分钟后这里就会出现。"
+            return "Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，"
+                + "或在设置的「隐私与额度」开启 Claude Code CLI 额度查询。"
         case "grok":
             return "Grok 还没有周额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。"
         default:
@@ -288,11 +299,20 @@ struct QuotaHistoryView: View {
         }
     }
 
-    private func completedCyclesSection(_ tool: String, _ cycles: [QuotaCycle]) -> some View {
+    private func completedCyclesSection(
+        _ tool: String,
+        _ cycles: [QuotaCycle],
+        compactTitle: Bool
+    ) -> some View {
         let peak = max(cycles.map(\.tokens).max() ?? 1, 1)
         let uneven = cycles.contains { $0.durationDays < 6.5 }
+        let expanded = expandedCycleHistory.contains(tool)
+        let visibleCycles = expanded
+            ? cycles
+            : Array(cycles.prefix(Self.collapsedCycleLimit))
+        let hiddenCount = max(0, cycles.count - Self.collapsedCycleLimit)
         return VStack(alignment: .leading, spacing: 6) {
-            Text("\(cycleName(tool)) 过去几个周期")
+            Text(compactTitle ? "过去几个周期" : "\(cycleName(tool)) 过去几个周期")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Theme.tSecondary)
             if uneven {
@@ -301,7 +321,7 @@ struct QuotaHistoryView: View {
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(cycles.prefix(8)) { cycle in
+            ForEach(visibleCycles) { cycle in
                 HStack(spacing: 8) {
                     Text("\(Fmt.day(cycle.start)) → \(Fmt.day(cycle.end))")
                         .font(.system(size: 9.5, design: .monospaced))
@@ -330,12 +350,34 @@ struct QuotaHistoryView: View {
                         .frame(width: 52, alignment: .trailing)
                 }
             }
+            if hiddenCount > 0 {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if expanded {
+                            expandedCycleHistory.remove(tool)
+                        } else {
+                            expandedCycleHistory.insert(tool)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        Text(expanded ? "收起更早周期" : "查看更早的 \(hiddenCount) 个周期")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(cycleTint(tool).opacity(0.9))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+            }
         }
     }
 
     private func cycleName(_ tool: String) -> String {
         switch tool {
-        case "claude": return "Claude"
+        case "claude": return "Claude Code"
         case "grok": return "Grok"
         default: return "Codex"
         }
@@ -370,7 +412,7 @@ struct QuotaHistoryView: View {
         return Card(tint: Theme.codex) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
-                    dailyStat("Claude", claude, Theme.claude)
+                    dailyStat("Claude Code", claude, Theme.claude)
                     dailyStat("Codex", codex, Theme.codex)
                     dailyStat("Grok", grok, Theme.grok)
                     dailyStat("合计", claude + codex + grok, Theme.tPrimary)
@@ -443,7 +485,7 @@ struct QuotaHistoryView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 132)
+                .frame(width: 164)
                 .controlSize(.mini)
             }
             Picker("", selection: $span) {
@@ -660,7 +702,7 @@ private struct QuotaDailyChart: View {
         points.flatMap { point -> [Bar] in
             guard let day = Self.dayFormatter.date(from: point.d) else { return [] }
             return [
-                Bar(day: day, tool: "Claude", tokens: point.c),
+                Bar(day: day, tool: "Claude Code", tokens: point.c),
                 Bar(day: day, tool: "Codex", tokens: point.x),
                 Bar(day: day, tool: "Grok", tokens: point.g),
             ]
@@ -676,7 +718,7 @@ private struct QuotaDailyChart: View {
             .foregroundStyle(by: .value("工具", bar.tool))
         }
         .chartForegroundStyleScale(
-            domain: ["Claude", "Codex", "Grok"],
+            domain: ["Claude Code", "Codex", "Grok"],
             range: [Theme.claude, Theme.codex, Theme.grok]
         )
         .chartLegend(position: .top, alignment: .trailing, spacing: 10)
@@ -742,7 +784,7 @@ private struct QuotaDailyChart: View {
             Text(point.d)
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Theme.tPrimary)
-            hoverRow("Claude", point.c, Theme.claude)
+            hoverRow("Claude Code", point.c, Theme.claude)
             hoverRow("Codex", point.x, Theme.codex)
             hoverRow("Grok", point.g, Theme.grok)
             Text("合计 \(Fmt.grouped(point.total))")

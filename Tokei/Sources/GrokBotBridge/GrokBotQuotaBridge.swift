@@ -16,7 +16,7 @@ private final class GrokBotNoRedirectDelegate: NSObject, URLSessionTaskDelegate 
     }
 }
 
-enum GrokBotQuotaBridge {
+public enum GrokBotQuotaBridge {
     private static let keychainService = "Grok Bot Safe Storage"
     private static let accountsKey = "cursor-accounts"
     private static let accessTokenKey = "cursor-access-token"
@@ -48,7 +48,11 @@ enum GrokBotQuotaBridge {
         let item: SecKeychainItem?
     }
 
-    static func runIfRequested() -> Bool {
+    public static func runIfRequested() -> Bool {
+        if CommandLine.arguments.contains("--grok-bot-helper-version") {
+            print("1")
+            exit(0)
+        }
         if CommandLine.arguments.contains("--grok-bot-authorize") {
             let ok = authorize()
             print(ok ? "ok" : "unavailable")
@@ -477,9 +481,8 @@ enum GrokBotQuotaBridge {
                 return false
             }
 
-            if applications.contains(where: { trustedApplicationPath($0) == executablePath }) {
-                return true
-            }
+            // Ad-hoc upgrades keep the path but change the trusted code hash.
+            applications.removeAll { trustedApplicationPath($0) == executablePath }
             applications.append(trustedApp)
             guard SecACLSetContents(
                 acl,

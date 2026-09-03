@@ -142,6 +142,22 @@ class AnchorCyclesTests(unittest.TestCase):
         self.assertEqual(len(cycles), 1)
         self.assertTrue(cycles[0][3])
 
+    def test_detail_limit_keeps_older_cycles_for_ui_disclosure(self):
+        anchors = {
+            "codex": [
+                _anchor((index + 2) * WEEK, 10.0 + index)
+                for index in range(12)
+            ]
+        }
+
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, USAGE._QUOTA_CYCLE_HISTORY, 20 * WEEK
+        )
+
+        self.assertEqual(len(cycles), 12)
+        self.assertGreater(len(cycles), 8)
+        self.assertFalse(any(cycle[3] for cycle in cycles))
+
 
 class CycleSpecsTests(unittest.TestCase):
     def _run(self, payload, peer_anchors, now, existing=None):

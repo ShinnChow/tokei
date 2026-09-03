@@ -219,6 +219,7 @@ class GrokBotTests(unittest.TestCase):
             USAGE._save_provider_quota_cache("grok_bot", "old-marker", cached)
             with mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="a" * 64), \
                     mock.patch.object(USAGE, "_grok_bot_authorization_generation", return_value=None), \
+                    mock.patch.object(USAGE, "_grok_bot_repair_authorization_marker", return_value=False), \
                     mock.patch.object(USAGE, "_cursor_session", return_value=None):
                 quota = USAGE.fetch_grok_bot_quota()
 
@@ -250,6 +251,7 @@ class GrokBotTests(unittest.TestCase):
             )
             with mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="a" * 64), \
                     mock.patch.object(USAGE, "_grok_bot_authorization_generation", return_value=None), \
+                    mock.patch.object(USAGE, "_grok_bot_repair_authorization_marker", return_value=False), \
                     mock.patch.object(USAGE, "_cursor_session", return_value=None):
                 quota = USAGE.fetch_grok_bot_quota()
 
@@ -257,6 +259,43 @@ class GrokBotTests(unittest.TestCase):
         self.assertEqual(quota["windows"], [])
         self.assertTrue(quota["stale"])
         self.assertEqual(quota["usage"]["ranges"]["today"]["tokens"], 120)
+
+    def test_missing_authorization_marker_is_repaired_without_user_prompt(self):
+        payload = {
+            "quotaFetched": True,
+            "usageFetched": False,
+            "sandUsage": {
+                "hasNonZeroIncludedLimit": True,
+                "usagePercent": 12.5,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")), \
+                mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="e" * 64), \
+                mock.patch.object(
+                    USAGE, "_grok_bot_authorization_generation", side_effect=[None, 7]), \
+                mock.patch.object(
+                    USAGE, "_grok_bot_repair_authorization_marker", return_value=True) as repair, \
+                mock.patch.object(USAGE, "_grok_bot_helper_sand_usage", return_value=payload), \
+                mock.patch.object(USAGE, "_cursor_session") as cursor_session:
+            quota = USAGE.fetch_grok_bot_quota()
+
+        self.assertEqual(quota["windows"][0]["used_pct"], 12.5)
+        repair.assert_called_once_with()
+        cursor_session.assert_not_called()
+
+    def test_missing_marker_repair_failure_is_backed_off_for_five_minutes(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(USAGE, "PROVIDER_QUOTA_CACHE", str(Path(tmp) / "quota.json")), \
+                mock.patch.object(USAGE, "_grok_bot_active_account_id", return_value="f" * 64), \
+                mock.patch.object(USAGE, "_grok_bot_authorization_generation", return_value=None), \
+                mock.patch.object(
+                    USAGE, "_grok_bot_repair_authorization_marker", return_value=False) as repair, \
+                mock.patch.object(USAGE, "_cursor_session", return_value=None):
+            self.assertEqual(USAGE.fetch_grok_bot_quota(), {})
+            self.assertEqual(USAGE.fetch_grok_bot_quota(), {})
+
+        repair.assert_called_once_with()
 
     def test_confirmed_empty_native_quota_does_not_fall_back_to_cursor(self):
         payload = {"hasNonZeroIncludedLimit": False, "usagePercent": 0}

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import GrokBotBridge
 
 final class Store: ObservableObject {
     @Published var usage: Usage?

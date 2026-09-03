@@ -17,7 +17,7 @@ class GrokBotQuotaBridgeTests(unittest.TestCase):
             binary = Path(tmp) / "grok-bot-bridge-check"
             subprocess.run([
                 swiftc,
-                str(ROOT / "Tokei/Sources/Tokei/GrokBotQuotaBridge.swift"),
+                str(ROOT / "Tokei/Sources/GrokBotBridge/GrokBotQuotaBridge.swift"),
                 str(ROOT / "tests/swift/GrokBotQuotaBridgeCheck.swift"),
                 "-o", str(binary),
             ], check=True, capture_output=True, text=True)
@@ -25,6 +25,17 @@ class GrokBotQuotaBridgeTests(unittest.TestCase):
                 [str(binary)], check=True, capture_output=True, text=True)
 
         self.assertEqual(result.stdout.strip(), "ok")
+
+    def test_same_path_authorization_replaces_stale_code_requirement(self):
+        source = (ROOT / "Tokei/Sources/GrokBotBridge/GrokBotQuotaBridge.swift").read_text()
+        self.assertIn(
+            "applications.removeAll { trustedApplicationPath($0) == executablePath }",
+            source,
+        )
+        self.assertNotIn(
+            "applications.contains(where: { trustedApplicationPath($0) == executablePath })",
+            source,
+        )
 
 
 if __name__ == "__main__":
