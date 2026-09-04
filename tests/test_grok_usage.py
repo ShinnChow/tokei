@@ -222,6 +222,21 @@ class GrokUsageTests(unittest.TestCase):
         project_row = next(item for item in projects if item["path"] == project)
         self.assertAlmostEqual(project_row["cost"], expected, places=6)
 
+    def test_grok_46_uses_high_context_price_at_200k_prompt_tokens(self):
+        below_threshold = {"in": 149_999, "cr": 50_000, "out": 10_000, "reason": 0}
+        at_threshold = {"in": 150_000, "cr": 50_000, "out": 10_000, "reason": 0}
+
+        self.assertAlmostEqual(
+            USAGE._grok_usage_cost(below_threshold, "grok-4.6"),
+            0.384998,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            USAGE._grok_usage_cost(at_threshold, "grok-4.6"),
+            0.77,
+            places=8,
+        )
+
     def test_usage_is_classified_by_inference_timestamp(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".grok"

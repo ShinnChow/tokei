@@ -602,6 +602,66 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(iterator.call_args.kwargs["start_offset"], 0)
         self.assertTrue(cache["codex"][source_path]["event_cache_size"] > 0)
 
+    def test_shorter_complete_event_sidecar_repairs_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "scan-cache.json"
+            source_path = str((Path(tmp) / "rollout-complete.jsonl").resolve())
+            cached_event = event(
+                "2024-01-08T00:01:00+00:00",
+                "2024-01-08",
+                (100, 80, 5, 2),
+                (100, 80, 5, 2),
+                0.5,
+            ) + ["openai/gpt-5.4"]
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(cache_path)):
+                actual_size = USAGE._codex_write_event_cache(
+                    source_path, [cached_event])
+                entry = {
+                    "event_cache_size": actual_size + 17,
+                    "event_count": 1,
+                }
+                ready = USAGE._codex_event_cache_ready(
+                    source_path, entry, repair_short=True)
+
+        self.assertTrue(ready)
+        self.assertEqual(entry["event_cache_size"], actual_size)
+
+    def test_truncated_event_sidecar_is_not_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "scan-cache.json"
+            source_path = str((Path(tmp) / "rollout-truncated.jsonl").resolve())
+            first = event(
+                "2024-01-08T00:01:00+00:00",
+                "2024-01-08",
+                (100, 80, 5, 2),
+                (100, 80, 5, 2),
+                0.5,
+            ) + ["openai/gpt-5.4"]
+            second = event(
+                "2024-01-08T00:02:00+00:00",
+                "2024-01-08",
+                (150, 120, 8, 3),
+                (50, 40, 3, 1),
+                0.25,
+            ) + ["openai/gpt-5.4"]
+
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(cache_path)):
+                full_size = USAGE._codex_write_event_cache(
+                    source_path, [first, second])
+                sidecar = Path(USAGE._codex_event_cache_path(source_path))
+                first_line_size = sidecar.read_bytes().find(b"\n") + 1
+                sidecar.write_bytes(sidecar.read_bytes()[:first_line_size])
+                entry = {
+                    "event_cache_size": full_size,
+                    "event_count": 2,
+                }
+                ready = USAGE._codex_event_cache_ready(
+                    source_path, entry, repair_short=True)
+
+        self.assertFalse(ready)
+        self.assertEqual(entry["event_cache_size"], full_size)
+
     def test_scan_keeps_child_increment_and_drops_replayed_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +25,41 @@ def harness_event(event_type, timestamp, turn, step, usage, model=None):
 
 
 class DeepSeekHarnessTests(unittest.TestCase):
+    def test_official_price_uses_historical_and_peak_windows(self):
+        before_change = datetime(2026, 8, 16, 15, 59, tzinfo=timezone.utc)
+        weekday_peak = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+        weekday_off_peak = datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc)
+        weekend = datetime(2026, 8, 22, 2, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(USAGE._deepseek_official_price("deepseek-v4-pro", before_change), {
+            "in": 0.435, "out": 0.87, "cache_read": 0.003625, "cache_write": 0.0,
+        })
+        self.assertEqual(USAGE._deepseek_official_price("deepseek-v4-pro-0813", weekday_peak), {
+            "in": 1.32, "out": 3.96, "cache_read": 0.044, "cache_write": 0.0,
+        })
+        self.assertEqual(USAGE._deepseek_official_price("deepseek-v4-pro", weekday_off_peak), {
+            "in": 0.66, "out": 1.98, "cache_read": 0.022, "cache_write": 0.0,
+        })
+        self.assertEqual(
+            USAGE._deepseek_official_price("deepseek-v4-flash-vision-exp", weekend),
+            {"in": 0.22, "out": 0.66, "cache_read": 0.007, "cache_write": 0.0},
+        )
+
+    def test_usage_record_prices_the_request_at_its_utc_timestamp(self):
+        peak = datetime(2026, 8, 17, 2, 0, tzinfo=timezone.utc)
+        event = harness_event(
+            "assistant/message",
+            int(peak.timestamp() * 1000),
+            1,
+            1,
+            {"inputTokens": 1_000_000, "outputTokens": 1_000_000,
+             "cacheReadTokens": 1_000_000},
+        )
+
+        record = USAGE._deepseek_harness_usage_record(event)
+
+        self.assertAlmostEqual(record["cost"], 1.32 + 3.96 + 0.044, places=12)
+
     def test_card_uses_harness_inclusive_input_and_output_labels(self):
         source = (Path(__file__).resolve().parents[1] / "Tokei" / "Sources" / "Tokei"
                   / "PanelView.swift").read_text(encoding="utf-8")
@@ -93,7 +128,10 @@ class DeepSeekHarnessTests(unittest.TestCase):
         self.assertEqual(len(all_usage["sessions"]), 1)
         self.assertEqual(cached["ranges"]["all"]["in"], 100)
         self.assertIn("deepseek-v4-pro", all_usage["models"])
-        price = USAGE._deepseek_official_price("deepseek-v4-pro")
+        price = USAGE._deepseek_official_price(
+            "deepseek-v4-pro",
+            datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc),
+        )
         self.assertAlmostEqual(
             all_usage["cost"],
             (100 * price["in"] + 40 * price["out"] + 1_000 * price["cache_read"]

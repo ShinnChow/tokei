@@ -207,24 +207,32 @@ ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 # write5m / write1h = 5 分钟 / 1 小时 缓存写入价(OpenRouter 只给一档 cache_write=5m,
 # Anthropic 的 1h 写派生为 2×输入价)。
 
-# 内置兜底:pricing.json 缺失时仍能离线工作(口径与 OpenRouter 一致)。
+# 内置兜底:pricing.json 缺失时仍能离线工作。常用直连模型按官方 API 价，
+# 其余模型由 pricing.json 的 OpenRouter 目录补齐。
 _DEFAULT_PRICES = {
+    "anthropic/claude-fable-5.1":   {"in": 10.0,  "out": 50.0, "cache_read": 0.25,   "cache_write": 12.5, "write1h": 20.0},
+    "anthropic/claude-sonnet-5":    {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
     "anthropic/claude-opus-4.8":     {"in": 5.0,   "out": 25.0, "cache_read": 0.5,    "cache_write": 6.25},
     "anthropic/claude-sonnet-4.6":   {"in": 3.0,   "out": 15.0, "cache_read": 0.3,    "cache_write": 3.75},
     "anthropic/claude-haiku-4.5":    {"in": 1.0,   "out": 5.0,  "cache_read": 0.1,    "cache_write": 1.25},
+    "openai/gpt-5.6-sol":            {"in": 4.0,   "out": 20.0, "cache_read": 0.4,    "cache_write": 5.0},
+    "openai/gpt-5.6-terra":          {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 2.5},
+    "openai/gpt-5.6-luna":           {"in": 0.2,   "out": 1.2,  "cache_read": 0.02,   "cache_write": 0.25},
     "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
+    "qwen/qwen3.8-max":              {"in": 2.0,   "out": 6.0,  "cache_read": 0.25,   "cache_write": 2.5},
     "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
-    "deepseek/deepseek-v4-pro":      {"in": 0.435, "out": 0.87, "cache_read": 0.0036, "cache_write": 0.0},
+    "deepseek/deepseek-v4-pro":      {"in": 0.66,  "out": 1.98, "cache_read": 0.022,  "cache_write": 0.0},
     "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
     "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
+    "x-ai/grok-4.6":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.5,    "cache_write": 0.0},
     "x-ai/grok-4.5":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.3,    "cache_write": 0.0},
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
 
-# DeepSeek Harness 的 deepseek-official 路由按官方直连价计算，不能套用
-# OpenRouter 同名模型的渠道价。单位均为 USD / 1M tokens。
-_DEEPSEEK_OFFICIAL_PRICES = {
+# DeepSeek Harness 的 deepseek-official 路由按官方直连价和调用时间计算。
+# 2026-08-16 16:00 UTC 起工作日分峰谷时段；单位为 USD / 1M tokens。
+_DEEPSEEK_LEGACY_PRICES = {
     "deepseek-v4-pro": {
         "in": 0.435, "out": 0.87, "cache_read": 0.003625, "cache_write": 0.0,
     },
@@ -232,12 +240,50 @@ _DEEPSEEK_OFFICIAL_PRICES = {
         "in": 0.14, "out": 0.28, "cache_read": 0.0028, "cache_write": 0.0,
     },
 }
+_DEEPSEEK_CURRENT_PRICES = {
+    "deepseek-v4-pro": {
+        "off_peak": {"in": 0.66, "out": 1.98, "cache_read": 0.022, "cache_write": 0.0},
+        "peak": {"in": 1.32, "out": 3.96, "cache_read": 0.044, "cache_write": 0.0},
+    },
+    "deepseek-v4-flash": {
+        "off_peak": {"in": 0.22, "out": 0.66, "cache_read": 0.007, "cache_write": 0.0},
+        "peak": {"in": 0.44, "out": 1.32, "cache_read": 0.014, "cache_write": 0.0},
+    },
+}
+_DEEPSEEK_NEW_PRICING_START = datetime(2026, 8, 16, 16, tzinfo=timezone.utc)
 
 
-def _deepseek_official_price(model):
-    normalized = _normalize(model) or ""
-    model_id = normalized.rsplit("/", 1)[-1]
-    price = _DEEPSEEK_OFFICIAL_PRICES.get(model_id)
+def _deepseek_official_model_id(model):
+    model_id = (_normalize(model) or "").rsplit("/", 1)[-1]
+    if model_id in ("deepseek-v4-pro", "deepseek-v4-pro-0813"):
+        return "deepseek-v4-pro"
+    if model_id in ("deepseek-v4-flash", "deepseek-v4-flash-0731",
+                    "deepseek-v4-flash-vision-exp"):
+        return "deepseek-v4-flash"
+    return None
+
+
+def _deepseek_official_price(model, at=None):
+    model_id = _deepseek_official_model_id(model)
+    if model_id is None:
+        return None
+    if at is None:
+        when = datetime.now(timezone.utc)
+    elif isinstance(at, (int, float)):
+        seconds = float(at) / 1000 if abs(float(at)) >= 100_000_000_000 else float(at)
+        try:
+            when = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(at, datetime):
+        when = at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at.astimezone(timezone.utc)
+    else:
+        return None
+    if when < _DEEPSEEK_NEW_PRICING_START:
+        price = _DEEPSEEK_LEGACY_PRICES.get(model_id)
+        return dict(price) if price else None
+    peak = when.weekday() < 5 and (1 <= when.hour < 4 or 6 <= when.hour < 10)
+    price = _DEEPSEEK_CURRENT_PRICES.get(model_id, {}).get("peak" if peak else "off_peak")
     return dict(price) if price else None
 
 
@@ -250,18 +296,93 @@ def _load_json(path, default):
 
 
 _PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
+
+# 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
+# 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
+_BUILTIN_OVERRIDE_MODELS = {
+    "openai/gpt-5.6-sol": {
+        "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
+    },
+}
+_BUILTIN_OVERRIDE_ALIASES = {
+    "gpt-5.6": "openai/gpt-5.6-sol",
+    "qwen3.8-max-0902": "qwen/qwen3.8-max",
+    "qwen3.8-max-2026-09-02": "qwen/qwen3.8-max",
+    "qwen3.8-max-preview": "qwen/qwen3.8-max",
+    "qwen3.8:27b": "qwen/qwen3.8-27b",
+}
+
+
+def _merge_pricing_overrides(overrides):
+    overrides = overrides if isinstance(overrides, dict) else {}
+    user_models = overrides.get("models")
+    user_aliases = overrides.get("aliases")
+    models = dict(_BUILTIN_OVERRIDE_MODELS)
+    if isinstance(user_models, dict):
+        models.update(user_models)
+    aliases = dict(user_aliases) if isinstance(user_aliases, dict) else {}
+    aliases.update(_BUILTIN_OVERRIDE_ALIASES)
+    return models, aliases
+
+
 _OVERRIDES = _load_json(OVERRIDES_FILE, {})
-_OV_MODELS = _OVERRIDES.get("models", {})
-_OV_ALIASES = _OVERRIDES.get("aliases", {})
+_OV_MODELS, _OV_ALIASES = _merge_pricing_overrides(_OVERRIDES)
+
+
+def _effective_pricing_map(catalog=None):
+    fields = ("in", "out", "cache_read", "cache_write", "write1h")
+    catalog = catalog if isinstance(catalog, dict) else _PRICING_DB
+    model_ids = set(_DEFAULT_PRICES) | set(catalog) | set(_OV_MODELS)
+    result = {}
+    for model in model_ids:
+        value = dict(_DEFAULT_PRICES.get(model, {}))
+        value.update(catalog.get(model, {}))
+        value.update(_OV_MODELS.get(model, {}))
+        result[model] = {field: value.get(field, 0.0) for field in fields}
+    return result
+
+
+_PRICING_EFFECTIVE = _effective_pricing_map()
+
+
+def _make_pricing_fingerprint():
+    payload = {
+        "prices": _PRICING_EFFECTIVE,
+        "aliases": _OV_ALIASES,
+        "deepseek_legacy": _DEEPSEEK_LEGACY_PRICES,
+        "deepseek_current": _DEEPSEEK_CURRENT_PRICES,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+_PRICING_FINGERPRINT = _make_pricing_fingerprint()
+_BUILTIN_REPRICE_MODELS = (
+    set(_BUILTIN_OVERRIDE_MODELS)
+    | set(_BUILTIN_OVERRIDE_ALIASES)
+    | set(_BUILTIN_OVERRIDE_ALIASES.values())
+    | {
+        "anthropic/claude-fable-5.1", "anthropic/claude-sonnet-5",
+        "qwen/qwen3.8-max", "qwen/qwen3.8-27b", "x-ai/grok-4.6",
+        "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp",
+    }
+)
+_BUILTIN_REPRICE_MULTIPLIERS = {
+    # OpenRouter previously supplied 2/10/0.2; current OpenAI direct rates are
+    # exactly 2x for every token class, including long-context multipliers.
+    "openai/gpt-5.6-sol": 2.0,
+}
 
 # 家族关键字 → 代表性 canonical id(精确匹配失败时回退)。
 _FAMILY = [
+    ("fable",    "anthropic/claude-fable-5.1"),
     ("opus",     "anthropic/claude-opus-4.8"),
-    ("sonnet",   "anthropic/claude-sonnet-4.6"),
+    ("sonnet",   "anthropic/claude-sonnet-5"),
     ("haiku",    "anthropic/claude-haiku-4.5"),
-    ("gpt-5",    "openai/gpt-5.5"),
-    ("qwen",     "qwen/qwen3.7-max"),
+    ("gpt-5",    "openai/gpt-5.6-sol"),
+    ("qwen",     "qwen/qwen3.8-max"),
     ("deepseek", "deepseek/deepseek-v4-pro"),
+    ("grok",     "x-ai/grok-4.6"),
     ("glm",      "z-ai/glm-5.2"),
     ("mimo",     "xiaomi/mimo-v2.5-pro"),
     ("hy3",      "tencent/hy3"),
@@ -301,13 +422,19 @@ def _normalize(model: str):
     return m
 
 
+def _override_alias(model: str):
+    value = (model or "").strip()
+    return _OV_ALIASES.get(value) or _OV_ALIASES.get(value.lower())
+
+
 def _resolve_id(model: str):
     """解析到 canonical id;未知按 opus 兜底(偏保守)。<synthetic> 返回 None。"""
     s = (model or "").strip()
     if not s or s.lower() == "<synthetic>":
         return None
-    if s in _OV_ALIASES:
-        return _OV_ALIASES[s]
+    alias = _override_alias(s)
+    if alias:
+        return alias
     norm = _normalize(model)
     if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
         return norm
@@ -325,8 +452,9 @@ def _known_id_or_raw(model: str):
     s = (model or "").strip()
     if not s or s.lower() == "<synthetic>":
         return None
-    if s in _OV_ALIASES:
-        return _OV_ALIASES[s]
+    alias = _override_alias(s)
+    if alias:
+        return alias
     norm = _normalize(s)
     if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
         return norm
@@ -344,8 +472,9 @@ def _model_identity_id(model: str):
     s = (model or "").strip()
     if not s or s.lower() == "<synthetic>":
         return None
-    if s in _OV_ALIASES:
-        return _OV_ALIASES[s]
+    alias = _override_alias(s)
+    if alias:
+        return alias
     norm = _normalize(s)
     if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
         return norm
@@ -379,6 +508,56 @@ def _pricing_id(model: str):
     if normalized == "z-ai/glm-5.2" and "z-ai/glm-5.1" in _PRICING_DB:
         return "z-ai/glm-5.1"
     return None
+
+
+def _pricing_model_keys(model):
+    if not model:
+        return set()
+    raw = str(model).strip()
+    candidates = {raw.lower()}
+    normalized = _normalize(raw)
+    if normalized:
+        candidates.add(normalized.lower())
+    resolved = _resolve_id(raw)
+    if resolved:
+        candidates.add(str(resolved).lower())
+    return candidates
+
+
+def _model_has_pricing_change(model, changed_models):
+    changed = {str(value).strip().lower() for value in changed_models if value}
+    return bool(_pricing_model_keys(model).intersection(changed))
+
+
+def _pricing_change_multiplier(model, multipliers):
+    normalized = {str(key).strip().lower(): value for key, value in multipliers.items()}
+    for key in _pricing_model_keys(model):
+        if key in normalized:
+            try:
+                return float(normalized[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _cached_entry_has_pricing_change(entry, changed_models):
+    if not isinstance(entry, dict):
+        return False
+    models = set()
+    active_model = entry.get("active_model")
+    if active_model:
+        models.add(active_model)
+    for field in ("days", "deduped_days"):
+        days = entry.get(field)
+        if not isinstance(days, dict):
+            continue
+        for day in days.values():
+            if isinstance(day, dict) and isinstance(day.get("models"), dict):
+                models.update(day["models"])
+    if not models and isinstance(entry.get("events"), list):
+        models.update(event.get("model") for event in entry["events"]
+                      if isinstance(event, dict) and event.get("model"))
+    return any(_model_has_pricing_change(model, changed_models) for model in models)
 
 
 def _raw_price(model: str):
@@ -597,11 +776,38 @@ def _load_scan_cache():
             c["_dirty"] = True
         else:
             c["_dirty"] = False
+        if c.get("_pricing_fingerprint") != _PRICING_FINGERPRINT:
+            # Keep token caches intact. Claude/Codex reprice compact events in place;
+            # other estimated-cost tools are recalculated from cached model totals.
+            pending = set(c.get("_pricing_changed_models") or [])
+            previous = c.get("_pricing_effective")
+            multipliers = dict(c.get("_pricing_cost_multipliers") or {})
+            if isinstance(previous, dict):
+                for model in set(previous) | set(_PRICING_EFFECTIVE):
+                    if previous.get(model) != _PRICING_EFFECTIVE.get(model):
+                        pending.add(model)
+            else:
+                pending.update(_BUILTIN_REPRICE_MODELS)
+                multipliers.update(_BUILTIN_REPRICE_MULTIPLIERS)
+            previous_aliases = c.get("_pricing_aliases")
+            if isinstance(previous_aliases, dict):
+                for alias in set(previous_aliases) | set(_OV_ALIASES):
+                    old_target = previous_aliases.get(alias)
+                    new_target = _OV_ALIASES.get(alias)
+                    if old_target != new_target:
+                        pending.update(value for value in (alias, old_target, new_target) if value)
+            c["_pricing_changed"] = True
+            c["_pricing_changed_models"] = sorted(str(value) for value in pending)
+            c["_pricing_cost_multipliers"] = multipliers
+            c["_dirty"] = True
         c["_keys"] = {k for k in c if not k.startswith("_")}
         return c
     except Exception:
         _remove_codex_event_cache_dir()
-        return {"v": _SCAN_CACHE_VERSION, "_dirty": True}
+        return {"v": _SCAN_CACHE_VERSION, "_dirty": True,
+                "_pricing_fingerprint": _PRICING_FINGERPRINT,
+                "_pricing_effective": _PRICING_EFFECTIVE,
+                "_pricing_aliases": _OV_ALIASES}
 
 
 def _save_scan_cache(cache):
@@ -1066,6 +1272,39 @@ def _safe_scan(name, fn, fallback, errors):
 
 
 # ---------- Claude Code ----------
+def _claude_event_cost(event):
+    p = price_for(event.get("model"))
+    inp = int(event.get("in", 0) or 0)
+    out = int(event.get("out", 0) or 0)
+    cr = int(event.get("cr", 0) or 0)
+    cw = int(event.get("cw", 0) or 0)
+    w5 = event.get("cw5")
+    w1 = event.get("cw1")
+    if w5 is None and w1 is None:
+        write_cost = cw / 1e6 * p["write5m"]
+    else:
+        write_cost = (int(w5 or 0) / 1e6 * p["write5m"]
+                      + int(w1 or 0) / 1e6 * p["write1h"])
+    return (inp / 1e6 * p["in"] + out / 1e6 * p["out"]
+            + cr / 1e6 * p["cache_read"] + write_cost)
+
+
+def _reprice_claude_events(file_cache, changed_models):
+    changed = False
+    for entry in file_cache.values():
+        if not _cached_entry_has_pricing_change(entry, changed_models):
+            continue
+        for event in entry.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            cost = _claude_event_cost(event)
+            if not math.isclose(float(event.get("cost", 0) or 0), cost,
+                                rel_tol=0.0, abs_tol=1e-12):
+                event["cost"] = cost
+                changed = True
+    return changed
+
+
 def _claude_event_total(event):
     return sum(int(event.get(key, 0) or 0) for key in ("in", "out", "cr", "cw"))
 
@@ -1124,6 +1363,9 @@ def _dedupe_claude_events(file_events):
 def scan_claude(bounds, cache):
     fc = cache.setdefault("claude", {})
     changed = False
+    if (cache.get("_pricing_changed")
+            and _reprice_claude_events(fc, cache.get("_pricing_changed_models") or [])):
+        changed = True
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
     cur_file, cur_mtime = None, -1.0
@@ -1168,6 +1410,7 @@ def scan_claude(bounds, cache):
                             continue
                         events.append({
                             "in": u["in"], "out": u["out"], "cr": u["cr"], "cw": u["cw"],
+                            "cw5": u.get("cw5"), "cw1": u.get("cw1"),
                             "cost": u["cost"], "model": u.get("model") or "unknown",
                             "cwd": u.get("cwd"), "mid": u.get("mid"),
                             "request_id": u.get("request_id"), "event_id": u.get("event_id"),
@@ -1329,19 +1572,14 @@ def _claude_usage(line, want_dt=False):
     out = u.get("output_tokens", 0) or 0
     cr = u.get("cache_read_input_tokens", 0) or 0
     cw = u.get("cache_creation_input_tokens", 0) or 0
-    p = price_for(msg.get("model"))
     cc = u.get("cache_creation") or {}
     w5 = cc.get("ephemeral_5m_input_tokens")
     w1 = cc.get("ephemeral_1h_input_tokens")
-    if w5 is None and w1 is None:
-        write_cost = cw / 1e6 * p["write5m"]
-    else:
-        write_cost = (w5 or 0) / 1e6 * p["write5m"] + (w1 or 0) / 1e6 * p["write1h"]
-    cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + write_cost
-    res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cost": cost,
+    res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cw5": w5, "cw1": w1,
            "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id"),
            "request_id": o.get("requestId") or o.get("request_id"),
            "event_id": o.get("uuid"), "sidechain": o.get("isSidechain") is True}
+    res["cost"] = _claude_event_cost(res)
     if want_dt:
         res["dt"] = dt
     return res
@@ -1355,7 +1593,7 @@ _CODEX_QUOTA_FALLBACK_TTL = 300
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-_CODEX_RESET_CARDS_REFRESH_INTERVAL = 24 * 3600
+_CODEX_RESET_CARDS_REFRESH_INTERVAL = 6 * 3600
 _CODEX_RESET_CARDS_RETRY_INTERVAL = 6 * 3600
 _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES = 256 * 1024
 
@@ -1734,6 +1972,17 @@ def fetch_codex_reset_cards(now_epoch=None):
         next_attempt_at = int(state.get("next_attempt_at") or 0)
     except (TypeError, ValueError, OverflowError):
         next_attempt_at = 0
+    # Older versions cached successful responses for 24 hours. Clamp that saved
+    # deadline so newly granted cards become visible after upgrading.
+    try:
+        last_success_at = int(state.get("fetched_at") or cached.get("updated") or 0)
+    except (TypeError, ValueError, OverflowError):
+        last_success_at = 0
+    if next_attempt_at and last_success_at:
+        next_attempt_at = min(
+            next_attempt_at,
+            last_success_at + _CODEX_RESET_CARDS_REFRESH_INTERVAL,
+        )
     if now_epoch < next_attempt_at:
         return cached
 
@@ -1805,15 +2054,52 @@ def _codex_event_cache_path(file_path):
     return os.path.join(_codex_event_cache_dir(), f"{digest}.jsonl")
 
 
-def _codex_event_cache_ready(file_path, entry):
+def _codex_event_cache_has_expected_events(file_path, expected_count):
+    """Validate a shortened sidecar without loading its events into memory."""
+    if expected_count < 0:
+        return False
+    count = 0
+    last_byte = b""
+    try:
+        with open(_codex_event_cache_path(file_path), "rb", buffering=0) as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += chunk.count(b"\n")
+                if count > expected_count:
+                    return False
+                last_byte = chunk[-1:]
+    except OSError:
+        return False
+    return count == expected_count and (expected_count == 0 or last_byte == b"\n")
+
+
+def _codex_event_cache_ready(file_path, entry, repair_short=False):
     if not isinstance(entry, dict) or entry.get("event_count") is None:
         return False
     try:
         expected_size = int(entry.get("event_cache_size", -1))
-        return expected_size >= 0 and os.path.getsize(
-            _codex_event_cache_path(file_path)) >= expected_size
+        actual_size = os.path.getsize(_codex_event_cache_path(file_path))
     except (OSError, TypeError, ValueError):
         return False
+    if expected_size < 0:
+        return False
+    if actual_size >= expected_size:
+        return True
+    if not repair_short:
+        return False
+    try:
+        expected_count = int(entry.get("event_count", -1))
+    except (TypeError, ValueError):
+        return False
+    if not _codex_event_cache_has_expected_events(file_path, expected_count):
+        return False
+    # Repricing can make serialized floating-point costs a few bytes shorter.
+    # The event count proves the atomic sidecar is complete, so retain it and
+    # repair the append boundary instead of reparsing the source rollout.
+    entry["event_cache_size"] = actual_size
+    return True
 
 
 def _codex_write_event_cache(file_path, events):
@@ -2033,9 +2319,100 @@ def _codex_migrate_event_cache(file_cache):
     return True
 
 
+def _codex_estimated_cost(model, inp, cached, out):
+    price_model = model if _has_known_price(model) else "openai/gpt-5.5"
+    base = _raw_price(price_model)
+    high_context = inp > 272_000
+    input_price = base["in"] * (2 if high_context else 1)
+    output_price = base["out"] * (1.5 if high_context else 1)
+    cache_price = base["cache_read"] * (2 if high_context else 1)
+    return ((inp - cached) / 1e6 * input_price + cached / 1e6 * cache_price
+            + out / 1e6 * output_price)
+
+
+def _scale_codex_cached_days(entry, changed_models, multipliers):
+    days = []
+    seen = set()
+    for field in ("days", "deduped_days"):
+        values = entry.get(field)
+        if not isinstance(values, dict):
+            continue
+        for day in values.values():
+            if isinstance(day, dict) and id(day) not in seen:
+                seen.add(id(day))
+                days.append(day)
+
+    targets = []
+    for day in days:
+        models = day.get("models")
+        if not isinstance(models, dict):
+            continue
+        for model, usage in models.items():
+            if not _model_has_pricing_change(model, changed_models):
+                continue
+            multiplier = _pricing_change_multiplier(model, multipliers)
+            if multiplier is None:
+                return None
+            targets.append((usage, multiplier))
+    if not targets:
+        return None
+
+    updated = set()
+    for usage, multiplier in targets:
+        if id(usage) in updated:
+            continue
+        usage["cost"] = float(usage.get("cost", 0) or 0) * multiplier
+        updated.add(id(usage))
+    for day in days:
+        models = day.get("models") or {}
+        if isinstance(models, dict):
+            day["cost"] = sum(float(value.get("cost", 0) or 0)
+                              for value in models.values() if isinstance(value, dict))
+    return True
+
+
+def _reprice_codex_event_caches(file_cache, changed_models, multipliers=None):
+    multipliers = multipliers if isinstance(multipliers, dict) else {}
+    changed = False
+    for file_path, entry in file_cache.items():
+        if not _cached_entry_has_pricing_change(entry, changed_models):
+            continue
+        scaled = _scale_codex_cached_days(entry, changed_models, multipliers)
+        if scaled:
+            changed = True
+            continue
+        if not _codex_event_cache_ready(file_path, entry):
+            continue
+        try:
+            count = int(entry.get("event_count", 0) or 0)
+            events = list(_iter_codex_cached_events(file_path, limit=count))
+            for event in events:
+                if len(event) < 11:
+                    raise OSError("Codex event cache contains a short event")
+
+            days = {}
+            drop_count = min(max(int(entry.get("drop_count", 0) or 0), 0), len(events))
+            for event in events[drop_count:]:
+                _codex_add_event(days, event)
+            if entry.get("deduped_days") != days:
+                entry["deduped_days"] = days
+            expected_days = days if entry.get("canonical") else {}
+            if entry.get("days") != expected_days:
+                entry["days"] = expected_days
+            changed = True
+        except (OSError, TypeError, ValueError):
+            # Let the normal scanner rebuild only this damaged entry from its source.
+            _codex_remove_event_cache(file_path)
+            entry["event_cache_size"] = -1
+            changed = True
+    return changed
+
+
 def _codex_add_event(days, event):
     dk = event[1]
-    li, lc, lo, lr, cost = event[6:11]
+    li, lc, lo, lr, _ = event[6:11]
+    model = event[11] if len(event) > 11 else None
+    cost = _codex_estimated_cost(model, li, lc, lo)
     day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
                                "reason": 0, "cost": 0.0, "models": {}, "hours": [0] * 24})
     day["in"] += li
@@ -2043,7 +2420,6 @@ def _codex_add_event(days, event):
     day["out"] += lo
     day["reason"] += lr
     day["cost"] += cost
-    model = event[11] if len(event) > 11 else None
     _add_model_usage(day["models"], model, max(li - lc, 0), lo, lc, 0, lr, cost)
     try:
         hour = datetime.fromisoformat(event[0]).astimezone().hour
@@ -2483,6 +2859,11 @@ def scan_codex(bounds, cache):
     fc = cache.setdefault("codex", {})
     if _codex_migrate_event_cache(fc):
         cache["_dirty"] = True
+    if (cache.get("_pricing_changed")
+            and _reprice_codex_event_caches(
+                fc, cache.get("_pricing_changed_models") or [],
+                cache.get("_pricing_cost_multipliers") or {})):
+        cache["_dirty"] = True
     B = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0,
              "sessions": set(), "models": {}}
          for k in RANGE_KEYS}
@@ -2524,7 +2905,13 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
-        event_cache_ready = _codex_event_cache_ready(f, entry)
+        previous_event_cache_size = (
+            entry.get("event_cache_size") if isinstance(entry, dict) else None
+        )
+        event_cache_ready = _codex_event_cache_ready(f, entry, repair_short=True)
+        if (event_cache_ready and isinstance(entry, dict)
+                and entry.get("event_cache_size") != previous_event_cache_size):
+            cache["_dirty"] = True
         legacy_parser_cache = (
             isinstance(entry, dict)
             and entry.get("parser_version") is None
@@ -2624,13 +3011,7 @@ def scan_codex(bounds, cache):
                         # 无模型字段(老版本 CLI 日志/截断会话)标为 unknown,不冒充 gpt-5.5;
                         # 计费仍按 gpt-5.5 保守估算(下行 price_model 兜底)
                         model = _known_id_or_raw(file_model) or "unknown"
-                        price_model = model if _has_known_price(model) else "openai/gpt-5.5"
-                        cx_base = _raw_price(price_model)
-                        hi = li > 272_000
-                        p_in = cx_base["in"] * (2 if hi else 1)
-                        p_out = cx_base["out"] * (1.5 if hi else 1)
-                        p_cr = cx_base["cache_read"] * (2 if hi else 1)
-                        cost = (li - lc) / 1e6 * p_in + lc / 1e6 * p_cr + lo / 1e6 * p_out
+                        cost = _codex_estimated_cost(model, li, lc, lo)
                         totals = total_key if total_key is not None else (None, None, None, None)
                         # timestamp, local day, cumulative usage, incremental usage, cost
                         events.append([ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model])
@@ -3479,12 +3860,17 @@ def _grok_usage_cost(record, model):
     if not price_id:
         return 0.0
     price = _raw_price(price_id)
-    return (
+    cost = (
         int(record.get("in", 0) or 0) * price["in"]
         + int(record.get("cr", 0) or 0) * price["cache_read"]
         + (int(record.get("out", 0) or 0) + int(record.get("reason", 0) or 0))
         * price["out"]
     ) / 1_000_000
+    # Grok 4.6 bills the whole request at double price once prompt tokens reach 200K.
+    prompt_tokens = int(record.get("in", 0) or 0) + int(record.get("cr", 0) or 0)
+    if price_id == "x-ai/grok-4.6" and prompt_tokens >= 200_000:
+        cost *= 2
+    return cost
 
 
 def _load_grok_usage_records(cache):
@@ -7981,7 +8367,7 @@ def scan_grok_bot(bounds, cache):
 # ---------- DeepSeek Harness ----------
 # Harness 会为同一次调用写 usage chunk 和最终 message。按 session/turn/step
 # 只保留最终 message；异常中断时再用 usage chunk 兜底。
-_DEEPSEEK_HARNESS_COST_VERSION = 2
+_DEEPSEEK_HARNESS_COST_VERSION = 3
 
 
 def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="deepseek-official"):
@@ -8034,7 +8420,7 @@ def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="d
     model = str(model or "deepseek-v4-pro")
     provider = str(provider or "")
     cost = 0.0
-    price = (_deepseek_official_price(model) if provider == "deepseek-official" else None)
+    price = (_deepseek_official_price(model, dt) if provider == "deepseek-official" else None)
     if price is None:
         price_id = _pricing_id(model)
         price = _raw_price(price_id) if price_id else None
@@ -9505,6 +9891,13 @@ def compute():
     kimi = _safe_scan("kimicode", lambda: scan_kimicode(bounds, cache), _empty_kimicode, errors)
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
+    if cache.pop("_pricing_changed", False):
+        cache.pop("_pricing_changed_models", None)
+        cache.pop("_pricing_cost_multipliers", None)
+        cache["_pricing_fingerprint"] = _PRICING_FINGERPRINT
+        cache["_pricing_effective"] = _PRICING_EFFECTIVE
+        cache["_pricing_aliases"] = _OV_ALIASES
+        cache["_dirty"] = True
     _save_scan_cache(cache)
     ledger_flush()
 
@@ -9826,15 +10219,25 @@ def _recalc_costs(result):
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
                     p = _deepseek_official_price(name) or p
-                    cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
-                            + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
+                    # 扫描阶段已按每次请求的 UTC 时刻套用峰谷价，聚合后保留该结果。
+                    cost = authoritative_cost or (
+                        ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
+                        + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
                 elif tool_key in ("hermes", "zcode", "mimocode"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                             + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key in ("grok", "qwencode"):
+                elif tool_key == "grok":
+                    cr = m.get("cr", 0)
+                    reason = m.get("reason", 0)
+                    # Grok is priced per request so the 200K context tier cannot be
+                    # reconstructed from aggregate tokens. Keep the scanner's exact cost.
+                    cost = authoritative_cost or (
+                        ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
+                        + cr / 1e6 * p["cache_read"])
+                elif tool_key == "qwencode":
                     cr = m.get("cr", 0)
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
@@ -10135,6 +10538,23 @@ def main():
     print("刷新 | refresh=true")
 
 
+def _record_pricing_changes(models):
+    changed = {str(model) for model in models if model}
+    if not changed:
+        return
+
+    def mark():
+        cache = _load_scan_cache()
+        pending = set(cache.get("_pricing_changed_models") or [])
+        pending.update(changed)
+        cache["_pricing_changed"] = True
+        cache["_pricing_changed_models"] = sorted(pending)
+        cache["_dirty"] = True
+        _save_scan_cache(cache)
+
+    _with_scan_cache_lock(mark)()
+
+
 def update_prices():
     """显式联网:拉 OpenRouter /api/v1/models,刷新 pricing.json(不动 overrides)。"""
     import urllib.request
@@ -10164,19 +10584,34 @@ def update_prices():
             if isinstance(value, str) and value.strip():
                 entry[field] = value.strip()
         models[m["id"]] = entry
+    active_count = len(models)
+    old_models = _load_json(PRICING_FILE, {}).get("models", {})
+    retained_count = 0
+    if isinstance(old_models, dict):
+        for model, old_entry in old_models.items():
+            if model in models or not isinstance(old_entry, dict):
+                continue
+            retained = dict(old_entry)
+            retained["retired"] = True
+            models[model] = retained
+            retained_count += 1
+    old_effective = _effective_pricing_map(old_models)
+    new_effective = _effective_pricing_map(models)
+    changed_models = {
+        model for model in set(old_effective) | set(new_effective)
+        if old_effective.get(model) != new_effective.get(model)
+    }
     payload = {"_meta": {"source": "openrouter/api/v1/models",
                          "updated_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z"),
-                         "count": len(models)},
+                         "count": len(models),
+                         "active_count": active_count,
+                         "retained_count": retained_count},
                "models": models}
-    prices_changed = _load_json(PRICING_FILE, {}).get("models") != models
     with open(PRICING_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1, sort_keys=True)
-    print(f"已更新 {len(models)} 个模型 → {PRICING_FILE}")
-    if prices_changed:
-        try:
-            os.remove(_SCAN_CACHE_FILE)
-        except OSError:
-            pass
+    _record_pricing_changes(changed_models)
+    suffix = f"，保留 {retained_count} 个历史模型" if retained_count else ""
+    print(f"已更新 {active_count} 个在线模型{suffix} → {PRICING_FILE}")
     return 0
 
 
@@ -10260,7 +10695,7 @@ def _is_exact_match(model: str):
     s = (model or "").strip()
     if not s or s.lower() == "<synthetic>":
         return True
-    if s in _OV_ALIASES:
+    if _override_alias(s):
         return True
     norm = _normalize(model)
     return norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES)
