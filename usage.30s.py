@@ -12114,9 +12114,9 @@ def _quota_day_hour_bounds(day_key, start, end):
     return lo_hour, max(hi_hour, lo_hour + 1)
 
 
-def _quota_claude_events():
+def _quota_claude_events(cache=None):
     """去重后的 Claude 事件 → [(epoch, 本地日, tokens)]。去重逻辑与 scan_claude 一致。"""
-    file_cache = (_load_scan_cache() or {}).get("claude") or {}
+    file_cache = (cache if cache is not None else _load_scan_cache()).get("claude") or {}
     all_events = []
     for path, entry in file_cache.items():
         if isinstance(entry, dict):
@@ -12133,7 +12133,7 @@ def _quota_claude_events():
     return events
 
 
-def _quota_codex_events(spans):
+def _quota_codex_events(spans, cache=None):
     """只读与 spans 有交集的事件文件。行内 idx6 已含 cached,故 tokens = idx6 + idx8。
 
     续接会话会把父会话的事件整段重放,口径必须和账本一致(见 :1862):只认 canonical
@@ -12143,7 +12143,7 @@ def _quota_codex_events(spans):
         return []
     lo_min = min(lo for lo, _ in spans)
     hi_max = max(hi for _, hi in spans)
-    file_cache = (_load_scan_cache() or {}).get("codex") or {}
+    file_cache = (cache if cache is not None else _load_scan_cache()).get("codex") or {}
     events = []
     for path, entry in file_cache.items():
         if not isinstance(entry, dict) or not entry.get("event_count"):
@@ -12382,8 +12382,24 @@ def _quota_cycle_specs(payload, devices, peer_anchors, now):
     return charted, missing, anchors
 
 
+def _quota_detail_payload():
+    """Reuse the app's recent local snapshot; standalone/cold calls still collect."""
+    path = os.path.join(HOME, ".tokei", "last_usage.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            age = datetime.now().timestamp() - os.fstat(f.fileno()).st_mtime
+            if 0 <= age <= 60:
+                payload = json.load(f)
+                if isinstance(payload, dict) and all(
+                        isinstance(payload.get(tool), dict) for tool, _ in _QUOTA_TOOLS):
+                    return payload
+    except (OSError, ValueError):
+        pass
+    return compute()
+
+
 def build_quota_detail():
-    payload = compute()
+    payload = _quota_detail_payload()
     now = int(datetime.now().timestamp())
     devices, peer_anchors = _quota_device_ledgers()
     span = _QUOTA_WEEK_HOURS * 3600
@@ -12397,13 +12413,14 @@ def build_quota_detail():
 
     codex_spans = [(s, e) for tool, s, e, _u, _c in planned if tool == "codex"]
     keys = dict(_QUOTA_TOOLS)
+    cache = _load_scan_cache() if any(t in ("claude", "codex") for t, *_ in planned) else {}
     events = {}
     cycles = []
     for tool, start, end, used, current in planned:
         if tool not in events:
             # Grok 没有带时间戳的事件缓存,只能靠账本的 hours。
-            events[tool] = (_quota_claude_events() if tool == "claude"
-                            else _quota_codex_events(codex_spans) if tool == "codex"
+            events[tool] = (_quota_claude_events(cache) if tool == "claude"
+                            else _quota_codex_events(codex_spans, cache) if tool == "codex"
                             else None)
         tokens, per_device, approx = _quota_window_tokens(
             devices, tool, keys[tool], start, end, events[tool])

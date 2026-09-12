@@ -34,6 +34,7 @@ final class Store: ObservableObject {
     private var refreshInFlight = false
     private var refreshPending = false
     private var dashboardPrewarmStarted = false
+    private var quotaDetailPrewarmPending = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -59,7 +60,8 @@ final class Store: ObservableObject {
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
-    func refresh() {
+    func refresh(prewarmQuotaDetail: Bool = false) {
+        quotaDetailPrewarmPending = quotaDetailPrewarmPending || prewarmQuotaDetail
         if refreshInFlight {
             refreshPending = true
             return
@@ -120,6 +122,13 @@ final class Store: ObservableObject {
             if !self.refreshPending && !self.dashboardPrewarmStarted {
                 self.dashboardPrewarmStarted = true
                 DashboardRepository.shared.load(.all, force: true)
+            }
+            if self.quotaDetailPrewarmPending && !self.refreshPending {
+                self.quotaDetailPrewarmPending = false
+                if self.popoverVisible {
+                    // Reuse this refresh's snapshot; do not prewarm on every timer tick.
+                    QuotaDetailRepository.shared.load()
+                }
             }
             self.finishRefresh()
         }
@@ -443,9 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            store.refresh()
-            // 轨迹页的额度明细要跑 1~3 秒,面板一开就预热,免得切过去干等。
-            QuotaDetailRepository.shared.load()
+            store.refresh(prewarmQuotaDetail: true)
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
