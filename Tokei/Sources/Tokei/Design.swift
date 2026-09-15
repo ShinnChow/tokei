@@ -54,6 +54,7 @@ enum Theme {
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
     static let qwenwork = Color(red: 0.24, green: 0.72, blue: 0.68) // 千问青
     static let kimicode = Color(red: 0.20, green: 0.78, blue: 0.66) // 月石青
+    static let cmdcode = Color(red: 0.22, green: 0.68, blue: 0.32) // 终端绿
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16

@@ -25,7 +25,9 @@
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 #   Kimi Code:   ${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl
 #                兼容旧版 ${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl
-
+#   Command Code: ${TOKEI_CMDCODE_DIR:-~/.commandcode}/projects/*/*.jsonl
+#                (assistant message 自带 usage + costUsd,按 message.id 去重;
+#                 inputTokens 含 cached,与 Codex 同口径)
 import os
 import sys
 import glob
@@ -174,6 +176,9 @@ _KIMI_CODE_LEGACY_DIR = os.path.join(HOME, ".kimi")
 KIMI_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
     or os.environ.get("KIMI_SHARE_DIR") or _KIMI_CODE_DEFAULT_DIR))
+_CMDCODE_DEFAULT_DIR = os.path.join(HOME, ".commandcode")
+CMDCODE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("TOKEI_CMDCODE_DIR") or _CMDCODE_DEFAULT_DIR))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -1170,6 +1175,10 @@ def _empty_qwencode():
 
 
 def _empty_kimicode():
+    return _empty_opencode()
+
+
+def _empty_cmdcode():
     return _empty_opencode()
 
 
@@ -9749,6 +9758,208 @@ def scan_kimicode(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Command Code CLI ----------
+# 会话日志 projects/<project-slug>/<session-id>.jsonl,顶层 JSONL 记录:
+#   type=session → cwd(项目)
+#   type=message 且 message.role=assistant → 顶层 usage + model(用量事件)
+# inputTokens 含 cached(与 Codex 同口径):输入=input-cached,缓存读=cached。
+# costUsd 为日志持久化的真实成本,直接采用不估算。按 message.id 去重。
+_CMDCODE_PARSER_VERSION = 2
+_CMDCODE_SESSION_PATTERNS = (
+    os.path.join("projects", "*", "*.jsonl"),
+)
+
+
+def _cmdcode_roots():
+    configured = os.environ.get("TOKEI_CMDCODE_DIR")
+    if configured:
+        candidates = [configured]
+    elif os.path.normcase(CMDCODE_DIR) != os.path.normcase(_CMDCODE_DEFAULT_DIR):
+        # Tests and embedders may replace CMDCODE_DIR after importing this module.
+        candidates = [CMDCODE_DIR]
+    else:
+        candidates = [_CMDCODE_DEFAULT_DIR]
+    roots = []
+    seen = set()
+    for candidate in candidates:
+        root = os.path.abspath(os.path.expanduser(candidate))
+        key = os.path.normcase(os.path.realpath(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
+def _cmdcode_session_files():
+    files = []
+    for root in _cmdcode_roots():
+        for pattern in _CMDCODE_SESSION_PATTERNS:
+            for path in glob.glob(os.path.join(root, pattern)):
+                if os.path.isfile(path):
+                    files.append(os.path.abspath(path))
+    return sorted(set(files))
+
+
+def _cmdcode_number(value):
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _cmdcode_datetime(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _scan_cmdcode_session(path):
+    """→ (days, sid, proj)。只认 assistant message 的顶层 usage,按 message.id 去重。"""
+    days = {}
+    seen_messages = set()
+    sid = None
+    proj = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if '"assistant"' not in line and '"session"' not in line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") == "session":
+                    session_id = record.get("id")
+                    if isinstance(session_id, str) and session_id and sid is None:
+                        sid = session_id
+                    workspace = record.get("cwd")
+                    if isinstance(workspace, str) and workspace and proj is None:
+                        proj = workspace
+                    continue
+                if record.get("type") != "message":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                usage = record.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                inp = _cmdcode_number(usage.get("inputTokens"))
+                out = _cmdcode_number(usage.get("outputTokens"))
+                cr = _cmdcode_number(usage.get("cacheReadTokens"))
+                cr = min(cr, inp)
+                inp -= cr
+                cw = _cmdcode_number(usage.get("cacheWriteTokens"))
+                if inp + out + cr + cw == 0:
+                    continue
+                message_id = record.get("id")
+                if isinstance(message_id, str) and message_id:
+                    if message_id in seen_messages:
+                        continue
+                    seen_messages.add(message_id)
+                try:
+                    cost = max(float(usage.get("costUsd") or 0), 0.0)
+                except (TypeError, ValueError):
+                    cost = 0.0
+                model = record.get("model")
+                if not isinstance(model, str) or not model:
+                    model = None
+                display_model = _known_id_or_raw(model) if model else None
+                dt = _cmdcode_datetime(record.get("timestamp"))
+                if dt is None:
+                    continue
+                day = days.setdefault(dt.date().isoformat(), _empty_token_day())
+                _add_token_usage(day, inp, out, cr, cw, 0, cost, display_model)
+                day["hours"][dt.hour] += inp + out + cr + cw
+    except OSError:
+        return {}, sid, proj
+    return days, sid, proj
+
+
+def scan_cmdcode(bounds, cache):
+    ledger_touch("cmdcode")
+    fc = cache.setdefault("cmdcode", {})
+    B = _empty_token_ranges()
+    files = _cmdcode_session_files()
+    if not files:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+    stale = set(fc)
+    changed = False
+    for path in files:
+        stale.discard(path)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        entry = fc.get(path)
+        if (not isinstance(entry, dict) or entry.get("sig") != signature
+                or entry.get("parser_version") != _CMDCODE_PARSER_VERSION):
+            days, sid, proj = _scan_cmdcode_session(path)
+            fc[path] = {
+                "sig": signature,
+                "days": days,
+                "sid": sid or path,
+                "proj": proj,
+                "parser_version": _CMDCODE_PARSER_VERSION,
+            }
+            changed = True
+
+    for path in stale:
+        fc.pop(path, None)
+        changed = True
+
+    live_days = {}
+    live_sessions = {}
+    live_projects = {}
+    for path, entry in fc.items():
+        if not isinstance(entry, dict):
+            continue
+        for day_key, day in entry.get("days", {}).items():
+            try:
+                date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
+            session = entry.get("sid") or path
+            live_sessions.setdefault(day_key, set()).add(session)
+            project = entry.get("proj")
+            if isinstance(project, str) and project:
+                live_projects.setdefault(day_key, set()).add(project)
+
+    for day_key, day in live_days.items():
+        day["sessions"] = sorted(live_sessions.get(day_key, set()))
+        day["projects"] = sorted(live_projects.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("cmdcode", live_days).items():
+        try:
+            local_day = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for range_key in classify_date(local_day, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    if changed:
+        cache["_dirty"] = True
+    return {"ranges": B}
+
+
 def fmt_reset(epoch):
     try:
         return datetime.fromtimestamp(int(epoch)).astimezone().strftime("%m-%d %H:%M")
@@ -10069,6 +10280,7 @@ def compute():
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     kimi = _safe_scan("kimicode", lambda: scan_kimicode(bounds, cache), _empty_kimicode, errors)
+    cmdcode = _safe_scan("cmdcode", lambda: scan_cmdcode(bounds, cache), _empty_cmdcode, errors)
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     if cache.pop("_pricing_changed", False):
@@ -10228,6 +10440,14 @@ def compute():
     qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
     kimiranges = {k: token_usage_range(kimi["ranges"][k]) for k in RANGE_KEYS}
 
+    def cmdcode_range(b):
+        # inputTokens 含 cached,展示口径与 Codex 一致:输入=非缓存部分
+        hit = (b["cr"] / (b["in"] + b["cr"]) * 100) if (b["in"] + b["cr"]) else 0.0
+        return {"hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
+                "reason": b["reason"], "cost": b["cost"], "sessions": len(b["sessions"]),
+                "models": _format_token_models(b["models"])}
+    cmdcranges = {k: cmdcode_range(cmdcode["ranges"][k]) for k in RANGE_KEYS}
+
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
 
@@ -10355,6 +10575,9 @@ def compute():
         },
         "kimicode": {
             "ranges": kimiranges,
+        },
+        "cmdcode": {
+            "ranges": cmdcranges,
         },
     }
     if errors:
@@ -10725,6 +10948,18 @@ def main():
         if kt.get("cw"):
             print(f"今日 缓存写 {human(kt['cw']):>6} {F}")
         print("---")
+    # Command Code 块（assistant message 自带 usage + 真实 costUsd）
+    cct = d["cmdcode"]["ranges"]["today"]
+    if cct["sessions"] > 0:
+        print(f"Command Code {HEAD}")
+        print(f"命中率   {cct['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(cct['in']):>6} {F}")
+        print(f"今日 输出   {human(cct['out']):>6} {F}")
+        print(f"今日 缓存读 {human(cct['cr']):>6} {F}")
+        if cct.get("cw"):
+            print(f"今日 缓存写 {human(cct['cw']):>6} {F}")
+        print(f"今日 成本  ${cct['cost']:.2f} {F}")
+        print("---")
     print("刷新 | refresh=true")
 
 
@@ -11031,6 +11266,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                        "workbuddy": 0.0, "workbuddy_ai": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
+                       "cmdcode": 0.0,
                        "prime_agent": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
@@ -11257,6 +11493,24 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 for key in TOKEN_FIELDS:
                     model[key] += mv.get(key, 0)
 
+    for _, entry in cache.get("cmdcode", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            d["cmdcode"] += day.get("cost", 0)
+            _add_day_tokens(d, dk, "cmdcode", token_total(day))
+            for mn, mv in day.get("models", {}).items():
+                name = f"{nice_model(mn)} (Command Code)"
+                model = models.setdefault(
+                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                           "reason": 0, "tool": "cmdcode"})
+                model["cost"] += mv.get("cost", 0)
+                for key in TOKEN_FIELDS:
+                    model[key] += mv.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -11384,11 +11638,12 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "deepseek_harness": round(v["deepseek_harness"], 2),
               "qwencode": round(v["qwencode"], 2),
               "kimicode": round(v["kimicode"], 2),
+              "cmdcode": round(v["cmdcode"], 2),
               "prime_agent": round(v["prime_agent"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"] + v["workbuddy_ai"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
-                             + v["kimicode"] + v["prime_agent"] + v["hermes"]
+                             + v["kimicode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
                              + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
@@ -11696,6 +11951,28 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             day_projs.setdefault(dk, set()).add(project)
             for mn, mv in day.get("models", {}).items():
                 model_name = f"{nice_model(mn)} (Kimi Code)"
+                model_tok[model_name] = model_tok.get(model_name, 0) + token_total(mv)
+
+    # --- Command Code (assistant message usage + 真实 costUsd) ---
+    for _, entry in cache.get("cmdcode", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        project_path = entry.get("proj") or ""
+        project = os.path.basename(project_path.rstrip("/")) or "Command Code"
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = token_total(day)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            pt = proj_tok.setdefault(project, [0, 0.0])
+            pt[0] += tok
+            pt[1] += day.get("cost", 0)
+            day_projs.setdefault(dk, set()).add(project)
+            for mn, mv in day.get("models", {}).items():
+                model_name = f"{nice_model(mn)} (Command Code)"
                 model_tok[model_name] = model_tok.get(model_name, 0) + token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
@@ -12581,6 +12858,29 @@ def projects():
                 name = f"{nice_model(model)} (Kimi Code)"
                 p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
     for proj_path, session_ids in kimi_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
+
+    # Command Code sessions. one transcript per session id, count the session id once.
+    cmdcode_sessions = {}
+    for entry in cache.get("cmdcode", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("cmdcode")
+        cmdcode_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+        for dk, day in entry.get("days", {}).items():
+            p["tokens"] += token_total(day)
+            p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for model, usage in day.get("models", {}).items():
+                name = f"{nice_model(model)} (Command Code)"
+                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
+    for proj_path, session_ids in cmdcode_sessions.items():
         proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
 
     # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。

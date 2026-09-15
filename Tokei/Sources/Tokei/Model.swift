@@ -911,6 +911,7 @@ struct Usage: Codable {
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
     var kimicode: TokenUsageStat
+    var cmdcode: TokenUsageStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -922,7 +923,7 @@ struct Usage: Codable {
         case qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -951,6 +952,7 @@ struct Usage: Codable {
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
         kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
+        cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()

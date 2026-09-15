@@ -26,6 +26,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
+| Command Code | `${TOKEI_CMDCODE_DIR:-~/.commandcode}/projects/*/*.jsonl` | JSONL, assistant message 顶层 `usage` + `costUsd` |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
 
@@ -119,6 +120,17 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 仍递归展开主 wire 中的 `SubagentEvent`，且不扫描旧 `session/subagents`，避免重复。
 新格式提供权威 `model`，可展示模型明细；两种格式都不持久化实际成本，因此 Kimi Code
 卡片不展示推测的 API 成本。
+
+**Command Code** — `inputTokens` 已包含缓存，与 Codex 同口径:
+- 输入 = `usage.inputTokens - usage.cacheReadTokens`
+- 输出 = `usage.outputTokens`
+- 缓存读 = `usage.cacheReadTokens`
+- 缓存写 = `usage.cacheWriteTokens`
+- 成本 = `usage.costUsd`（日志持久化的真实成本，直接采用不估算）
+
+只读取 `message.role=assistant` 且带 `usage` 的记录，按 `message.id` 去重；user 消息和
+`thinking`/`tool_result` 等内容块不重复计入。项目取自 `type=session` 头记录的 `cwd`，
+时刻取自记录的 `timestamp`（ISO 8601，兼容 `Z` 后缀）。
 **Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
 - 输入 = `usage.input`
 - 输出 = `usage.output`
