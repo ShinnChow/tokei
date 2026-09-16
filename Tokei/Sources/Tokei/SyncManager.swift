@@ -430,6 +430,14 @@ final class SyncManager {
             let pairs = rangePairs(for: peer)
             mergeRanges(&u.claude.ranges, peer.usage.claude.ranges, pairs)
             mergeRanges(&u.codex.ranges, peer.usage.codex.ranges, pairs)
+            if let localReserve = u.codex.reserveRanges,
+               let peerReserve = peer.usage.codex.reserveRanges {
+                var merged = localReserve
+                mergeRanges(&merged, peerReserve, pairs)
+                u.codex.reserveRanges = merged
+            } else if u.codex.reserveRanges == nil {
+                u.codex.reserveRanges = peer.usage.codex.reserveRanges
+            }
             mergeRanges(&u.gemini.ranges, peer.usage.gemini.ranges, pairs)
             mergeRanges(&u.grok.ranges, peer.usage.grok.ranges, pairs)
             u.grok.model = mergeModelName(u.grok.model, peer.usage.grok.model)

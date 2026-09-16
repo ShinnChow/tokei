@@ -8,6 +8,7 @@ struct PanelView: View {
     @State private var sel: RangeKey = .today
     @State private var claudeModelsOpen = false
     @State private var codexModelsOpen = false
+    @State private var codexReserveModelsOpen = false
     @State private var codexResetCardsOpen = false
     @State private var geminiModelsOpen = false
     @State private var cursorModelsOpen = false
@@ -646,6 +647,14 @@ struct PanelView: View {
             if let pw = x.pw, x.pw_stale != true {
                 quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
             }
+            // Reserve 常驻:额度行跟 5h/周排在一起;按模型紧跟额度行,不跟重置卡/plan隔开。
+            if let q = x.reserveQuota, let pct = q.usedPercent {
+                quotaRow(title: "Reserve 剩余", pct: 100 - pct, detail: "常规额度外", reset: q.resetsAt, tint: Theme.codex)
+            }
+            // Reserve 用量明细:只有按模型一行,紧跟额度行。
+            if let reserve = x.reserveRanges?.get(sel), reserve.sessions > 0 {
+                codexReserveBlock(reserve)
+            }
             if x.pw_stale == true {
                 codexQuotaStatus(x)
             }
@@ -742,6 +751,17 @@ struct PanelView: View {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Color.primary.opacity(0.05))
             )
+        }
+    }
+
+    // MARK: - Codex Luna Reserve 用量明细(额度行在上方跟 5h/周排在一起)
+    // 明细只有按模型展开,没有顶层总量/成本大字:Reserve 只有 gpt-reserve 一个模型,
+    // 顶层再摆一遍和按模型里完全重复。无用量时整个分区不显示(额度行常驻在上方)。
+    @ViewBuilder
+    func codexReserveBlock(_ r: CodexRange) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            tokenModelDisclosure(r.models, open: $codexReserveModelsOpen, tint: Theme.codex,
+                                 reasonIncludedInOutput: true)
         }
     }
 

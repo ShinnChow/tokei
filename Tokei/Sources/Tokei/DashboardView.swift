@@ -436,6 +436,7 @@ struct DashboardView: View {
     func modelTint(_ tool: String) -> Color {
         switch tool {
         case "codex": return Theme.codex
+        case "codex_reserve": return Theme.codex
         case "gemini": return Theme.gemini
         case "cursor": return Theme.cursor
         case "zai": return Theme.zai
@@ -1197,6 +1198,24 @@ struct DashboardView: View {
             out.append(modelCost(name: "GPT-5.5 (Codex)", cost: codex.cost, tool: "codex",
                                  input: codex.in + codex.cached, out: codex.out,
                                  reason: codex.reason, tokens: codexTokens))
+        }
+
+        if let reserve = usage.codex.reserveRanges?.get(key) {
+            let reserveTokens = reserve.in + reserve.cached + reserve.out
+            if !reserve.models.isEmpty {
+                for model in reserve.models {
+                    let tokens = model.in + model.cr + model.cw + model.out
+                    if tokens > 0 || model.cost > 0 {
+                        out.append(modelCost(name: "\(model.name) (Codex Reserve)", cost: model.cost, tool: "codex_reserve",
+                                             input: model.in, out: model.out, cr: model.cr, cw: model.cw,
+                                             reason: model.reason, tokens: tokens))
+                    }
+                }
+            } else if reserveTokens > 0 || reserve.cost > 0 {
+                out.append(modelCost(name: "Luna Reserve (Codex Reserve)", cost: reserve.cost, tool: "codex_reserve",
+                                     input: reserve.in + reserve.cached, out: reserve.out,
+                                     reason: reserve.reason, tokens: reserveTokens))
+            }
         }
 
         let gemini = usage.gemini.ranges.get(key)

@@ -606,6 +606,9 @@ def nice_model(m: str) -> str:
             mt = re.search(r"(\d+)-(\d+)", s)
             return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
     if "gpt" in s:
+        # Luna Reserve 的内部标识,展示为 Luna Reserve 而不是裸 GPT。
+        if re.search(r"(?:^|[-_/ ])reserve(?:$|[-_/ ])", s):
+            return "Luna Reserve"
         mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
         version = mt.group(1) if mt else ""
         variant_labels = []
@@ -713,7 +716,42 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 3
+_CODEX_PARSER_VERSION = 4
+
+
+# ---------- Codex Luna Reserve ----------
+# Luna Reserve 是 OpenAI 给 Codex 的第二缸油:常规高级模型额度见底后,
+# 会话切到 gpt-reserve(单独计量、单独重置),用完不影响主额度读数。
+# 日志特征:turn_context/session_meta 的 payload.model 为 "gpt-reserve",
+# token_count 事件的 rate_limits.limit_name 为 "gpt-reserve",
+# limit_id 为 "base_model_inference"(主额度是 "codex")。
+_CODEX_RESERVE_MODEL = "gpt-reserve"
+_CODEX_RESERVE_LIMIT_NAMES = frozenset({"gpt-reserve"})
+_CODEX_RESERVE_LIMIT_IDS = frozenset({"base_model_inference"})
+# Reserve 按 Luna 级别计价(官方 API 价 $0.20/$1.20,见 pricing.json)。
+_CODEX_RESERVE_PRICE_MODEL = "openai/gpt-5.6-luna"
+
+
+def _codex_is_reserve_model(model):
+    if not isinstance(model, str):
+        return False
+    m = model.strip().lower()
+    if m == _CODEX_RESERVE_MODEL:
+        return True
+    # _known_id_or_raw 之后可能是 openai/gpt-reserve。
+    return m.rsplit("/", 1)[-1] == _CODEX_RESERVE_MODEL
+
+
+def _codex_is_reserve_limits(rl):
+    if not isinstance(rl, dict):
+        return False
+    name = rl.get("limit_name")
+    if isinstance(name, str) and name.strip().lower() in _CODEX_RESERVE_LIMIT_NAMES:
+        return True
+    limit_id = rl.get("limit_id")
+    return isinstance(limit_id, str) and limit_id.strip() in _CODEX_RESERVE_LIMIT_IDS
+
+
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
@@ -1083,9 +1121,11 @@ def _empty_claude():
 
 
 def _empty_codex():
-    ranges = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
-                  "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
-    return {"ranges": ranges, "limits": None, "plan": None,
+    def _blank():
+        return {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
+                    "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
+    return {"ranges": _blank(), "reserve_ranges": _blank(),
+            "reserve_quota": None, "limits": None, "plan": None,
             "limits_updated": None, "limits_consumed": None}
 
 
@@ -2326,7 +2366,11 @@ def _codex_migrate_event_cache(file_cache):
 
 
 def _codex_estimated_cost(model, inp, cached, out):
-    price_model = model if _has_known_price(model) else "openai/gpt-5.5"
+    if _codex_is_reserve_model(model):
+        # Reserve 单独计量,按 Luna 级别计价,不吃 gpt-5.5 兜底。
+        price_model = _CODEX_RESERVE_PRICE_MODEL
+    else:
+        price_model = model if _has_known_price(model) else "openai/gpt-5.5"
     base = _raw_price(price_model)
     high_context = inp > 272_000
     input_price = base["in"] * (2 if high_context else 1)
@@ -2951,6 +2995,7 @@ def scan_codex(bounds, cache):
                 session_id, forked_from_id = _codex_session_meta(f)
                 file_limits = None; file_limits_ts = None; file_plan = None
                 file_g_limits = None; file_g_ts = None; file_g_plan = None
+                file_r_limits = None; file_r_ts = None
                 file_last_total = None
                 prev_total_key = None
                 file_model = None
@@ -2963,6 +3008,7 @@ def scan_codex(bounds, cache):
                 file_plan = entry.get("plan")
                 file_g_limits = entry.get("g_limits"); file_g_ts = entry.get("g_ts")
                 file_g_plan = entry.get("g_plan")
+                file_r_limits = entry.get("reserve_limits"); file_r_ts = entry.get("reserve_limits_ts")
                 file_last_total = entry.get("last_total")
                 previous = entry.get("prev_total_key")
                 prev_total_key = tuple(previous) if isinstance(previous, (list, tuple)) else None
@@ -3006,6 +3052,10 @@ def scan_codex(bounds, cache):
                             file_limits_ts = ts_iso
                             file_limits = rl
                             file_plan = rl.get("plan_type")
+                        # Reserve 是第二缸油:额度独立展示,不混入主额度读数。
+                        if _codex_is_reserve_limits(rl) and (file_r_ts is None or ts_iso > file_r_ts):
+                            file_r_ts = ts_iso
+                            file_r_limits = rl
                     # Codex may emit the same cumulative snapshot twice; in that case
                     # last_token_usage is repeated too, so counting it again overstates usage.
                     if ts and last and not duplicate_total:
@@ -3017,6 +3067,9 @@ def scan_codex(bounds, cache):
                         # 无模型字段(老版本 CLI 日志/截断会话)标为 unknown,不冒充 gpt-5.5;
                         # 计费仍按 gpt-5.5 保守估算(下行 price_model 兜底)
                         model = _known_id_or_raw(file_model) or "unknown"
+                        # 同一文件可先走主额度后切 Reserve:事件级额度优先于文件级模型。
+                        if _codex_is_reserve_limits(rl):
+                            model = _CODEX_RESERVE_MODEL
                         cost = _codex_estimated_cost(model, li, lc, lo)
                         totals = total_key if total_key is not None else (None, None, None, None)
                         # timestamp, local day, cumulative usage, incremental usage, cost
@@ -3066,6 +3119,7 @@ def scan_codex(bounds, cache):
                 "session_id": session_id, "forked_from_id": forked_from_id,
                 "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                 "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
+                "reserve_limits": file_r_limits, "reserve_limits_ts": file_r_ts,
                 "last_total": file_last_total, "prev_total_key": prev_total_key,
                 "active_model": file_model, "parser_version": _CODEX_PARSER_VERSION,
                 "file_id": file_id, "parsed_size": complete_offset,
@@ -3137,19 +3191,49 @@ def scan_codex(bounds, cache):
         return ks
 
     live_days = {}
+    live_reserve_days = {}
+    live_reserve_sessions = set()
     for f, entry in canonical_fc.items():
         for dk, day in entry.get("days", {}).items():
             d = date.fromisoformat(dk)
+            reserve_models = {m: u for m, u in (day.get("models") or {}).items()
+                              if _codex_is_reserve_model(m)}
+            main_models = {m: u for m, u in (day.get("models") or {}).items()
+                           if not _codex_is_reserve_model(m)}
+            if reserve_models:
+                live_reserve_sessions.add(f)
+                rday = live_reserve_days.setdefault(
+                    dk, {"in": 0, "cached": 0, "out": 0, "reason": 0,
+                         "cost": 0.0, "models": {}, "hours": [0] * 24})
+                for model, usage in reserve_models.items():
+                    li = usage.get("in", 0); lc = usage.get("cr", 0)
+                    lo = usage.get("out", 0); lr = usage.get("reason", 0)
+                    rday["in"] += li + lc; rday["cached"] += lc
+                    rday["out"] += lo; rday["reason"] += lr
+                    rday["cost"] += usage.get("cost", 0)
+                    _add_model_usage(rday["models"], model, li, lo, lc, 0,
+                                     lr, usage.get("cost", 0))
             agg = live_days.setdefault(
                 dk, {"in": 0, "cached": 0, "out": 0, "reason": 0,
                      "cost": 0.0, "models": {}, "hours": [0] * 24})
-            agg["in"] += day["in"]; agg["cached"] += day["cached"]
-            agg["out"] += day["out"]; agg["reason"] += day["reason"]
-            agg["cost"] += day["cost"]
-            for model, usage in day.get("models", {}).items():
-                _add_model_usage(agg["models"], model, usage.get("in", 0), usage.get("out", 0),
-                                 usage.get("cr", 0), usage.get("cw", 0),
-                                 usage.get("reason", 0), usage.get("cost", 0))
+            if main_models:
+                for model, usage in main_models.items():
+                    li = usage.get("in", 0); lc = usage.get("cr", 0)
+                    lo = usage.get("out", 0); lr = usage.get("reason", 0)
+                    agg["in"] += li + lc; agg["cached"] += lc
+                    agg["out"] += lo; agg["reason"] += lr
+                    agg["cost"] += usage.get("cost", 0)
+                    _add_model_usage(agg["models"], model, li, lo, lc, 0,
+                                     lr, usage.get("cost", 0))
+            elif not reserve_models:
+                # 老缓存无 models 明细:沿用 day 级聚合(无法拆分,保持原行为)。
+                agg["in"] += day["in"]; agg["cached"] += day["cached"]
+                agg["out"] += day["out"]; agg["reason"] += day["reason"]
+                agg["cost"] += day["cost"]
+                for model, usage in day.get("models", {}).items():
+                    _add_model_usage(agg["models"], model, usage.get("in", 0), usage.get("out", 0),
+                                     usage.get("cr", 0), usage.get("cw", 0),
+                                     usage.get("reason", 0), usage.get("cost", 0))
             for hour, amount in enumerate((day.get("hours") or [])[:24]):
                 agg["hours"][hour] += amount
             # 会话数只能来自现存日志(被清日志无从归属)
@@ -3172,8 +3256,37 @@ def scan_codex(bounds, cache):
                                  usage.get("cr", 0), usage.get("cw", 0),
                                  usage.get("reason", 0), usage.get("cost", 0))
 
+    # Reserve 独立 bucket:第二缸油不计入主用量,与主额度无关。
+    RB = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0,
+              "sessions": set(), "models": {}}
+          for k in RANGE_KEYS}
+    for dk, day in ledger_reconcile("codex_reserve", live_reserve_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in _codex_range_keys(d):
+            b = RB[k]
+            b["in"] += day.get("in", 0); b["cached"] += day.get("cached", 0)
+            b["out"] += day.get("out", 0); b["reason"] += day.get("reason", 0)
+            b["cost"] += day.get("cost", 0.0)
+            for model, usage in (day.get("models") or {}).items():
+                _add_model_usage(b["models"], model, usage.get("in", 0), usage.get("out", 0),
+                                 usage.get("cr", 0), usage.get("cw", 0),
+                                 usage.get("reason", 0), usage.get("cost", 0))
+    for dk in live_reserve_days:
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in _codex_range_keys(d):
+            RB[k]["sessions"].update(
+                f for f in live_reserve_sessions
+                if f in canonical_fc and dk in (canonical_fc[f].get("days") or {}))
+
     # Find latest limits across all cached files
     latest_limits = None; latest_ts = None; plan_type = None
+    reserve_limits = None; reserve_ts = None
     g_limits = None; g_ts = None
     for entry in fc.values():
         if entry.get("limits_ts"):
@@ -3181,6 +3294,10 @@ def scan_codex(bounds, cache):
                 latest_ts = entry["limits_ts"]
                 latest_limits = entry["limits"]
                 plan_type = entry["plan"]
+        if entry.get("reserve_limits_ts"):
+            if reserve_ts is None or entry["reserve_limits_ts"] > reserve_ts:
+                reserve_ts = entry["reserve_limits_ts"]
+                reserve_limits = entry["reserve_limits"]
         if entry.get("g_ts"):
             if g_ts is None or entry["g_ts"] > g_ts:
                 g_ts = entry["g_ts"]
@@ -3223,8 +3340,21 @@ def scan_codex(bounds, cache):
         if entry:
             cur_total = entry.get("last_total")
 
+    reserve_quota = None
+    if reserve_limits:
+        r_primary = (reserve_limits.get("primary") or {})
+        reserve_quota = {
+            "used_percent": r_primary.get("used_percent"),
+            "resets_at": r_primary.get("resets_at"),
+            "window_minutes": r_primary.get("window_minutes"),
+            "plan": reserve_limits.get("plan_type"),
+            "updated": _iso_to_epoch(reserve_ts),
+        }
+
     return {
         "ranges": B,
+        "reserve_ranges": RB,
+        "reserve_quota": reserve_quota,
         "cur_total": cur_total,
         "limits": latest_limits,
         "plan": plan_type,
@@ -10095,10 +10225,11 @@ def compute():
                 "sessions": len(b["sessions"])}
 
     def codex_range(b):
-        hit = (b["cached"] / b["in"] * 100) if b["in"] else 0.0
-        return {"hit": hit, "in": b["in"] - b["cached"], "cached": b["cached"],
-                "out": b["out"], "reason": b["reason"], "cost": b["cost"],
-                "sessions": len(b["sessions"]), "models": _format_token_models(b.get("models", {}))}
+        b = b or {}
+        hit = (b.get("cached", 0) / b["in"] * 100) if b.get("in") else 0.0
+        return {"hit": hit, "in": b.get("in", 0) - b.get("cached", 0), "cached": b.get("cached", 0),
+                "out": b.get("out", 0), "reason": b.get("reason", 0), "cost": b.get("cost", 0.0),
+                "sessions": len(b.get("sessions", set())), "models": _format_token_models(b.get("models", {}))}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
@@ -10158,6 +10289,8 @@ def compute():
 
     cranges = {k: claude_range(cc["ranges"][k]) for k in RANGE_KEYS}
     xranges = {k: codex_range(cx["ranges"][k]) for k in RANGE_KEYS}
+    xreserveranges = {k: codex_range(cx.get("reserve_ranges", {}).get(k, {}))
+                      for k in RANGE_KEYS}
     granges = {k: gemini_range(gm["ranges"][k]) for k in RANGE_KEYS}
     kranges = {k: grok_range(gk["ranges"][k]) for k in RANGE_KEYS}
     qwranges = {k: qoderwork_range(qd["ranges"][k]) for k in RANGE_KEYS}
@@ -10277,6 +10410,8 @@ def compute():
         },
         "codex": {
             "ranges": xranges,
+            "reserve_ranges": xreserveranges,
+            "reserve_quota": cx.get("reserve_quota"),
             "p5": p5, "pw": pw, "r5": r5, "rw": rw,
             "q_updated": cx.get("limits_updated"),
             "p5_stale": quota["p5_stale"], "pw_stale": quota["pw_stale"],
@@ -11067,12 +11202,29 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             if cutoff and dk < cutoff:
                 continue
             d = days.setdefault(dk, _empty())
-            d["codex"] += day.get("cost", 0)
-            d["x_in"] += day.get("in", 0); d["x_out"] += day.get("out", 0)
-            d["x_cached"] += day.get("cached", 0); d["x_reason"] += day.get("reason", 0)
-            _add_day_tokens(d, dk, "codex",
-                            day.get("in", 0) + day.get("out", 0) + day.get("reason", 0))
+            # day 级 in/cached/out 混了主额度和 Reserve:按模型拆,只留主额度部分。
+            r_in = r_cr = r_out = r_reason = r_cost = 0
             for mn, mv in day.get("models", {}).items():
+                if not _codex_is_reserve_model(mn):
+                    continue
+                r_cost += mv.get("cost", 0)
+                # models 里 in=非缓存,cr=cached;day 级 in=全量 input
+                r_in += mv.get("in", 0) + mv.get("cr", 0)
+                r_cr += mv.get("cr", 0)
+                r_out += mv.get("out", 0)
+                r_reason += mv.get("reason", 0)
+            d["codex"] += day.get("cost", 0) - r_cost
+            d["x_in"] += day.get("in", 0) - r_in
+            d["x_out"] += day.get("out", 0) - r_out
+            d["x_cached"] += day.get("cached", 0) - r_cr
+            d["x_reason"] += day.get("reason", 0) - r_reason
+            _add_day_tokens(d, dk, "codex",
+                            day.get("in", 0) - r_in + day.get("out", 0) - r_out
+                            + day.get("reason", 0) - r_reason)
+            for mn, mv in day.get("models", {}).items():
+                if _codex_is_reserve_model(mn):
+                    # Reserve 第二缸油:不计入主 codex 成本/token/模型。
+                    continue
                 name = f"{nice_model(mn)} (Codex)"
                 model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
                                                   "cr": 0, "cw": 0, "reason": 0,
@@ -11548,21 +11700,33 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- Codex (in + out + reason; in 已含 cached。与账本白名单/主页卡片总量同口径) ---
+    # Reserve 第二缸油不计入主 Codex 回顾。
     for f, entry in cache.get("codex", {}).items():
         if not isinstance(entry, dict):
             continue
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
                 continue
-            tok = day.get("in", 0) + day.get("out", 0) + day.get("reason", 0)
+            r_in = r_out = r_reason = r_cost = 0
+            for model, usage in day.get("models", {}).items():
+                if not _codex_is_reserve_model(model):
+                    continue
+                r_in += usage.get("in", 0) + usage.get("cr", 0)
+                r_out += usage.get("out", 0)
+                r_reason += usage.get("reason", 0)
+                r_cost += usage.get("cost", 0)
+            tok = (day.get("in", 0) - r_in + day.get("out", 0) - r_out
+                   + day.get("reason", 0) - r_reason)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0) - r_cost
             weekday[date.fromisoformat(dk).weekday()] += tok
             for hour, amount in enumerate(day.get("hours", [])):
                 hours[hour] += amount
                 if amount:
                     all_day_hours.add(f"{dk}:{hour}")
             for model, usage in day.get("models", {}).items():
+                if _codex_is_reserve_model(model):
+                    continue
                 name = f"{nice_model(model)} (Codex)"
                 model_tokens = usage.get("in", 0) + usage.get("cr", 0) + usage.get("out", 0)
                 model_tok[name] = model_tok.get(name, 0) + model_tokens
