@@ -136,6 +136,7 @@ enum UsageShareImage {
         case "Pi": return Theme.pi
         case "WorkBuddy": return Theme.workbuddy
         case "WorkBuddy Intl.": return Theme.workbuddyAI
+        case "CodeBuddy": return Theme.codebuddy
         case "OpenCode": return Theme.opencode
         case "Qwen Code": return Theme.qwencode
         default: return Theme.tTertiary

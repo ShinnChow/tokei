@@ -257,6 +257,7 @@ struct ProjectTrailView: View {
         case "prime_agent": return Theme.primeAgent
         case "workbuddy": return Theme.workbuddy
         case "workbuddy_ai": return Theme.workbuddyAI
+        case "codebuddy": return Theme.codebuddy
         case "deepseek_harness": return Theme.deepseekHarness
         default: return Theme.tTertiary
         }

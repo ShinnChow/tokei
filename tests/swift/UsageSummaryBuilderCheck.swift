@@ -34,6 +34,8 @@ struct UsageSummaryBuilderCheck {
         try expect(todayText.contains("Gemini"), "gemini should appear when visible: \(todayText)")
         try expect(todayText.contains("$0.10") || todayText.contains("$0.1"),
                    "gemini cost missing: \(todayText)")
+        try expect(todayText.contains("CodeBuddy"), "codebuddy line missing: \(todayText)")
+        try expect(todayText.contains("2.75 Credits"), "codebuddy credits missing: \(todayText)")
 
         // Store path uses lastUpdated = "更新 HH:mm:ss" (main.swift); strip, don't nest.
         let storeStampText = UsageSummaryBuilder.text(
@@ -52,6 +54,7 @@ struct UsageSummaryBuilderCheck {
 
         var hideGemini = allVisible
         hideGemini.gemini = false
+        hideGemini.codebuddy = false
         let hiddenText = UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: hideGemini, updated: nil
         )
@@ -212,6 +215,16 @@ struct UsageSummaryBuilderCheck {
           "last_week": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "month": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "year": {"tasks": 0, "completed": 0, "failed": 0, "models": []}
+        }
+      },
+      "codebuddy": {
+        "ranges": {
+          "today": {"hit": 40, "in": 60, "out": 20, "cr": 40, "cw": 0, "reason": 0, "credits": 2.75, "sessions": 1, "models": [{"model_id": "fictional-codebuddy-model", "name": "Fictional CodeBuddy Model", "in": 60, "out": 20, "cr": 40, "cw": 0, "reason": 0, "cost": 0, "credits": 2.75}]},
+          "yesterday": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []}
         }
       },
       "opencode": {

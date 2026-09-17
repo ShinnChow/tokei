@@ -22,6 +22,7 @@ struct PanelView: View {
     @State private var primeAgentModelsOpen = false
     @State private var workBuddyModelsOpen = false
     @State private var workBuddyAIModelsOpen = false
+    @State private var codeBuddyModelsOpen = false
     @State private var deepSeekHarnessModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
@@ -64,6 +65,7 @@ struct PanelView: View {
     @AppStorage("showPrimeAgent") private var showPrimeAgent = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showWorkBuddyAI") private var showWorkBuddyAI = true
+    @AppStorage("showCodeBuddy") private var showCodeBuddy = true
     @AppStorage("showDeepSeekHarness") private var showDeepSeekHarness = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
@@ -96,6 +98,7 @@ struct PanelView: View {
             hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
             openclaw: showOpenClaw, pi: showPi, primeAgent: showPrimeAgent,
             workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
+            codebuddy: showCodeBuddy,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode
         )
@@ -106,6 +109,7 @@ struct PanelView: View {
          showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showHermes,
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
+         showCodeBuddy,
          showOpenCode, showQwenCode,
          showQwenWork, showKimiCode, showPrimeAgent].filter { $0 }.count
     }
@@ -363,6 +367,7 @@ struct PanelView: View {
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let par = u.prime_agent.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), wair = u.workbuddyAI.ranges.get(sel)
+        let cbr = u.codebuddy.ranges.get(sel)
         let or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
         let claudeQuotaState = SubscriptionQuotaState.resolve([
@@ -472,6 +477,13 @@ struct PanelView: View {
                          content: AnyView(tokenUsageBlock(
                             title: "WorkBuddy Intl.", wair, tint: Theme.workbuddyAI,
                             modelsOpen: $workBuddyAIModelsOpen, toolID: "workbuddy-ai"))),
+            ToolCardItem(id: "codebuddy", name: "CodeBuddy", visible: showCodeBuddy,
+                         active: cbr.sessions > 0 || cbr.credits > 0,
+                         tint: Theme.codebuddy,
+                         content: AnyView(tokenUsageBlock(
+                            title: "CodeBuddy", cbr, tint: Theme.codebuddy,
+                            modelsOpen: $codeBuddyModelsOpen, showsCost: false,
+                            showsCredits: true, toolID: "codebuddy"))),
             ToolCardItem(id: "deepseek_harness", name: "DeepSeek Harness", visible: showDeepSeekHarness,
                          active: dshr.sessions > 0, tint: Theme.deepseekHarness,
                          content: AnyView(tokenUsageBlock(title: "DeepSeek Harness", dshr,
@@ -1641,13 +1653,17 @@ struct PanelView: View {
     @ViewBuilder
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
-                         showsCost: Bool = true, toolID: String? = nil) -> some View {
+                         showsCost: Bool = true, showsCredits: Bool = false,
+                         toolID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if r.sessions > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
+                let creditMetrics: [Metric] = showsCredits && r.credits > 0
+                    ? [.init("circle.hexagongrid.fill", "Credits", Fmt.credits(r.credits))]
+                    : []
                 metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))] : [],
-                    hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
+                    hit: r.hit, extra: creditMetrics + tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
                                          inclusiveIO: inclusiveIO)
@@ -1911,7 +1927,7 @@ struct PanelView: View {
                     let total = tokenModelTotal(m, reasonIncludedInOutput: reasonIncludedInOutput)
                     let hit = tokenModelHit(m)
                     let hasBreakdown = m.in + m.out + m.cr + m.cw + m.reason > 0
-                        || m.cost > 0 || m.pin > 0 || m.pout > 0
+                        || m.cost > 0 || m.credits > 0 || m.pin > 0 || m.pout > 0
                     let isExpanded = expandedModels.contains(m.id)
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
@@ -1950,6 +1966,11 @@ struct PanelView: View {
                                     }
                                     if m.cost > 0 {
                                         Text(String(format: "$%.2f", m.cost))
+                                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(Theme.tPrimary)
+                                    }
+                                    if m.credits > 0 {
+                                        Text("\(Fmt.credits(m.credits)) C")
                                             .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                                             .foregroundStyle(Theme.tPrimary)
                                     }
@@ -2609,6 +2630,7 @@ struct PanelView: View {
                 settingsRow("Prime Agent", tint: Theme.primeAgent, isOn: $showPrimeAgent)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
                 settingsRow("WorkBuddy Intl.", tint: Theme.workbuddyAI, isOn: $showWorkBuddyAI)
+                settingsRow("CodeBuddy", tint: Theme.codebuddy, isOn: $showCodeBuddy)
                 settingsRow("DeepSeek Harness", tint: Theme.deepseekHarness, isOn: $showDeepSeekHarness)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
@@ -3600,6 +3622,7 @@ struct PanelView: View {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
                          "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
+                         "codebuddy",
                          "deepseek_harness",
                          "opencode", "qwencode", "qwenwork", "kimicode", "prime_agent"]
                 .filter { json[$0] != nil }

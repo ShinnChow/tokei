@@ -9,6 +9,7 @@ struct DailyCost: Codable, Identifiable {
     var prime_agent: Double?
     var workbuddy: Double?
     var workbuddy_ai: Double?
+    var codebuddy: Double?
     var deepseek_harness: Double?
     var qwencode: Double?
     var total: Double
@@ -38,6 +39,11 @@ struct DailyCost: Codable, Identifiable {
     var wa_out: Int?
     var wa_cr: Int?
     var wa_cw: Int?
+    var cb_in: Int?
+    var cb_out: Int?
+    var cb_cr: Int?
+    var cb_cw: Int?
+    var cb_credits: Double?
     var d_in: Int?
     var d_out: Int?
     var d_cr: Int?
@@ -452,6 +458,7 @@ struct DashboardView: View {
         case "prime_agent": return Theme.primeAgent
         case "workbuddy": return Theme.workbuddy
         case "workbuddy_ai": return Theme.workbuddyAI
+        case "codebuddy": return Theme.codebuddy
         case "deepseek_harness": return Theme.deepseekHarness
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
@@ -596,7 +603,24 @@ struct DashboardView: View {
                             .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
                         Text(String(format: "$%.2f", d.workbuddy_ai ?? 0))
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.tSecondary)
+                        .foregroundStyle(Theme.tSecondary)
+                    }
+                }
+                if (d.cb_in ?? 0) + (d.cb_out ?? 0) + (d.cb_cr ?? 0) + (d.cb_cw ?? 0) > 0 ||
+                    (d.cb_credits ?? 0) > 0 {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Circle().fill(Theme.codebuddy).frame(width: 6, height: 6)
+                            Text("CodeBuddy").font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.codebuddy)
+                        }
+                        Text("\(Fmt.human((d.cb_in ?? 0) + (d.cb_out ?? 0) + (d.cb_cr ?? 0) + (d.cb_cw ?? 0))) tok")
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
+                        if (d.cb_credits ?? 0) > 0 {
+                            Text("\(Fmt.credits(d.cb_credits ?? 0)) Credits")
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                        }
                     }
                 }
                 if (d.d_in ?? 0) + (d.d_out ?? 0) + (d.d_cr ?? 0) + (d.d_cw ?? 0) + (d.d_reason ?? 0) > 0 {
@@ -1066,6 +1090,7 @@ struct DashboardView: View {
                   pi: lhs.pi + rhs.pi,
                   workbuddy: (lhs.workbuddy ?? 0) + (rhs.workbuddy ?? 0),
                   workbuddy_ai: (lhs.workbuddy_ai ?? 0) + (rhs.workbuddy_ai ?? 0),
+                  codebuddy: (lhs.codebuddy ?? 0) + (rhs.codebuddy ?? 0),
                   deepseek_harness: (lhs.deepseek_harness ?? 0) + (rhs.deepseek_harness ?? 0),
                   qwencode: (lhs.qwencode ?? 0) + (rhs.qwencode ?? 0),
                   total: lhs.total + rhs.total,
@@ -1095,6 +1120,11 @@ struct DashboardView: View {
                   wa_out: (lhs.wa_out ?? 0) + (rhs.wa_out ?? 0),
                   wa_cr: (lhs.wa_cr ?? 0) + (rhs.wa_cr ?? 0),
                   wa_cw: (lhs.wa_cw ?? 0) + (rhs.wa_cw ?? 0),
+                  cb_in: (lhs.cb_in ?? 0) + (rhs.cb_in ?? 0),
+                  cb_out: (lhs.cb_out ?? 0) + (rhs.cb_out ?? 0),
+                  cb_cr: (lhs.cb_cr ?? 0) + (rhs.cb_cr ?? 0),
+                  cb_cw: (lhs.cb_cw ?? 0) + (rhs.cb_cw ?? 0),
+                  cb_credits: (lhs.cb_credits ?? 0) + (rhs.cb_credits ?? 0),
                   d_in: (lhs.d_in ?? 0) + (rhs.d_in ?? 0),
                   d_out: (lhs.d_out ?? 0) + (rhs.d_out ?? 0),
                   d_cr: (lhs.d_cr ?? 0) + (rhs.d_cr ?? 0),
@@ -1251,6 +1281,8 @@ struct DashboardView: View {
         appendTokenModels(usage.workbuddy.ranges.get(key).models, tool: "workbuddy", suffix: "WorkBuddy", to: &out)
         appendTokenModels(usage.workbuddyAI.ranges.get(key).models, tool: "workbuddy_ai",
                           suffix: "WorkBuddy Intl.", to: &out)
+        appendTokenModels(usage.codebuddy.ranges.get(key).models, tool: "codebuddy",
+                          suffix: "CodeBuddy", to: &out)
         appendTokenModels(usage.deepseekHarness.ranges.get(key).models, tool: "deepseek_harness",
                           suffix: "DeepSeek Harness", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
@@ -1312,6 +1344,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.pi.ranges.get(key))
             + tokenUsageTotal(usage.workbuddy.ranges.get(key))
             + tokenUsageTotal(usage.workbuddyAI.ranges.get(key))
+            + tokenUsageTotal(usage.codebuddy.ranges.get(key))
             + tokenUsageTotal(usage.deepseekHarness.ranges.get(key))
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
@@ -1330,6 +1363,7 @@ struct DashboardView: View {
              + usage.prime_agent.ranges.get(key).cost
             + usage.workbuddy.ranges.get(key).cost
             + usage.workbuddyAI.ranges.get(key).cost
+            + usage.codebuddy.ranges.get(key).cost
             + usage.deepseekHarness.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost
