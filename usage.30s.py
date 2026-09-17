@@ -1225,7 +1225,7 @@ def _add_model_usage(models, model, inp=0, out=0, cr=0, cw=0, reason=0,
     mm["in"] += int(inp or 0); mm["out"] += int(out or 0)
     mm["cr"] += int(cr or 0); mm["cw"] += int(cw or 0); mm["reason"] += int(reason or 0)
     mm["cost"] += float(cost or 0)
-    mm["credits"] += float(credits or 0)
+    mm["credits"] = float(mm.get("credits", 0) or 0) + float(credits or 0)
 
 
 def _add_token_usage(target, inp=0, out=0, cr=0, cw=0, reason=0, cost=0.0,
