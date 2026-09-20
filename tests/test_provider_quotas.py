@@ -136,6 +136,24 @@ class ProviderQuotaTests(unittest.TestCase):
         self.assertEqual(quota["windows"][0]["reset"], 1_788_220_800)
         self.assertEqual(quota["details"][0]["value"], "$3.88 / $20.00")
         self.assertEqual(quota["details"][1]["value"], "$4.50 / $10.00")
+        self.assertEqual(quota["windows"][0]["detail"], "$3.88 / $20.00")
+
+    def test_cursor_total_spend_uses_percent_when_plan_used_is_allotment(self):
+        quota = USAGE._normalize_cursor_quota({
+            "membershipType": "pro_plus",
+            "individualUsage": {
+                "plan": {
+                    "used": 7000,
+                    "limit": 7000,
+                    "totalPercentUsed": 8.365737,
+                    "autoPercentUsed": 7.173333,
+                    "apiPercentUsed": 24.0,
+                },
+            },
+        })
+
+        self.assertEqual(quota["windows"][0]["detail"], "$5.86 / $70.00")
+        self.assertEqual([row["used_pct"] for row in quota["windows"]], [8.365737, 7.173333, 24.0])
 
     def test_cursor_legacy_request_quota_overrides_token_percent(self):
         summary = {
