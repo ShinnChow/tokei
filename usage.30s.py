@@ -403,6 +403,9 @@ def _normalize(model: str):
         return None
     m = re.sub(r"\s+", "-", m)
     m = re.sub(r"[:\-]free$", "", m)                  # 免费档按基础价
+    seg = m.rsplit("/", 1)[-1]
+    if seg.startswith("muse-"):
+        return "meta/" + seg                         # 网关前缀(如 vercel/meta/)剥离
     if "/" in m:
         return m                                      # 已是 OpenRouter 格式
     if m.startswith("claude"):
@@ -722,7 +725,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 3
+_CODEX_PARSER_VERSION = 4  # v4: 网关前缀模型(如 vercel/meta/muse-*)正确计价后强制重扫
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
