@@ -131,9 +131,11 @@ ZCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get(
     "TOKEI_ZCODE_DB", os.path.join(HOME, ".zcode", "cli", "db", "db.sqlite"))))
 MIMOCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get("TOKEI_MIMOCODE_DB", ""))) \
     if os.environ.get("TOKEI_MIMOCODE_DB") else ""
-OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
-OPENCLAW_STATE_DB = os.path.join(HOME, ".openclaw", "state", "openclaw.sqlite")
-OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
+OPENCLAW_STATE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("OPENCLAW_STATE_DIR", os.path.join(HOME, ".openclaw"))))
+OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
+OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
+OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
 PRIME_AGENT_DIR = os.path.expanduser(os.environ.get(
@@ -6592,11 +6594,11 @@ def scan_hermes(bounds, cache):
 
 
 # ---------- OpenClaw ----------
-# 全局 SQLite: ~/.openclaw/state/openclaw.sqlite（任务 + agent DB 注册表）
+# 全局 SQLite: $OPENCLAW_STATE_DIR/state/openclaw.sqlite（任务 + agent DB 注册表）
 # Agent SQLite: agent_databases.path -> transcript_events.event_json（新版 token 用量）
-# Session JSONL: ~/.openclaw/agents/*/sessions/*.jsonl（旧版 token 用量）
-_OPENCLAW_PARSER_VERSION = 1
-_OPENCLAW_LEDGER_VERSION = 1
+# Session JSONL: $OPENCLAW_STATE_DIR/agents/*/sessions/*.jsonl（旧版 token 用量）
+_OPENCLAW_PARSER_VERSION = 2
+_OPENCLAW_LEDGER_VERSION = 2
 
 
 def _openclaw_db_paths():
@@ -6654,7 +6656,7 @@ def _scan_openclaw_db(db_path, sqlite_module):
 def _openclaw_agent_db_paths(sqlite_module):
     """Discover agent databases from the global registry.
 
-    OpenClaw stores registry paths relative to ``~/.openclaw`` on current
+    OpenClaw stores registry paths relative to its state directory on current
     releases.  Absolute paths remain supported for compatible installations.
     The boolean result distinguishes an authoritative empty registry from a
     transient read failure so cached agent data is not discarded on lock/I/O
@@ -6713,6 +6715,11 @@ def _openclaw_cost_number(value):
         return 0.0
 
 
+def _openclaw_token_total(usage):
+    # OpenClaw's reasoningTokens is already included in output.
+    return sum(usage.get(key, 0) for key in ("in", "out", "cr", "cw"))
+
+
 def _openclaw_datetime(value):
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
@@ -6767,7 +6774,7 @@ def _openclaw_usage_record(event, created_at=None, session_model=None):
     pricing_id = _exact_pricing_id(model)
     if cost <= 0 and pricing_id:
         price = _raw_price(pricing_id)
-        cost = (inp / 1e6 * price["in"] + (out + reason) / 1e6 * price["out"]
+        cost = (inp / 1e6 * price["in"] + out / 1e6 * price["out"]
                 + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
 
     return {"date": occurred_at.date().isoformat(), "hour": occurred_at.hour,
@@ -6779,7 +6786,7 @@ def _openclaw_add_record(days, record):
     day = days.setdefault(record["date"], _empty_token_day())
     _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                      record["reason"], record["cost"], record["model"])
-    day["hours"][record["hour"]] += token_total(record)
+    day["hours"][record["hour"]] += _openclaw_token_total(record)
 
 
 def _openclaw_event_key(event, raw_event):
@@ -6871,7 +6878,7 @@ def _scan_openclaw_jsonl(path):
 
 
 def _openclaw_session_score(copy, source):
-    token_count = sum(_ledger_token_sum(day) for day in copy.get("days", {}).values())
+    token_count = sum(_openclaw_token_total(day) for day in copy.get("days", {}).values())
     return token_count, int(copy.get("events", 0)), 1 if source == "sqlite" else 0
 
 
@@ -10204,7 +10211,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             continue
         d = days.setdefault(dk, _empty())
         d["openclaw"] += day.get("cost", 0)
-        _add_day_tokens(d, dk, "openclaw", token_total(day))
+        _add_day_tokens(d, dk, "openclaw", _openclaw_token_total(day))
         for mn, mv in day.get("models", {}).items():
             name = f"{nice_model(mn)} (OpenClaw)"
             model = models.setdefault(
@@ -10266,6 +10273,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             cost = day.get("cost")
             ledger_cost = (float(cost) if isinstance(cost, (int, float))
                            and not isinstance(cost, bool) else 0.0)
+            if tool == "openclaw":
+                ledger_tok = _openclaw_token_total(day)
             if ledger_tok <= 0 and ledger_cost <= 0:
                 continue
             d = days.setdefault(dk, _empty())
@@ -10313,6 +10322,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     def model_tokens(v):
         if v.get("tool") == "codex":
             return v["in"] + v.get("cr", 0) + v["out"]  # out 已含 reasoning
+        if v.get("tool") == "openclaw":
+            return _openclaw_token_total(v)
         return v["in"] + v["out"] + v.get("cr", 0) + v.get("cw", 0) + v.get("reason", 0)
 
     model_list = []
@@ -10508,18 +10519,18 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 name = f"{nice_model(model)} (Hermes)"
                 model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- OpenClaw (in + out + cr + cw + reason) ---
+    # --- OpenClaw (reasoning is a subset of output) ---
     for dk, day in cache.get("openclaw", {}).get("_selected_days", {}).items():
         if cutoff and dk < cutoff:
             continue
-        tok = token_total(day)
+        tok = _openclaw_token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
         day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         add_hours(dk, day.get("hours"))
         for model, usage in day.get("models", {}).items():
             name = f"{nice_model(model)} (OpenClaw)"
-            model_tok[name] = model_tok.get(name, 0) + token_total(usage)
+            model_tok[name] = model_tok.get(name, 0) + _openclaw_token_total(usage)
 
     # --- OpenCode (in + out + cr + cw + reason) ---
     for dk, day in _iter_cached_token_days(cache.get("opencode", {})):

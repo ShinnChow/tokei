@@ -110,7 +110,7 @@ class DashboardCacheTests(unittest.TestCase):
                   "models": {"gpt-5.5": {
                       "in": 1, "out": 2, "cr": 3, "cw": 4, "reason": 5, "cost": 2.5}}}
         openclaw = {"in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6,
-                    "cost": 3.5, "hours": [0, 0, 36] + [0] * 21,
+                    "cost": 3.5, "hours": [0, 0, 30] + [0] * 21,
                     "models": {"claude-sonnet-4.6": {
                         "in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6, "cost": 3.5}}}
         qoderwork = {"in": 19, "out": 11, "hours": [0, 0, 0, 0, 30] + [0] * 19}
@@ -134,16 +134,16 @@ class DashboardCacheTests(unittest.TestCase):
         wrapped = USAGE.build_wrapped("1d", refresh=False, _cache=cache)
 
         self.assertEqual(len(daily["daily"]), 1)
-        self.assertEqual(daily["daily"][0]["tokens"], 261)
-        self.assertEqual(sum(model["tokens"] for model in daily["models"]), 261)
+        self.assertEqual(daily["daily"][0]["tokens"], 255)
+        self.assertEqual(sum(model["tokens"] for model in daily["models"]), 255)
         self.assertEqual(
             next(model["tokens"] for model in daily["models"] if model["tool"] == "qoderwork"),
             30,
         )
         self.assertEqual(daily["daily"][0]["total"], 7.25)
-        self.assertEqual(wrapped["total_tokens"], 261)
+        self.assertEqual(wrapped["total_tokens"], 255)
         self.assertEqual(wrapped["total_cost"], 7.25)
-        self.assertEqual(sum(wrapped["hours"]), 261)
+        self.assertEqual(sum(wrapped["hours"]), 255)
 
     def test_account_provider_models_are_reported_without_double_counting_local_totals(self):
         today = date.today().isoformat()

@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import sqlite3
@@ -355,12 +356,12 @@ class OpenClawTaskTests(unittest.TestCase):
 
         self.assertEqual(result["ranges"]["today"]["in"], 9)
 
-    def test_pricing_fallback_treats_reasoning_as_separate_output(self):
+    def test_reasoning_tokens_are_output_subset_for_totals_hours_and_cost(self):
         now = datetime.now().astimezone().replace(microsecond=0)
         event = self.usage_event(
             "event-priced", now,
-            {"input": 10, "output": 20, "cacheRead": 30, "cacheWrite": 40,
-             "reasoningTokens": 5, "totalTokens": 105, "cost": {"total": 0}},
+            {"input": 10, "output": 20, "reasoningTokens": 5,
+             "totalTokens": 30, "cost": {"total": 0}},
             model="vendor/example-priced",
         )
         with mock.patch.dict(USAGE._PRICING_DB, {
@@ -370,8 +371,83 @@ class OpenClawTaskTests(unittest.TestCase):
         }):
             record = USAGE._openclaw_usage_record(event)
 
-        expected = (10 * 1.0 + (20 + 5) * 2.0 + 30 * 3.0 + 40 * 4.0) / 1_000_000
-        self.assertAlmostEqual(record["cost"], expected, places=12)
+        days = {}
+        USAGE._openclaw_add_record(days, record)
+        day = days[now.date().isoformat()]
+        cache = {"openclaw": {"_selected_days": days}}
+        with mock.patch.object(USAGE, "_load_ledger", return_value={"tools": {}}):
+            daily = USAGE.build_daily_costs(refresh=False, _cache=cache)
+        wrapped = USAGE.build_wrapped(refresh=False, _cache=cache)
+
+        expected_cost = (10 * 1.0 + 20 * 2.0) / 1_000_000
+        with self.subTest("reasoning detail remains available"):
+            self.assertEqual(record["reason"], 5)
+        with self.subTest("fallback output pricing does not add reasoning"):
+            self.assertAlmostEqual(record["cost"], expected_cost, places=12)
+        for label, actual in (
+                ("hour total", day["hours"][now.hour]),
+                ("daily total", daily["daily"][0]["tokens"]),
+                ("daily model total", daily["models"][0]["tokens"]),
+                ("wrapped total", wrapped["total_tokens"]),
+                ("wrapped model total", wrapped["top_model"]["tokens"])):
+            with self.subTest(label):
+                self.assertEqual(actual, 30)
+
+    def test_openclaw_state_dir_controls_defaults_and_relative_registry_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp)
+            home = fixture / "home"
+            cases = (
+                ("default", None, home / ".openclaw"),
+                ("absolute", str(fixture / "absolute-state"),
+                 fixture / "absolute-state"),
+                ("tilde", "~/tilde-state", home / "tilde-state"),
+            )
+            for name, configured, state_root in cases:
+                with self.subTest(name):
+                    registry_db = fixture / f"{name}-registry.sqlite"
+                    relative_agent_db = Path(
+                        "agents/example-agent/agent/openclaw-agent.sqlite")
+                    agent_db = state_root / relative_agent_db
+                    self.create_database(registry_db, 1_700_000_000_000, [],
+                                         with_tasks=False)
+                    self.add_agent_registry(registry_db, [str(relative_agent_db)])
+                    self.create_agent_database(agent_db, [])
+                    environment = {
+                        "HOME": str(home),
+                        "USERPROFILE": str(home),
+                        "TOKEI_OPENCLAW_DB": str(registry_db),
+                    }
+                    if configured is not None:
+                        environment["OPENCLAW_STATE_DIR"] = configured
+                    with mock.patch.dict(os.environ, environment, clear=True):
+                        spec = importlib.util.spec_from_file_location(
+                            f"tokei_usage_openclaw_{name}", USAGE.__file__)
+                        usage = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(usage)
+                        registry_ok, paths = usage._openclaw_agent_db_paths(sqlite3)
+
+                    self.assertEqual(
+                        (usage.OPENCLAW_STATE_DB, usage.OPENCLAW_DB,
+                         usage.OPENCLAW_AGENTS, registry_ok, paths),
+                        (str(state_root / "state" / "openclaw.sqlite"),
+                         str(state_root / "tasks" / "runs.sqlite"),
+                         str(state_root / "agents"), True, [str(agent_db.resolve())]),
+                    )
+
+    def test_openclaw_card_treats_reasoning_as_output_detail(self):
+        root = Path(__file__).resolve().parents[1]
+        panel = (root / "Tokei" / "Sources" / "Tokei" / "PanelView.swift").read_text()
+        start = panel.index("func openclawBlock(")
+        end = panel.index("// MARK:", start)
+        block = panel[start:end]
+
+        self.assertIn("r.in + r.out + r.cr + r.cw", block)
+        self.assertNotIn(
+            "CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason)",
+            block,
+        )
+        self.assertIn("reasonIncludedInOutput: true", block)
 
     def test_sqlite_and_jsonl_choose_one_copy_per_session(self):
         with tempfile.TemporaryDirectory() as tmp:

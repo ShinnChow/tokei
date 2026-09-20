@@ -1450,7 +1450,7 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions, toolID: "openclaw")
             if r.in + r.out + r.cr + r.cw + r.reason > 0 {
-                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: Theme.openclaw)
+                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.openclaw)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {
                     var items: [Metric] = [
@@ -1463,7 +1463,8 @@ struct PanelView: View {
                     return items
                 }(), tint: Theme.openclaw)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw,
+                                         reasonIncludedInOutput: true)
                 }
             } else if r.tasks > 0 {
                 HStack(spacing: 16) {
