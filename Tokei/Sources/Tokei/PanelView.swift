@@ -394,7 +394,7 @@ struct PanelView: View {
                          tint: Theme.gemini,
                          content: AnyView(geminiBlock(geminiRange, quota: u.antigravity))),
             ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor,
-                         active: u.cursor.available || cursorUsage.totalTokens > 0,
+                         active: cursorUsage.totalTokens > 0 || cursorUsage.requests > 0,
                          tint: Theme.cursor,
                          presentation: cursorUsage.totalTokens > 0 ? .standard : .compactStatus,
                          content: AnyView(providerQuotaBlock(

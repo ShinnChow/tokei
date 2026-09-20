@@ -5259,24 +5259,28 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
     if legacy:
         total_pct = _provider_percent(requests_used / requests_limit * 100)
         primary_detail = f"{int(requests_used)} / {int(requests_limit)} requests"
+        windows = [_provider_window(
+            "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
     else:
-        # plan.used 经常是套餐面额，不是已消耗；总额度左边按已用比例折算。
+        # $70 是 Other Models 池。plan.used 经常是套餐面额，按 apiPercentUsed 折算。
         spend = plan_used
         if plan_limit > 0 and abs(plan_used / plan_limit * 100 - total_pct) > 5:
-            spend = plan_limit * total_pct / 100.0
-        primary_detail = (
+            spend_pct = api_pct if api_pct is not None else total_pct
+            spend = plan_limit * spend_pct / 100.0
+        api_detail = (
             f"{_provider_money(spend / 100)} / {_provider_money(plan_limit / 100)}"
             if plan_limit > 0 else None)
-
-    windows = [_provider_window(
-        "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
-    if not legacy:
+        windows = []
         if auto_pct is not None:
             windows.append(_provider_window(
                 "cursor-auto", "Cursor 模型", auto_pct, cycle_end, window_minutes))
         if api_pct is not None:
             windows.append(_provider_window(
-                "cursor-api", "第三方模型", api_pct, cycle_end, window_minutes))
+                "cursor-api", "第三方模型", api_pct, cycle_end, window_minutes, api_detail))
+        elif api_detail:
+            windows.append(_provider_window(
+                "cursor-api", "第三方模型", None, cycle_end, window_minutes, api_detail,
+                usage_known=False))
     details = []
     if plan_limit > 0 and not legacy:
         details.append({
