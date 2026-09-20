@@ -458,6 +458,7 @@ final class SyncManager {
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
             mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
+            mergeRanges(&u.musecode.ranges, peer.usage.musecode.ranges, pairs)
         }
         return u
     }

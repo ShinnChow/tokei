@@ -26,6 +26,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
+| Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` | JSONL, `model_completed` 事件 `usage` + `model` |
 | Kimi Code(额度) | `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` → `api.kimi.com/coding/v1/usages` | 本机登录态只读查询，见 §5 |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
@@ -120,6 +121,19 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 仍递归展开主 wire 中的 `SubagentEvent`，且不扫描旧 `session/subagents`，避免重复。
 新格式提供权威 `model`，可展示模型明细；两种格式都不持久化实际成本，因此 Kimi Code
 卡片不展示推测的 API 成本。
+
+**Muse Code** — `model_completed` 事件字段独立，与 Codex 同口径:
+- 输入 = `usage.input_tokens - usage.cached_tokens`（`input_tokens` 已包含缓存）
+- 输出 = `usage.output_tokens`
+- 缓存读 = `usage.cached_tokens`（与 `cache_read_tokens` 一致）
+- 缓存写 = `usage.cache_write_tokens`
+- 推理 = `usage.reasoning_tokens`（视为输出子集展示）
+- 模型 = 事件自带 `model`（如 `muse-spark-1.3-contributor`），`same-as-main` 时回退到
+  同 run 的 `run.model.configured`；`muse-*` 按 `meta/muse-*` 查价格表估算成本
+
+只读取 `model_completed` 用量事件，按 `source_run_record_id` 去重；`goal_usage_attribution`
+是归因账本，不重复计入。项目取自 `runtime.session.metadata` 的 `workspace_root`，
+时刻取自记录的 `recorded_at`（微秒）。
 **Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
 - 输入 = `usage.input`
 - 输出 = `usage.output`

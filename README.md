@@ -52,6 +52,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
 | **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、配额（5h / 订阅周期） |
+| **Muse Code** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 
 ## 功能一览
 
@@ -211,6 +212,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl`；额度用本机登录态查 `api.kimi.com/coding/v1/usages` |
+| Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` |
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` |
@@ -383,7 +385,7 @@ Tokei is a **macOS menu bar app** that tracks usage, cost, and quotas across **2
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, QwenWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, Muse Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

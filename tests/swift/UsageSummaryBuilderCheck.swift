@@ -145,6 +145,13 @@ struct UsageSummaryBuilderCheck {
             try expect(hasImage, "pasteboard should contain image/png")
         }
 
+        // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
+        let gray = NSColor(Theme.tTertiary)
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
+            let tint = NSColor(UsageShareImage.tint(for: name))
+            try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
+        }
+
         print("usage summary builder checks passed")
     }
 
