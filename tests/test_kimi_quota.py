@@ -1,4 +1,5 @@
 """Kimi Code 官方额度:解析、缓存、以及"宁可说不知道也不谎报"的降级行为。"""
+import hashlib
 import json
 import os
 import tempfile
@@ -35,6 +36,23 @@ def sample(now=None, five_used="2", sub_used="90"):
     }
 
 
+def current_sample(now=None):
+    now = now or datetime.now(timezone.utc)
+    return {
+        "user": {"userId": "u-2", "membership": {"level": "LEVEL_ADVANCED"}},
+        "usages": {
+            "limit_5h": {
+                "used_ratio": 0.25,
+                "reset_time": iso(now + timedelta(hours=5)),
+            },
+            "limit_month_total": {
+                "used_ratio": 0.75,
+                "reset_time": iso(now + timedelta(days=30)),
+            },
+        },
+    }
+
+
 class KimiQuotaParseTests(unittest.TestCase):
     def test_parses_string_numbers_from_real_payload(self):
         limits = USAGE._kimi_live_to_limits(sample())
@@ -60,6 +78,19 @@ class KimiQuotaParseTests(unittest.TestCase):
 
     def test_payload_without_any_quota_returns_none(self):
         self.assertIsNone(USAGE._kimi_live_to_limits({"user": {}, "limits": []}))
+
+    def test_parses_current_ratio_pools(self):
+        limits = USAGE._kimi_live_to_limits(current_sample())
+        self.assertAlmostEqual(limits["five_hour"]["used_percent"], 25.0)
+        self.assertAlmostEqual(limits["subscription"]["used_percent"], 75.0)
+        self.assertEqual(limits["plan"], "LEVEL_ADVANCED")
+        self.assertEqual(limits["user_id"], "u-2")
+
+    def test_parses_limit_month_alias(self):
+        data = current_sample()
+        data["usages"]["limit_month"] = data["usages"].pop("limit_month_total")
+        limits = USAGE._kimi_live_to_limits(data)
+        self.assertAlmostEqual(limits["subscription"]["used_percent"], 75.0)
 
     def test_non_five_hour_windows_are_ignored(self):
         data = sample()
@@ -107,6 +138,7 @@ class KimiQuotaFetchTests(unittest.TestCase):
         self.home = tempfile.mkdtemp(prefix="kimi-quota-")
         self.cache = os.path.join(self.home, "kimi_quota_cache.json")
         self.creds_dir = os.path.join(self.home, "kimi", "credentials")
+        self.current_token = None
         os.makedirs(self.creds_dir, exist_ok=True)
         self.env = mock.patch.dict(
             os.environ, {"TOKEI_KIMI_DIR": os.path.join(self.home, "kimi")}, clear=False)
@@ -116,28 +148,35 @@ class KimiQuotaFetchTests(unittest.TestCase):
         self.cache_patch.start()
         self.addCleanup(self.cache_patch.stop)
 
-    def write_creds(self, expires_in_seconds):
+    def write_creds(self, expires_in_seconds, token=None):
+        self.current_token = token or "tok-" + str(expires_in_seconds)
         path = os.path.join(self.creds_dir, "kimi-code.json")
         with open(path, "w") as fh:
             json.dump({
-                "access_token": "tok-" + str(expires_in_seconds),
+                "access_token": self.current_token,
                 "refresh_token": "refresh-should-never-be-used",
                 "expires_at": int(datetime.now().timestamp()) + expires_in_seconds,
             }, fh)
 
-    def write_cache(self, age_seconds, used=42.0):
+    def write_cache(self, age_seconds, used=42.0, token=None, last_failure_at=None):
+        token = token or self.current_token
+        payload = {
+            "fetched_at": datetime.now().timestamp() - age_seconds,
+            "limits": {
+                "five_hour": {"used_percent": used,
+                              "resets_at": int(datetime.now().timestamp()) + 3600},
+                "subscription": {"used_percent": 90.0,
+                                 "resets_at": int(datetime.now().timestamp()) + 86400},
+            },
+            "plan": "LEVEL_INTERMEDIATE",
+            "user_id": "u-1",
+        }
+        if token:
+            payload["auth_key"] = hashlib.sha256(token.encode()).hexdigest()
+        if last_failure_at is not None:
+            payload["last_failure_at"] = last_failure_at
         with open(self.cache, "w") as fh:
-            json.dump({
-                "fetched_at": datetime.now().timestamp() - age_seconds,
-                "limits": {
-                    "five_hour": {"used_percent": used,
-                                  "resets_at": int(datetime.now().timestamp()) + 3600},
-                    "subscription": {"used_percent": 90.0,
-                                     "resets_at": int(datetime.now().timestamp()) + 86400},
-                },
-                "plan": "LEVEL_INTERMEDIATE",
-                "user_id": "u-1",
-            }, fh)
+            json.dump(payload, fh)
 
     def test_expired_token_never_hits_the_network(self):
         """CLI 的登录态很短命。过期后发请求必然 401,更重要的是不能代刷 refresh_token。"""
@@ -155,13 +194,66 @@ class KimiQuotaFetchTests(unittest.TestCase):
         self.assertTrue(auth["expired"])
         self.assertNotIn("refresh_token", auth)
 
-    def test_fresh_cache_short_circuits_before_reading_credentials(self):
+    def test_fresh_matching_cache_short_circuits_network(self):
+        self.write_creds(expires_in_seconds=1800)
         self.write_cache(age_seconds=1)
         with mock.patch("urllib.request.urlopen") as opener:
             limits, plan, _ = USAGE.fetch_kimi_live_limits()
         opener.assert_not_called()
         self.assertEqual(plan, "LEVEL_INTERMEDIATE")
         self.assertAlmostEqual(limits["five_hour"]["used_percent"], 42.0)
+
+    def test_account_switch_never_returns_or_relabels_previous_cache(self):
+        self.write_creds(expires_in_seconds=1800, token="token-a")
+        self.write_cache(age_seconds=1, used=73.0)
+        self.write_creds(expires_in_seconds=1800, token="token-b")
+
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")) as opener:
+            result = USAGE.fetch_kimi_live_limits()
+
+        opener.assert_called_once()
+        self.assertIsNone(result)
+        with open(self.cache) as fh:
+            saved = json.load(fh)
+        self.assertNotIn("limits", saved)
+        self.assertEqual(
+            saved["auth_key"], hashlib.sha256(b"token-b").hexdigest())
+        serialized = json.dumps(saved)
+        self.assertNotIn("token-a", serialized)
+        self.assertNotIn("token-b", serialized)
+
+    def test_expired_token_cannot_fall_back_to_another_accounts_cache(self):
+        self.write_creds(expires_in_seconds=1800, token="token-a")
+        self.write_cache(age_seconds=USAGE._KIMI_QUOTA_TTL + 10, used=73.0)
+        self.write_creds(expires_in_seconds=-60, token="token-b")
+
+        with mock.patch("urllib.request.urlopen") as opener:
+            result = USAGE.fetch_kimi_live_limits()
+
+        opener.assert_not_called()
+        self.assertIsNone(result)
+
+    def test_another_accounts_backoff_does_not_suppress_live_fetch(self):
+        self.write_creds(expires_in_seconds=1800, token="token-a")
+        self.write_cache(
+            age_seconds=USAGE._KIMI_QUOTA_TTL + 10,
+            token="token-a",
+            last_failure_at=datetime.now().timestamp(),
+        )
+        self.write_creds(expires_in_seconds=1800, token="token-b")
+        payload = json.dumps(current_sample()).encode()
+
+        class Res:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *a): return False
+            def geturl(self_inner): return USAGE._KIMI_USAGE_URL
+            def read(self_inner, *a): return payload
+
+        with mock.patch("urllib.request.urlopen", return_value=Res()) as opener:
+            limits, _, _ = USAGE.fetch_kimi_live_limits()
+
+        opener.assert_called_once()
+        self.assertAlmostEqual(limits["five_hour"]["used_percent"], 25.0)
 
     def test_live_fetch_writes_cache(self):
         self.write_creds(expires_in_seconds=1800)
@@ -181,6 +273,41 @@ class KimiQuotaFetchTests(unittest.TestCase):
             saved = json.load(fh)
         self.assertEqual(saved["user_id"], "u-1")
         self.assertEqual(saved["source"], "live")
+        self.assertEqual(
+            saved["auth_key"],
+            hashlib.sha256(self.current_token.encode()).hexdigest(),
+        )
+        self.assertNotIn(self.current_token, json.dumps(saved))
+
+    def test_configured_base_url_controls_usage_endpoint_and_redirect_host(self):
+        self.write_creds(expires_in_seconds=1800)
+        expected = "https://api.kimi.ai/coding/v1/usages"
+        payload = json.dumps(current_sample()).encode()
+
+        class Res:
+            def __enter__(self_inner): return self_inner
+            def __exit__(self_inner, *a): return False
+            def geturl(self_inner): return expected
+            def read(self_inner, *a): return payload
+
+        with mock.patch.dict(os.environ, {
+            "KIMI_CODE_BASE_URL": "https://api.kimi.ai/coding/v1/",
+        }):
+            with mock.patch("urllib.request.urlopen", return_value=Res()) as opener:
+                limits, _, _ = USAGE.fetch_kimi_live_limits()
+
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, expected)
+        self.assertAlmostEqual(limits["five_hour"]["used_percent"], 25.0)
+
+    def test_malformed_configured_base_url_is_rejected_without_network(self):
+        self.write_creds(expires_in_seconds=1800)
+        with mock.patch.dict(os.environ, {
+            "KIMI_CODE_BASE_URL": "https://api.kimi.ai:not-a-port/coding/v1",
+        }):
+            with mock.patch("urllib.request.urlopen") as opener:
+                self.assertIsNone(USAGE.fetch_kimi_live_limits())
+        opener.assert_not_called()
 
     def test_redirect_off_host_is_rejected(self):
         self.write_creds(expires_in_seconds=1800)
@@ -214,6 +341,31 @@ class KimiQuotaFetchTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen") as opener:
             self.assertIsNone(USAGE.fetch_kimi_live_limits())
         opener.assert_not_called()
+
+
+class KimiQuotaSyncTests(unittest.TestCase):
+    def test_sync_snapshot_keeps_usage_but_strips_account_quota(self):
+        payload = {
+            "kimicode": {
+                "ranges": {"today": {"in": 12}},
+                "p5": 25.0,
+                "pw": 75.0,
+                "r5": 100,
+                "rw": 200,
+                "q_updated": 300,
+                "p5_stale": False,
+                "pw_stale": False,
+                "plan": "LEVEL_ADVANCED",
+            },
+            "claude": {"ranges": {}},
+        }
+
+        snapshot = USAGE._sync_safe_usage_payload(payload)
+
+        self.assertEqual(snapshot["kimicode"], {
+            "ranges": {"today": {"in": 12}},
+        })
+        self.assertEqual(payload["kimicode"]["plan"], "LEVEL_ADVANCED")
 
 
 if __name__ == "__main__":

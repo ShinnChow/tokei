@@ -9268,8 +9268,8 @@ KIMI_QUOTA_CACHE = _writable_path("kimi_quota_cache.json")
 _KIMI_QUOTA_TTL = 300
 _KIMI_QUOTA_FALLBACK_TTL = 300
 _KIMI_QUOTA_STALE_AFTER = 1800
-_KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
-_KIMI_USAGE_HOST = "api.kimi.com"
+_KIMI_CODE_DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1"
+_KIMI_USAGE_URL = _KIMI_CODE_DEFAULT_BASE_URL + "/usages"
 _KIMI_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _KIMI_FIVE_HOUR_MINUTES = 300
 _KIMI_TIME_UNITS = {
@@ -9350,28 +9350,70 @@ def _kimi_slot(detail):
     if limit is None or limit <= 0 or used is None:
         return None
     slot = {"used_percent": max(0.0, min(100.0, 100.0 * used / limit))}
-    reset = _iso_to_epoch(detail.get("resetTime"))
+    reset = _iso_to_epoch(detail.get("resetTime") or detail.get("reset_time")
+                          or detail.get("resetAt") or detail.get("reset_at"))
     if reset is not None:
         slot["resets_at"] = reset
     return slot
 
 
-def _kimi_live_to_limits(data):
-    """limits[] 里 300 分钟那条是 5h 滚动窗口;顶层 usage 是订阅周期额度。
+def _kimi_ratio_slot(detail):
+    if not isinstance(detail, dict):
+        return None
+    ratio = _kimi_amount(detail.get("used_ratio"))
+    if ratio is None or not math.isfinite(ratio) or ratio < 0:
+        return None
+    slot = {"used_percent": min(1.0, ratio) * 100.0}
+    reset = _iso_to_epoch(detail.get("reset_time") or detail.get("resetTime"))
+    if reset is not None:
+        slot["resets_at"] = reset
+    return slot
 
-    顶层 usage 不带 window,接口没说周期是周还是月,所以只透传它给的 resetTime,
-    界面也只说"订阅额度",不替接口编一个周期名。
-    """
+
+def _kimi_usage_target():
+    from urllib.parse import urlparse, urlunparse
+    raw = os.environ.get("KIMI_CODE_BASE_URL", _KIMI_CODE_DEFAULT_BASE_URL).strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username \
+            or parsed.password or parsed.query or parsed.fragment:
+        return None
+    path = parsed.path.rstrip("/")
+    if path.endswith("/usages"):
+        usage_path = path
+    elif path.endswith("/coding/v1"):
+        usage_path = path + "/usages"
+    elif path.endswith("/coding"):
+        usage_path = path + "/v1/usages"
+    else:
+        usage_path = path + "/coding/v1/usages"
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    url = urlunparse(("https", parsed.netloc, usage_path, "", "", ""))
+    return url, parsed.hostname.lower(), port
+
+
+def _kimi_live_to_limits(data):
+    """Normalize current ratio pools and the legacy limit/detail response."""
     if not isinstance(data, dict):
         return None
-    five_hour = None
-    for item in data.get("limits") or []:
-        if not isinstance(item, dict):
-            continue
-        if _kimi_window_minutes(item.get("window")) == _KIMI_FIVE_HOUR_MINUTES:
-            five_hour = _kimi_slot(item.get("detail"))
-            break
-    subscription = _kimi_slot(data.get("usage"))
+    pools = data.get("usages") if isinstance(data.get("usages"), dict) else {}
+    five_hour = _kimi_ratio_slot(pools.get("limit_5h"))
+    subscription = next((slot for slot in (
+        _kimi_ratio_slot(pools.get("limit_month_total")),
+        _kimi_ratio_slot(pools.get("limit_month")),
+        _kimi_ratio_slot(pools.get("limit_7d")),
+    ) if slot), None)
+    if not five_hour:
+        for item in data.get("limits") or []:
+            if not isinstance(item, dict):
+                continue
+            if _kimi_window_minutes(item.get("window")) == _KIMI_FIVE_HOUR_MINUTES:
+                five_hour = _kimi_slot(item.get("detail"))
+                break
+    if not subscription:
+        subscription = _kimi_slot(data.get("usage"))
     if not five_hour and not subscription:
         return None
     user = data.get("user") if isinstance(data.get("user"), dict) else {}
@@ -9398,8 +9440,10 @@ def _kimi_limits_have_active_window(limits, now_epoch=None):
     return False
 
 
-def _cached_kimi_live_limits(max_age, allow_active_window=False):
+def _cached_kimi_live_limits(max_age, auth_key, allow_active_window=False):
     cached = _load_json(KIMI_QUOTA_CACHE, {})
+    if not auth_key or cached.get("auth_key") != auth_key:
+        return None
     fetched_at = cached.get("fetched_at")
     limits = cached.get("limits")
     if not fetched_at or not limits:
@@ -9418,22 +9462,25 @@ def _cached_kimi_live_limits(max_age, allow_active_window=False):
 def fetch_kimi_live_limits():
     if os.environ.get("TOKEI_KIMI_LIVE_QUOTA") == "0":
         return None
-    cached = _cached_kimi_live_limits(_KIMI_QUOTA_TTL)
-    if cached:
-        return cached
+    target = _kimi_usage_target()
+    if not target:
+        return None
+    usage_url, expected_host, expected_port = target
     auth = _kimi_auth_context()
     token = auth.get("access_token")
     if not token:
         return None
     auth_key = auth.get("auth_key")
+    cached = _cached_kimi_live_limits(_KIMI_QUOTA_TTL, auth_key)
+    if cached:
+        return cached
     if auth.get("expired"):
-        # CLI 还没来得及刷新。发出去必然 401,不如省掉这次请求,让 stale 说明读数已旧。
         return _cached_kimi_live_limits(
-            _KIMI_QUOTA_FALLBACK_TTL, allow_active_window=True)
+            _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
     cache_state = _load_json(KIMI_QUOTA_CACHE, {})
+    if cache_state.get("auth_key") != auth_key:
+        cache_state = {"auth_key": auth_key}
     last_failure = cache_state.get("last_failure_at", 0)
-    if cache_state.get("auth_key") not in (None, auth_key):
-        last_failure = 0
     try:
         failure_is_recent = (
             bool(last_failure)
@@ -9442,17 +9489,19 @@ def fetch_kimi_live_limits():
         failure_is_recent = False
     if failure_is_recent:
         return _cached_kimi_live_limits(
-            _KIMI_QUOTA_FALLBACK_TTL, allow_active_window=True)
+            _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
     try:
         import urllib.request
         from urllib.parse import urlparse
-        req = urllib.request.Request(_KIMI_USAGE_URL)
+        req = urllib.request.Request(usage_url)
         req.add_header("Accept", "application/json")
         req.add_header("User-Agent", "Tokei")
         req.add_unredirected_header("Authorization", "Bearer " + token)
         with urllib.request.urlopen(req, timeout=3) as res:
             final_url = urlparse(res.geturl())
-            if final_url.scheme != "https" or final_url.hostname != _KIMI_USAGE_HOST:
+            final_port = final_url.port or 443
+            if final_url.scheme != "https" or final_url.hostname != expected_host \
+                    or final_port != (expected_port or 443):
                 raise ValueError("unexpected Kimi usage redirect")
             raw = res.read(_KIMI_USAGE_MAX_RESPONSE_BYTES + 1)
         if len(raw) > _KIMI_USAGE_MAX_RESPONSE_BYTES:
@@ -9474,17 +9523,14 @@ def fetch_kimi_live_limits():
     except Exception:
         try:
             state = _load_json(KIMI_QUOTA_CACHE, {})
-            if state.get("limits") and state.get("user_id") \
-                    and cache_state.get("user_id") \
-                    and state.get("user_id") != cache_state.get("user_id"):
-                state = {}
+            if state.get("auth_key") != auth_key:
+                state = {"auth_key": auth_key}
             state["last_failure_at"] = datetime.now().timestamp()
-            state["auth_key"] = auth_key
             _atomic_write_json(KIMI_QUOTA_CACHE, state)
         except Exception:
             pass
     return _cached_kimi_live_limits(
-        _KIMI_QUOTA_FALLBACK_TTL, allow_active_window=True)
+        _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
 
 
 def _kimi_quota_values(limits, now_epoch=None, updated_at=None):
@@ -10587,6 +10633,13 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    kimi = snapshot.get("kimicode")
+    if isinstance(kimi, dict):
+        kimi = dict(kimi)
+        for key in ("p5", "pw", "r5", "rw", "q_updated",
+                    "p5_stale", "pw_stale", "plan"):
+            kimi.pop(key, None)
+        snapshot["kimicode"] = kimi
     # Grok Bot has no account label in its normalized output. Its official
     # aggregate stays in the snapshot so peers can adopt the freshest copy;
     # SyncManager replaces this quota instead of adding account totals.
