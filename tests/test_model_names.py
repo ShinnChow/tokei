@@ -51,6 +51,14 @@ class ModelNameTests(unittest.TestCase):
         finally:
             USAGE._PRICING_DB = old_pricing
 
+    def test_gateway_prefixed_muse_models_resolve_to_meta_pricing(self):
+        self.assertEqual(USAGE._normalize("muse-spark-1.3-contributor"),
+                         "meta/muse-spark-1.3-contributor")
+        self.assertEqual(USAGE._normalize("vercel/meta/muse-spark-1.3-contributor"),
+                         "meta/muse-spark-1.3-contributor")
+        self.assertEqual(USAGE._pricing_id("vercel/meta/muse-spark-1.3-contributor"),
+                         "meta/muse-spark-1.3-contributor")
+
     def test_unknown_model_identity_is_preserved(self):
         old_pricing = USAGE._PRICING_DB
         old_override_models = USAGE._OV_MODELS

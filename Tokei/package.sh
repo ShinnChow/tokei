@@ -17,6 +17,13 @@ if [[ ! "$BUILD_DATE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
     exit 1
 fi
 
+# 本地验证时显式设置 TOKEI_LOCAL_BUILD=1，避免更新到尚未包含本地修复的线上包。
+case "${TOKEI_LOCAL_BUILD:-0}" in
+    0) LOCAL_BUILD=false ;;
+    1) LOCAL_BUILD=true ;;
+    *) echo "TOKEI_LOCAL_BUILD 必须是 0 或 1" >&2; exit 1 ;;
+esac
+
 # Command Line Tools 27 的 SwiftUI SDK 会引用 SwiftUIMacros.StateMacro，
 # 但部分 CLT 安装并未包含对应插件。此时使用同一工具链自带的 26.x SDK。
 if [[ -z "${SDKROOT:-}" ]]; then
@@ -74,6 +81,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>TokeiBuildDate</key><string>${BUILD_DATE}</string>
+    <key>TokeiLocalBuild</key><${LOCAL_BUILD}/>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>Tokei</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>

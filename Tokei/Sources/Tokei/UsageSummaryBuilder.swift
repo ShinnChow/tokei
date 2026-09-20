@@ -23,6 +23,7 @@ struct UsageToolVisibility: Equatable {
     var opencode = true
     var qwencode = true
     var kimicode = true
+    var musecode = true
 
     static let allVisible = UsageToolVisibility()
 }
@@ -277,10 +278,11 @@ enum UsageSummaryBuilder {
             let r = usage.openclaw.ranges.get(range)
             let line = Line(
                 id: "openclaw", name: "OpenClaw", cost: r.cost,
-                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions,
+                tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions,
                 calls: r.tasks > 0 ? r.tasks : nil,
                 input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil, extra: nil
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -318,6 +320,10 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "kimicode", name: "Kimi Code",
                             range: usage.kimicode.ranges.get(range), includesCost: false)
         }
+        if visibility.musecode {
+            appendTokenTool(&lines, id: "musecode", name: "Muse Code",
+                            range: usage.musecode.ranges.get(range), reasonIncludedInOutput: true)
+        }
         return lines
     }
 
@@ -333,13 +339,15 @@ enum UsageSummaryBuilder {
 
     private static func appendTokenTool(
         _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange,
-        includesCost: Bool = true, includesCredits: Bool = false
+        includesCost: Bool = true, includesCredits: Bool = false,
+        reasonIncludedInOutput: Bool = false
     ) {
+        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
         let extra = includesCredits && r.credits > 0
             ? "\(Fmt.credits(r.credits)) Credits" : nil
         let line = Line(
             id: id, name: name, cost: includesCost ? r.cost : nil,
-            tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+            tokens: total, sessions: r.sessions, calls: nil,
             input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
             reason: r.reason > 0 ? r.reason : nil,
             hit: r.hit > 0 ? r.hit : nil, extra: extra

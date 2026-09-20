@@ -26,6 +26,8 @@
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 #   Kimi Code:   ${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl
 #                兼容旧版 ${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl
+#   Muse Code:   ${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl
+#                (model_completed 事件 usage,自带模型名；无持久化成本，按价格表估算)
 
 import os
 import sys
@@ -154,9 +156,11 @@ ZCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get(
     "TOKEI_ZCODE_DB", os.path.join(HOME, ".zcode", "cli", "db", "db.sqlite"))))
 MIMOCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get("TOKEI_MIMOCODE_DB", ""))) \
     if os.environ.get("TOKEI_MIMOCODE_DB") else ""
-OPENCLAW_DB = os.path.join(HOME, ".openclaw", "tasks", "runs.sqlite")
-OPENCLAW_STATE_DB = os.path.join(HOME, ".openclaw", "state", "openclaw.sqlite")
-OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
+OPENCLAW_STATE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("OPENCLAW_STATE_DIR", os.path.join(HOME, ".openclaw"))))
+OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
+OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
+OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
 PRIME_AGENT_DIR = os.path.expanduser(os.environ.get(
@@ -177,6 +181,9 @@ _KIMI_CODE_LEGACY_DIR = os.path.join(HOME, ".kimi")
 KIMI_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
     or os.environ.get("KIMI_SHARE_DIR") or _KIMI_CODE_DEFAULT_DIR))
+_MUSE_DEFAULT_DIR = os.path.join(HOME, ".local", "share", "muse")
+MUSE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("TOKEI_MUSE_DIR") or _MUSE_DEFAULT_DIR))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -399,6 +406,9 @@ def _normalize(model: str):
         return None
     m = re.sub(r"\s+", "-", m)
     m = re.sub(r"[:\-]free$", "", m)                  # 免费档按基础价
+    seg = m.rsplit("/", 1)[-1]
+    if seg.startswith("muse-"):
+        return "meta/" + seg                         # 网关前缀(如 vercel/meta/)剥离
     if "/" in m:
         return m                                      # 已是 OpenRouter 格式
     if m.startswith("claude"):
@@ -416,6 +426,8 @@ def _normalize(model: str):
         return "deepseek/" + m
     if m.startswith("glm"):
         return "z-ai/" + m
+    if m.startswith("muse-"):
+        return "meta/" + m
     if m.startswith("mimo"):
         return "xiaomi/" + m
     if m == "hy3":
@@ -716,7 +728,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 3
+_CODEX_PARSER_VERSION = 4  # v4: 网关前缀模型(如 vercel/meta/muse-*)正确计价后强制重扫
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
@@ -917,8 +929,8 @@ def ledger_flush():
             for dk, day in days.items():
                 kept = stored.get(dk)
                 if (kept is None
-                        or _ledger_cost_version(day) > _ledger_cost_version(kept)
-                        or (_ledger_cost_version(day) == _ledger_cost_version(kept)
+                        or _ledger_record_version(day) > _ledger_record_version(kept)
+                        or (_ledger_record_version(day) == _ledger_record_version(kept)
                             and _ledger_day_total(day) > _ledger_day_total(kept))):
                     stored[dk] = day
         _save_ledger(fresh)
@@ -959,8 +971,17 @@ def _ledger_day_total(day):
                and k != "cost" and not k.startswith("_"))
 
 
-def _ledger_cost_version(day):
-    value = day.get("_cost_version", 0) if isinstance(day, dict) else 0
+def _ledger_record_version(day):
+    """Return the schema version for a persisted daily record.
+
+    ``_cost_version`` is retained for existing collectors.  New parsers can use
+    the broader ``_ledger_version`` when a deduplication or token-accounting
+    change must replace an older high-water value, even when the new total is
+    lower.
+    """
+    if not isinstance(day, dict):
+        return 0
+    value = day.get("_ledger_version", day.get("_cost_version", 0))
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
@@ -971,9 +992,11 @@ def _ledger_cost_version(day):
 _LEDGER_TOKEN_FIELDS = ("in", "out", "cr", "cw", "reason", "thoughts")
 
 
-def _ledger_token_sum(day):
+def _ledger_token_sum(day, tool=None):
+    fields = ("in", "out", "cr", "cw") \
+        if tool in ("openclaw", "musecode") else _LEDGER_TOKEN_FIELDS
     tok = 0
-    for field in _LEDGER_TOKEN_FIELDS:
+    for field in fields:
         value = day.get(field)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             tok += int(value)
@@ -997,8 +1020,8 @@ def ledger_reconcile(tool, live_days):
     max_day = (date.today() + timedelta(days=1)).isoformat()
     for dk, live in live_days.items():
         kept = stored.get(dk)
-        kept_version = _ledger_cost_version(kept)
-        live_version = _ledger_cost_version(live)
+        kept_version = _ledger_record_version(kept)
+        live_version = _ledger_record_version(live)
         if (kept and kept_version > live_version
                 or (kept and kept_version == live_version
                     and _ledger_day_total(kept) > _ledger_day_total(live))):
@@ -1122,7 +1145,7 @@ def _empty_hermes():
 
 def _empty_openclaw():
     ranges = {k: {"tasks": 0, "completed": 0, "failed": 0,
-                  "in": 0, "out": 0, "cr": 0, "cw": 0,
+                  "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
                   "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
     return {"ranges": ranges}
 
@@ -1173,6 +1196,10 @@ def _empty_qwencode():
 
 
 def _empty_kimicode():
+    return _empty_opencode()
+
+
+def _empty_musecode():
     return _empty_opencode()
 
 
@@ -5695,7 +5722,8 @@ def _zed_plan_name(raw):
     names = {
         "zed_free": "Zed Free", "zed_pro": "Zed Pro",
         "zed_pro_trial": "Zed Pro Trial", "zed_student": "Zed Student",
-        "zed_business": "Zed Business",
+        "zed_business": "Zed Business", "student": "Student",
+        "vip": "VIP", "zed_vip": "Zed VIP",
     }
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -5743,9 +5771,37 @@ def _normalize_zed_quota(payload, updated=None):
     details = []
     if isinstance(user.get("name"), str) and user["name"].strip():
         details.append({"label": "账号", "value": user["name"].strip()})
+    organization_plans = payload.get("plans_by_organization")
+    organization_plans = organization_plans if isinstance(organization_plans, dict) else {}
+    default_organization_id = payload.get("default_organization_id")
+    default_organization_id = str(default_organization_id) \
+        if isinstance(default_organization_id, (str, int)) \
+        and not isinstance(default_organization_id, bool) else None
+    plan_names = []
+    for organization in payload.get("organizations", []):
+        if not isinstance(organization, dict):
+            continue
+        organization_id = organization.get("id")
+        organization_id = str(organization_id) \
+            if isinstance(organization_id, (str, int)) \
+            and not isinstance(organization_id, bool) else None
+        name = organization.get("name")
+        name = name.strip() if isinstance(name, str) and name.strip() else None
+        if not organization_id or not name:
+            continue
+        plan_name = _zed_plan_name(organization_plans.get(organization_id))
+        if not plan_name:
+            continue
+        if plan_name not in plan_names:
+            plan_names.append(plan_name)
+        detail = {"label": name, "value": plan_name}
+        if organization_id == default_organization_id:
+            detail["secondary"] = "当前组织"
+        details.append(detail)
+    displayed_plan = " + ".join(plan_names) if plan_names else _zed_plan_name(plan.get("plan_v3"))
     return {
-        "available": bool(windows or plan),
-        "plan": _zed_plan_name(plan.get("plan_v3")),
+        "available": bool(windows or plan or plan_names),
+        "plan": displayed_plan,
         "account": user.get("github_login"),
         "windows": windows,
         "details": details,
@@ -5768,7 +5824,11 @@ def fetch_zed_quota():
         return cached
     try:
         payload = _provider_json_request(
-            connection["api_url"], headers={"Authorization": f"{user_id} {token}"})
+            connection["api_url"], headers={
+                "Authorization": f"{user_id} {token}",
+                # Zed Cloud rejects urllib's default Python-urllib/... user agent.
+                "User-Agent": "Tokei/1.0",
+            })
         quota = _normalize_zed_quota(payload)
         _save_provider_quota_cache("zed", marker, quota)
         return quota
@@ -6335,44 +6395,58 @@ def _antigravity_remaining(value):
     return max(0.0, min(1.0, number)) if number is not None else None
 
 
+_ANTIGRAVITY_QUOTA_WINDOWS = (
+    ("gemini-weekly", "Gemini 周", 10080),
+    ("gemini-5h", "Gemini 5h", 300),
+    ("3p-weekly", "Claude/GPT 周", 10080),
+    ("3p-5h", "Claude/GPT 5h", 300),
+)
+
+
 def _normalize_antigravity_quota_summary(payload, updated=None):
     root = payload.get("response") if isinstance(payload, dict) \
         and isinstance(payload.get("response"), dict) else payload
     groups = root.get("groups") if isinstance(root, dict) and isinstance(root.get("groups"), list) else []
-    windows = []
-    for group_index, group in enumerate(groups):
+    buckets = {}
+    for group in groups:
         if not isinstance(group, dict):
             continue
-        display = str(group.get("displayName") or f"Group {group_index + 1}")
-        lower_group = display.lower()
-        if "gemini" in lower_group:
-            family, family_order = "Gemini", 0
-        elif "claude" in lower_group or "gpt" in lower_group or "third" in lower_group:
-            family, family_order = "Claude/GPT", 1
+        display = str(group.get("displayName") or "").lower()
+        if "gemini" in display:
+            family = "gemini"
+        elif any(name in display for name in ("claude", "gpt", "third")):
+            family = "3p"
         else:
-            family, family_order = display, 2 + group_index
-        for bucket_index, bucket in enumerate(group.get("buckets") or []):
+            continue
+        for bucket in group.get("buckets") or []:
             if not isinstance(bucket, dict) or bucket.get("disabled") is True:
                 continue
-            bucket_id = str(bucket.get("bucketId") or f"bucket-{bucket_index}")
-            cadence = (bucket_id + " " + str(bucket.get("displayName") or "")).lower()
-            normalized = cadence.replace("_", "-")
-            if any(marker in normalized for marker in ("5h", "5-hour", "five hour",
-                                                        "five-hour", "session")):
-                cadence_title, minutes, cadence_order = "5h", 300, 0
-            elif any(marker in normalized for marker in ("weekly", "week", "7d")):
-                cadence_title, minutes, cadence_order = "周", 10080, 1
+            cadence = " ".join(str(bucket.get(key) or "") for key in
+                               ("window", "bucketId", "displayName")).lower().replace("_", "-")
+            if any(marker in cadence for marker in ("weekly", "week", "7d")):
+                cadence_id = "weekly"
+            elif any(marker in cadence for marker in ("5h", "5-hour", "five hour",
+                                                       "five-hour", "session")):
+                cadence_id = "5h"
             else:
-                cadence_title, minutes, cadence_order = str(
-                    bucket.get("displayName") or bucket_id), None, 2
-            remaining = _antigravity_remaining(bucket.get("remaining"))
-            windows.append((family_order, cadence_order, bucket_index, _provider_window(
-                "antigravity-" + bucket_id, f"{family} {cadence_title}",
+                continue
+            buckets.setdefault(f"{family}-{cadence_id}", bucket)
+    rows = []
+    # Match the official shared quota groups, never individual model variants.
+    # Missing windows stay unknown; a model quota cannot stand in for a week.
+    if buckets:
+        for bucket_id, title, minutes in _ANTIGRAVITY_QUOTA_WINDOWS:
+            bucket = buckets.get(bucket_id, {})
+            # Connect JSON flattens the oneof; older clients wrap `remaining`.
+            remaining = _antigravity_remaining(bucket)
+            if remaining is None:
+                remaining = _antigravity_remaining(bucket.get("remaining"))
+            rows.append(_provider_window(
+                "antigravity-" + bucket_id, title,
                 (1 - remaining) * 100 if remaining is not None else None,
-                bucket.get("resetTime"), minutes, bucket.get("description"),
-                usage_known=remaining is not None)))
-    windows.sort(key=lambda item: item[:3])
-    rows = [item[3] for item in windows]
+                bucket.get("resetTime"), minutes,
+                "暂时无法读取" if remaining is None else None,
+                usage_known=remaining is not None))
     return {
         "available": bool(rows),
         "plan": None, "account": None, "windows": rows, "details": [],
@@ -6382,31 +6456,10 @@ def _normalize_antigravity_quota_summary(payload, updated=None):
     }
 
 
-def _normalize_antigravity_user_status(payload, updated=None):
+def _antigravity_user_identity(payload):
     if not isinstance(payload, dict):
         return {}
     status = payload.get("userStatus") if isinstance(payload.get("userStatus"), dict) else payload
-    config_data = status.get("cascadeModelConfigData") if isinstance(
-        status.get("cascadeModelConfigData"), dict) else {}
-    configs = config_data.get("clientModelConfigs")
-    if not isinstance(configs, list):
-        configs = payload.get("clientModelConfigs") if isinstance(
-            payload.get("clientModelConfigs"), list) else []
-    windows = []
-    for index, config in enumerate(configs):
-        if not isinstance(config, dict) or not isinstance(config.get("quotaInfo"), dict):
-            continue
-        info = config["quotaInfo"]
-        remaining = _provider_number(info.get("remainingFraction"))
-        if remaining is None:
-            continue
-        label = config.get("label")
-        model = config.get("modelOrAlias") if isinstance(config.get("modelOrAlias"), dict) else {}
-        model_id = model.get("model") or f"model-{index}"
-        windows.append(_provider_window(
-            "antigravity-model-" + str(model_id), str(label or model_id),
-            (1 - max(0, min(1, remaining))) * 100, info.get("resetTime")))
-    windows.sort(key=lambda row: (-(row.get("used_pct") or 0), row["title"]))
     tier = status.get("userTier") if isinstance(status.get("userTier"), dict) else {}
     plan_status = status.get("planStatus") if isinstance(status.get("planStatus"), dict) else {}
     plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
@@ -6415,19 +6468,13 @@ def _normalize_antigravity_user_status(payload, updated=None):
         plan_info.get("displayName"), plan_info.get("productName"),
         plan_info.get("planShortName")) if isinstance(value, str) and value.strip()), None)
     account = status.get("email") if isinstance(status.get("email"), str) else None
-    return {
-        "available": bool(windows), "plan": plan, "account": account,
-        "windows": windows[:12], "details": [], "source": "antigravity-local",
-        "updated": int(updated if updated is not None else datetime.now().timestamp()),
-        "stale": False,
-    }
+    return {"plan": plan, "account": account}
 
 
 def fetch_antigravity_quota():
     paths = {
         "summary": "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
         "status": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
-        "models": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
     }
     metadata = {"metadata": {
         "ideName": "antigravity", "extensionName": "antigravity",
@@ -6439,7 +6486,8 @@ def fetch_antigravity_quota():
         if not endpoints:
             continue
         marker = _provider_credential_marker(
-            "antigravity", process.get("pid"), process.get("csrf_token"), endpoints)
+            "antigravity", "quota-summary-v3", process.get("pid"),
+            process.get("csrf_token"), endpoints)
         cached = _cached_provider_quota("antigravity", marker, _PROVIDER_QUOTA_TTL)
         if cached:
             return cached
@@ -6451,7 +6499,7 @@ def fetch_antigravity_quota():
                 if quota.get("available"):
                     try:
                         identity_payload = _antigravity_request(endpoint, paths["status"], metadata)
-                        identity = _normalize_antigravity_user_status(identity_payload)
+                        identity = _antigravity_user_identity(identity_payload)
                         quota["plan"] = identity.get("plan")
                         quota["account"] = identity.get("account")
                     except Exception:
@@ -6460,16 +6508,6 @@ def fetch_antigravity_quota():
                     return quota
             except Exception as error:
                 last_error = error
-        for path, body in ((paths["status"], metadata), (paths["models"], metadata)):
-            for endpoint in endpoints:
-                try:
-                    quota = _normalize_antigravity_user_status(
-                        _antigravity_request(endpoint, path, body))
-                    if quota.get("available"):
-                        _save_provider_quota_cache("antigravity", marker, quota)
-                        return quota
-                except Exception as error:
-                    last_error = error
         fallback = _cached_provider_quota(
             "antigravity", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
         if fallback:
@@ -7572,8 +7610,13 @@ def scan_hermes(bounds, cache):
 
 
 # ---------- OpenClaw ----------
-# SQLite: ~/.openclaw/state/openclaw.sqlite（新版）或 ~/.openclaw/tasks/runs.sqlite（旧版）
-# Session JSONL: ~/.openclaw/agents/*/sessions/*.jsonl — token 用量
+# 全局 SQLite: $OPENCLAW_STATE_DIR/state/openclaw.sqlite（任务 + agent DB 注册表）
+# Agent SQLite: agent_databases.path -> transcript_events.event_json（新版 token 用量）
+# Session JSONL: $OPENCLAW_STATE_DIR/agents/*/sessions/*.jsonl（旧版 token 用量）
+_OPENCLAW_PARSER_VERSION = 2
+_OPENCLAW_LEDGER_VERSION = 2
+
+
 def _openclaw_db_paths():
     return [path for path in _path_candidates(
         "TOKEI_OPENCLAW_DB", OPENCLAW_STATE_DB, OPENCLAW_DB) if os.path.isfile(path)]
@@ -7626,6 +7669,261 @@ def _scan_openclaw_db(db_path, sqlite_module):
         conn.close()
 
 
+def _openclaw_agent_db_paths(sqlite_module):
+    """Discover agent databases from the global registry.
+
+    OpenClaw stores registry paths relative to its state directory on current
+    releases.  Absolute paths remain supported for compatible installations.
+    The boolean result distinguishes an authoritative empty registry from a
+    transient read failure so cached agent data is not discarded on lock/I/O
+    errors.
+    """
+    read_failed = False
+    for registry_path in _openclaw_db_paths():
+        conn = None
+        try:
+            conn = _openclaw_connect(registry_path, sqlite_module)
+            found = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_databases'"
+            ).fetchone()
+            if not found:
+                continue
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_databases)")}
+            if "path" not in columns:
+                continue
+            root = os.path.dirname(os.path.realpath(os.path.abspath(OPENCLAW_AGENTS)))
+            paths = []
+            seen = set()
+            for (raw_path,) in conn.execute("SELECT path FROM agent_databases"):
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    continue
+                expanded = os.path.expandvars(os.path.expanduser(raw_path.strip()))
+                resolved = expanded if os.path.isabs(expanded) else os.path.join(root, expanded)
+                resolved = os.path.realpath(os.path.abspath(resolved))
+                key = os.path.normcase(resolved)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(resolved)
+            return True, paths
+        except Exception:
+            read_failed = True
+        finally:
+            if conn is not None:
+                conn.close()
+    return not read_failed, []
+
+
+def _openclaw_number(value):
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _openclaw_cost_number(value):
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        return max(float(value or 0), 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _openclaw_token_total(usage):
+    # OpenClaw's reasoningTokens is already included in output.
+    return sum(usage.get(key, 0) for key in ("in", "out", "cr", "cw"))
+
+
+def _openclaw_datetime(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value) / 1000 if value > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds).astimezone()
+        except (OSError, OverflowError, ValueError):
+            return None
+    if isinstance(value, str):
+        parsed = parse_ts(value)
+        return parsed.astimezone() if parsed else None
+    return None
+
+
+def _openclaw_usage_record(event, created_at=None, session_model=None):
+    if not isinstance(event, dict):
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    # The persisted event timestamp is authoritative. created_at mirrors it on
+    # current databases and is the stable fallback when optional JSON fields are
+    # absent; message.timestamp can precede persistence by several seconds.
+    occurred_at = (_openclaw_datetime(event.get("timestamp"))
+                   or _openclaw_datetime(created_at)
+                   or _openclaw_datetime(message.get("timestamp")))
+    if occurred_at is None:
+        return None
+
+    inp = _openclaw_number(usage.get("input"))
+    out = _openclaw_number(usage.get("output"))
+    cr = _openclaw_number(usage.get("cacheRead"))
+    cw = _openclaw_number(usage.get("cacheWrite"))
+    reason = _openclaw_number(usage.get("reasoningTokens"))
+
+    raw_model = next((candidate.strip() for candidate in (
+        message.get("responseModel"), message.get("model"), session_model
+    ) if isinstance(candidate, str) and candidate.strip()), "")
+    model = _model_identity_id(raw_model) or raw_model or "unknown"
+
+    cost_obj = usage.get("cost")
+    if isinstance(cost_obj, dict):
+        cost = _openclaw_cost_number(cost_obj.get("total"))
+        if cost <= 0:
+            cost = sum(_openclaw_cost_number(cost_obj.get(field)) for field in (
+                "input", "output", "cacheRead", "cacheWrite"))
+    else:
+        cost = _openclaw_cost_number(cost_obj)
+    pricing_id = _exact_pricing_id(model)
+    if cost <= 0 and pricing_id:
+        price = _raw_price(pricing_id)
+        cost = (inp / 1e6 * price["in"] + out / 1e6 * price["out"]
+                + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
+
+    return {"date": occurred_at.date().isoformat(), "hour": occurred_at.hour,
+            "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
+            "cost": cost, "model": model}
+
+
+def _openclaw_add_record(days, record):
+    day = days.setdefault(record["date"], _empty_token_day())
+    _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
+                     record["reason"], record["cost"], record["model"])
+    day["hours"][record["hour"]] += _openclaw_token_total(record)
+
+
+def _openclaw_event_key(event, raw_event):
+    event_id = event.get("id") if isinstance(event, dict) else None
+    if isinstance(event_id, str) and event_id:
+        return "id:" + event_id
+    material = raw_event if isinstance(raw_event, str) else json.dumps(
+        event, sort_keys=True, separators=(",", ":"))
+    return "hash:" + hashlib.sha256(
+        material.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+
+
+def _scan_openclaw_agent_db(db_path, sqlite_module):
+    conn = _openclaw_connect(db_path, sqlite_module)
+    try:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        if "transcript_events" not in tables:
+            raise sqlite_module.OperationalError("missing transcript_events")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(transcript_events)")}
+        if not {"session_id", "seq", "event_json", "created_at"}.issubset(columns):
+            raise sqlite_module.OperationalError("incompatible transcript_events")
+
+        session_models = {}
+        if "session_windows" in tables:
+            window_columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info(session_windows)"
+            )}
+            if {"session_id", "model"}.issubset(window_columns):
+                session_models = {str(session_id): model for session_id, model in conn.execute(
+                    "SELECT session_id, model FROM session_windows"
+                )}
+
+        sessions = {}
+        seen_events = {}
+        for session_id, seq, raw_event, created_at in conn.execute(
+                "SELECT session_id, seq, event_json, created_at "
+                "FROM transcript_events ORDER BY session_id, seq"):
+            try:
+                event = json.loads(raw_event)
+            except (TypeError, ValueError):
+                continue
+            session_key = str(session_id)
+            event_key = _openclaw_event_key(event, raw_event)
+            session_seen = seen_events.setdefault(session_key, set())
+            if event_key in session_seen:
+                continue
+            session_seen.add(event_key)
+            record = _openclaw_usage_record(
+                event, created_at, session_models.get(session_key))
+            if record is None:
+                continue
+            session = sessions.setdefault(session_key, {"days": {}, "events": 0})
+            _openclaw_add_record(session["days"], record)
+            session["events"] += 1
+        return sessions
+    finally:
+        conn.close()
+
+
+def _scan_openclaw_jsonl(path):
+    session_id = os.path.basename(path)[:-6]
+    days = {}
+    events = 0
+    seen = set()
+    with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if '"usage"' not in line and '"type"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if (event.get("type") == "session" and isinstance(event.get("id"), str)
+                    and event["id"]):
+                session_id = event["id"]
+            event_key = _openclaw_event_key(event, line)
+            if event_key in seen:
+                continue
+            seen.add(event_key)
+            record = _openclaw_usage_record(event)
+            if record is None:
+                continue
+            _openclaw_add_record(days, record)
+            events += 1
+    return session_id, {"days": days, "events": events}
+
+
+def _openclaw_session_score(copy, source):
+    token_count = sum(_openclaw_token_total(day) for day in copy.get("days", {}).values())
+    return token_count, int(copy.get("events", 0)), 1 if source == "sqlite" else 0
+
+
+def _openclaw_selected_sessions(tool_cache):
+    selected = {}
+    for entry_key, entry in tool_cache.items():
+        if entry_key.startswith("_") or not isinstance(entry, dict):
+            continue
+        if entry.get("parser_version") != _OPENCLAW_PARSER_VERSION:
+            continue
+        source = entry.get("source")
+        if source == "sqlite":
+            copies = (entry.get("sessions") or {}).items()
+        elif source == "jsonl":
+            copies = [(entry.get("session_id") or entry_key, {
+                "days": entry.get("days", {}), "events": entry.get("events", 0)})]
+        else:
+            continue
+        for session_id, copy in copies:
+            if not isinstance(copy, dict):
+                continue
+            session_key = str(session_id)
+            score = _openclaw_session_score(copy, source)
+            previous = selected.get(session_key)
+            if previous is None or score > previous[0]:
+                selected[session_key] = (score, copy)
+    return {session_id: copy for session_id, (_, copy) in selected.items()}
+
+
 def scan_openclaw(bounds, cache):
     import sqlite3 as _sq
     ledger_touch("openclaw")
@@ -7651,7 +7949,7 @@ def scan_openclaw(bounds, cache):
         return ks
 
     B = {k: {"tasks": 0, "completed": 0, "failed": 0,
-             "in": 0, "out": 0, "cr": 0, "cw": 0,
+             "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
              "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
 
     # --- Part 1: SQLite task counts ---
@@ -7683,110 +7981,93 @@ def scan_openclaw(bounds, cache):
         fc.pop("_db", None)
         changed = True
 
-    # --- Part 2: Session JSONL token usage ---
-    live_days = {}
-    if os.path.isdir(OPENCLAW_AGENTS):
-        stale = {k for k in fc if not k.startswith("_")}
-        for f in glob.glob(os.path.join(OPENCLAW_AGENTS, "*", "sessions", "*.jsonl")):
-            if f.endswith(".trajectory.jsonl"):
-                continue
-            stale.discard(f)
+    # --- Part 2: dynamically discovered agent SQLite usage ---
+    registry_ok, agent_db_paths = _openclaw_agent_db_paths(_sq)
+    active_sqlite_keys = set()
+    for agent_db_path in agent_db_paths:
+        entry_key = "sqlite:" + os.path.realpath(agent_db_path)
+        active_sqlite_keys.add(entry_key)
+        sig = _sqlite_signature(agent_db_path)
+        entry = fc.get(entry_key)
+        needs_scan = (not entry or entry.get("parser_version") != _OPENCLAW_PARSER_VERSION
+                      or entry.get("path") != agent_db_path or entry.get("sig") != sig)
+        if sig and needs_scan:
             try:
-                st = os.stat(f)
-            except OSError:
+                sessions = _scan_openclaw_agent_db(agent_db_path, _sq)
+            except Exception:
                 continue
-            sig = f"{st.st_mtime}:{st.st_size}"
-            entry = fc.get(f)
-            if not entry or entry.get("sig") != sig:
-                days = {}
-                try:
-                    with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                        for line in fh:
-                            if '"usage"' not in line:
-                                continue
-                            try:
-                                o = json.loads(line)
-                            except Exception:
-                                continue
-                            msg = o.get("message", {})
-                            if msg.get("role") != "assistant":
-                                continue
-                            u = msg.get("usage")
-                            if not u:
-                                continue
-                            dt = parse_ts(o.get("timestamp", ""))
-                            if dt is None:
-                                continue
-                            dt = dt.astimezone()
-                            inp = u.get("input", 0) or 0
-                            out = u.get("output", 0) or 0
-                            cr = u.get("cacheRead", 0) or 0
-                            cw = u.get("cacheWrite", 0) or 0
-                            if inp == 0 and out == 0:
-                                continue
-                            model = msg.get("model", "")
-                            model_id = _model_identity_id(model)
-                            pricing_id = _exact_pricing_id(model_id)
-                            cost_obj = u.get("cost")
-                            raw_cost = float((cost_obj or {}).get("total", 0) or 0)
-                            if raw_cost > 0:
-                                cost = raw_cost
-                            elif pricing_id:
-                                p = _raw_price(pricing_id)
-                                cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
-                            else:
-                                cost = 0.0
-                            dk = dt.date().isoformat()
-                            day = days.setdefault(dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                                       "cost": 0.0, "models": {},
-                                                       "hours": [0] * 24})
-                            day["in"] += inp; day["out"] += out
-                            day["cr"] += cr; day["cw"] += cw; day["cost"] += cost
-                            day["hours"][dt.hour] += inp + out + cr + cw
-                            mn = model_id or model or "unknown"
-                            mm = day["models"].setdefault(
-                                mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                     "reason": 0, "cost": 0.0})
-                            mm["in"] += inp; mm["out"] += out
-                            mm["cr"] += cr; mm["cw"] += cw; mm["cost"] += cost
-                except OSError:
-                    continue
-                fc[f] = {"sig": sig, "days": days}
+            fc[entry_key] = {"source": "sqlite", "path": agent_db_path, "sig": sig,
+                             "parser_version": _OPENCLAW_PARSER_VERSION,
+                             "sessions": sessions}
+            changed = True
+    if registry_ok:
+        for entry_key, entry in list(fc.items()):
+            if (isinstance(entry, dict) and entry.get("source") == "sqlite"
+                    and entry_key not in active_sqlite_keys):
+                fc.pop(entry_key, None)
                 changed = True
 
-        for p in stale:
-            fc.pop(p, None)
+    # --- Part 3: legacy JSONL usage, excluding trajectory logs ---
+    jsonl_files = set()
+    if os.path.isdir(OPENCLAW_AGENTS):
+        jsonl_files = {
+            path for path in glob.glob(
+                os.path.join(OPENCLAW_AGENTS, "*", "sessions", "*.jsonl"))
+            if not path.endswith(".trajectory.jsonl")
+        }
+    for path in sorted(jsonl_files):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{stat.st_mtime_ns}:{stat.st_size}"
+        entry = fc.get(path)
+        if (entry and entry.get("source") == "jsonl"
+                and entry.get("parser_version") == _OPENCLAW_PARSER_VERSION
+                and entry.get("sig") == sig):
+            continue
+        try:
+            session_id, copy = _scan_openclaw_jsonl(path)
+        except OSError:
+            continue
+        fc[path] = {"source": "jsonl", "sig": sig,
+                    "parser_version": _OPENCLAW_PARSER_VERSION,
+                    "session_id": session_id, "days": copy["days"],
+                    "events": copy["events"]}
+        changed = True
+
+    for entry_key, entry in list(fc.items()):
+        if entry_key.startswith("_") or not isinstance(entry, dict):
+            continue
+        is_jsonl = entry.get("source") == "jsonl" or (
+            entry.get("source") is None and entry_key.endswith(".jsonl"))
+        if is_jsonl and entry_key not in jsonl_files:
+            fc.pop(entry_key, None)
             changed = True
 
-        for f, entry in fc.items():
-            if f.startswith("_"):
-                continue
-            for dk, day in entry.get("days", {}).items():
-                try:
-                    d = date.fromisoformat(dk)
-                except ValueError:
-                    continue
-                agg = live_days.setdefault(
-                    dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                         "cost": 0.0, "models": {}, "hours": [0] * 24})
-                agg["in"] += day["in"]; agg["out"] += day["out"]
-                agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
-                for mn, mv in day["models"].items():
-                    mm = agg["models"].setdefault(
-                        mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                             "reason": 0, "cost": 0.0})
-                    for key in TOKEN_FIELDS:
-                        mm[key] += mv.get(key, 0)
-                    mm["cost"] += mv.get("cost", 0)
-                for hour, amount in enumerate((day.get("hours") or [])[:24]):
-                    agg["hours"][hour] += amount
-                # 会话数只能来自现存日志(被清日志无从归属)
-                for k in _day_keys(d):
-                    B[k]["sessions"].add(f)
-    else:
-        for p in [key for key in fc if not key.startswith("_")]:
-            fc.pop(p, None)
-            changed = True
+    # Select one complete copy per logical session across SQLite/JSONL sources.
+    live_days = {}
+    live_sessions = {}
+    for session_id, copy in _openclaw_selected_sessions(fc).items():
+        for day_key, day in copy.get("days", {}).items():
+            agg = live_days.setdefault(day_key, _empty_token_day())
+            _merge_live_token_day(agg, day)
+            live_sessions.setdefault(day_key, set()).add(session_id)
+    for day in live_days.values():
+        day["_ledger_version"] = _OPENCLAW_LEDGER_VERSION
+
+    if fc.get("_selected_days") != live_days:
+        fc["_selected_days"] = live_days
+        changed = True
+
+    # 会话数只来自现存 session 副本；账本无法可靠恢复被清日志的归属。
+    for day_key, session_ids in live_sessions.items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in _day_keys(day_date):
+            B[range_key]["sessions"].update(session_ids)
 
     for dk, day in ledger_reconcile("openclaw", live_days).items():
         try:
@@ -7797,6 +8078,7 @@ def scan_openclaw(bounds, cache):
             b = B[k]
             b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
             b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
+            b["reason"] += day.get("reason", 0)
             b["cost"] += day.get("cost", 0)
             for mn, mv in (day.get("models") or {}).items():
                 mm = b["models"].setdefault(
@@ -9504,6 +9786,312 @@ def _kimi_roots():
     return roots
 
 
+# ---------- Kimi Code 官方额度 ----------
+# 凭据由 Kimi Code CLI 自己写入并刷新;Tokei 只读、绝不代刷 —— refresh_token 通常带
+# rotation,抢刷会顶掉 CLI 自己的登录态。access_token 有效期很短(实测约 30 分钟),
+# 过期时直接走缓存并标 stale:显示一个过期读数比承认不知道危险得多(同 issue #63)。
+KIMI_QUOTA_CACHE = _writable_path("kimi_quota_cache.json")
+_KIMI_QUOTA_TTL = 300
+_KIMI_QUOTA_FALLBACK_TTL = 300
+_KIMI_QUOTA_STALE_AFTER = 1800
+_KIMI_CODE_DEFAULT_BASE_URL = "https://api.kimi.com/coding/v1"
+_KIMI_USAGE_URL = _KIMI_CODE_DEFAULT_BASE_URL + "/usages"
+_KIMI_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
+_KIMI_FIVE_HOUR_MINUTES = 300
+_KIMI_TIME_UNITS = {
+    "TIME_UNIT_MINUTE": 1,
+    "TIME_UNIT_HOUR": 60,
+    "TIME_UNIT_DAY": 60 * 24,
+    "TIME_UNIT_WEEK": 60 * 24 * 7,
+}
+
+
+def _kimi_epoch_seconds(value):
+    """expires_at 可能按秒也可能按毫秒写。"""
+    if isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num <= 0:
+        return None
+    return num / 1000.0 if num > 1e11 else num
+
+
+def _kimi_amount(value):
+    """接口把额度数字写成字符串("100"),直接参与运算会 TypeError。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kimi_credential_files():
+    return [os.path.join(root, "credentials", "kimi-code.json")
+            for root in _kimi_roots()]
+
+
+def _kimi_auth_context(now_epoch=None):
+    """只读 CLI 写好的 access_token;过期时标记出来,由调用方决定不发请求。"""
+    now = now_epoch if now_epoch is not None else datetime.now().timestamp()
+    for path in _kimi_credential_files():
+        creds = _load_json(path, {})
+        if not isinstance(creds, dict):
+            continue
+        token = creds.get("access_token")
+        if not isinstance(token, str) or not token:
+            continue
+        expires_at = _kimi_epoch_seconds(creds.get("expires_at"))
+        return {
+            "access_token": token,
+            "expires_at": expires_at,
+            "expired": bool(expires_at is not None and now >= expires_at),
+            "auth_key": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+        }
+    return {}
+
+
+def _kimi_window_minutes(window):
+    if not isinstance(window, dict):
+        return None
+    duration = _kimi_amount(window.get("duration"))
+    unit = _KIMI_TIME_UNITS.get(window.get("timeUnit"))
+    if duration is None or unit is None:
+        return None
+    return int(round(duration * unit))
+
+
+def _kimi_slot(detail):
+    """detail = {limit, used, remaining, resetTime} → 已用百分比 + 重置时刻。"""
+    if not isinstance(detail, dict):
+        return None
+    limit = _kimi_amount(detail.get("limit"))
+    used = _kimi_amount(detail.get("used"))
+    remaining = _kimi_amount(detail.get("remaining"))
+    if used is None and limit is not None and remaining is not None:
+        used = limit - remaining
+    if limit is None or limit <= 0 or used is None:
+        return None
+    slot = {"used_percent": max(0.0, min(100.0, 100.0 * used / limit))}
+    reset = _iso_to_epoch(detail.get("resetTime") or detail.get("reset_time")
+                          or detail.get("resetAt") or detail.get("reset_at"))
+    if reset is not None:
+        slot["resets_at"] = reset
+    return slot
+
+
+def _kimi_ratio_slot(detail):
+    if not isinstance(detail, dict):
+        return None
+    ratio = _kimi_amount(detail.get("used_ratio"))
+    if ratio is None or not math.isfinite(ratio) or ratio < 0:
+        return None
+    slot = {"used_percent": min(1.0, ratio) * 100.0}
+    reset = _iso_to_epoch(detail.get("reset_time") or detail.get("resetTime"))
+    if reset is not None:
+        slot["resets_at"] = reset
+    return slot
+
+
+def _kimi_usage_target():
+    from urllib.parse import urlparse, urlunparse
+    raw = os.environ.get("KIMI_CODE_BASE_URL", _KIMI_CODE_DEFAULT_BASE_URL).strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username \
+            or parsed.password or parsed.query or parsed.fragment:
+        return None
+    path = parsed.path.rstrip("/")
+    if path.endswith("/usages"):
+        usage_path = path
+    elif path.endswith("/coding/v1"):
+        usage_path = path + "/usages"
+    elif path.endswith("/coding"):
+        usage_path = path + "/v1/usages"
+    else:
+        usage_path = path + "/coding/v1/usages"
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    url = urlunparse(("https", parsed.netloc, usage_path, "", "", ""))
+    return url, parsed.hostname.lower(), port
+
+
+def _kimi_live_to_limits(data):
+    """Normalize current ratio pools and the legacy limit/detail response."""
+    if not isinstance(data, dict):
+        return None
+    pools = data.get("usages") if isinstance(data.get("usages"), dict) else {}
+    five_hour = _kimi_ratio_slot(pools.get("limit_5h"))
+    subscription = next((slot for slot in (
+        _kimi_ratio_slot(pools.get("limit_month_total")),
+        _kimi_ratio_slot(pools.get("limit_month")),
+        _kimi_ratio_slot(pools.get("limit_7d")),
+    ) if slot), None)
+    if not five_hour:
+        for item in data.get("limits") or []:
+            if not isinstance(item, dict):
+                continue
+            if _kimi_window_minutes(item.get("window")) == _KIMI_FIVE_HOUR_MINUTES:
+                five_hour = _kimi_slot(item.get("detail"))
+                break
+    if not subscription:
+        subscription = _kimi_slot(data.get("usage"))
+    if not five_hour and not subscription:
+        return None
+    user = data.get("user") if isinstance(data.get("user"), dict) else {}
+    membership = user.get("membership") if isinstance(user.get("membership"), dict) else {}
+    return {
+        "limit_id": "kimicode",
+        "five_hour": five_hour,
+        "subscription": subscription,
+        "plan": membership.get("level"),
+        "user_id": user.get("userId"),
+    }
+
+
+def _kimi_limits_have_active_window(limits, now_epoch=None):
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    for key in ("five_hour", "subscription"):
+        slot = (limits or {}).get(key) or {}
+        reset = slot.get("resets_at")
+        try:
+            if reset is not None and float(reset) > now:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return False
+
+
+def _cached_kimi_live_limits(max_age, auth_key, allow_active_window=False):
+    cached = _load_json(KIMI_QUOTA_CACHE, {})
+    if not auth_key or cached.get("auth_key") != auth_key:
+        return None
+    fetched_at = cached.get("fetched_at")
+    limits = cached.get("limits")
+    if not fetched_at or not limits:
+        return None
+    try:
+        fetched_at = float(fetched_at)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    age = datetime.now().timestamp() - fetched_at
+    if age > max_age and not (
+            allow_active_window and _kimi_limits_have_active_window(limits)):
+        return None
+    return limits, cached.get("plan"), fetched_at
+
+
+def fetch_kimi_live_limits():
+    if os.environ.get("TOKEI_KIMI_LIVE_QUOTA") == "0":
+        return None
+    target = _kimi_usage_target()
+    if not target:
+        return None
+    usage_url, expected_host, expected_port = target
+    auth = _kimi_auth_context()
+    token = auth.get("access_token")
+    if not token:
+        return None
+    auth_key = auth.get("auth_key")
+    cached = _cached_kimi_live_limits(_KIMI_QUOTA_TTL, auth_key)
+    if cached:
+        return cached
+    if auth.get("expired"):
+        return _cached_kimi_live_limits(
+            _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
+    cache_state = _load_json(KIMI_QUOTA_CACHE, {})
+    if cache_state.get("auth_key") != auth_key:
+        cache_state = {"auth_key": auth_key}
+    last_failure = cache_state.get("last_failure_at", 0)
+    try:
+        failure_is_recent = (
+            bool(last_failure)
+            and datetime.now().timestamp() - float(last_failure) < 300)
+    except (TypeError, ValueError, OverflowError):
+        failure_is_recent = False
+    if failure_is_recent:
+        return _cached_kimi_live_limits(
+            _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
+    try:
+        import urllib.request
+        from urllib.parse import urlparse
+        req = urllib.request.Request(usage_url)
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", "Tokei")
+        req.add_unredirected_header("Authorization", "Bearer " + token)
+        with urllib.request.urlopen(req, timeout=3) as res:
+            final_url = urlparse(res.geturl())
+            final_port = final_url.port or 443
+            if final_url.scheme != "https" or final_url.hostname != expected_host \
+                    or final_port != (expected_port or 443):
+                raise ValueError("unexpected Kimi usage redirect")
+            raw = res.read(_KIMI_USAGE_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _KIMI_USAGE_MAX_RESPONSE_BYTES:
+            raise ValueError("Kimi usage response is too large")
+        limits = _kimi_live_to_limits(json.loads(raw))
+        if not limits:
+            raise ValueError("invalid Kimi usage response")
+        plan = limits.get("plan")
+        fetched_at = datetime.now().timestamp()
+        _atomic_write_json(KIMI_QUOTA_CACHE, {
+            "fetched_at": fetched_at,
+            "limits": limits,
+            "plan": plan,
+            "user_id": limits.get("user_id"),
+            "auth_key": auth_key,
+            "source": "live",
+        })
+        return limits, plan, fetched_at
+    except Exception:
+        try:
+            state = _load_json(KIMI_QUOTA_CACHE, {})
+            if state.get("auth_key") != auth_key:
+                state = {"auth_key": auth_key}
+            state["last_failure_at"] = datetime.now().timestamp()
+            _atomic_write_json(KIMI_QUOTA_CACHE, state)
+        except Exception:
+            pass
+    return _cached_kimi_live_limits(
+        _KIMI_QUOTA_FALLBACK_TTL, auth_key, allow_active_window=True)
+
+
+def _kimi_quota_values(limits, now_epoch=None, updated_at=None):
+    """→ p5/pw + 重置时刻 + stale,字段语义与 Codex 卡片保持一致。
+
+    两种 stale:窗口已经翻篇(读数必然失真),或读数本身太旧(CLI 久未刷新 token)。
+    Kimi 的额度单位是调用次数而非 token,没法像 Codex 那样用本机消耗反推"确实回满了",
+    所以翻篇一律标 stale —— 宁可说不知道,也不谎报满额。
+    """
+    values = {"p5": None, "pw": None, "r5": None, "rw": None,
+              "p5_stale": False, "pw_stale": False}
+    mapping = (("five_hour", "p5", "r5"), ("subscription", "pw", "rw"))
+    for slot_key, pct_key, reset_key in mapping:
+        slot = (limits or {}).get(slot_key) or {}
+        if not slot:
+            continue
+        values[pct_key] = slot.get("used_percent")
+        values[reset_key] = slot.get("resets_at")
+
+    now = now_epoch if now_epoch is not None else int(datetime.now().timestamp())
+    try:
+        updated_age = (now - float(updated_at)) if updated_at else None
+    except (TypeError, ValueError, OverflowError):
+        updated_age = None
+    for _, pct_key, reset_key in mapping:
+        if values[pct_key] is None:
+            continue
+        reset = values[reset_key]
+        if reset and now > float(reset):
+            values[pct_key + "_stale"] = True
+        elif updated_age is not None and updated_age > _KIMI_QUOTA_STALE_AFTER:
+            values[pct_key + "_stale"] = True
+    return values
+
+
 def _kimi_wire_groups():
     """按会话产出 (agent_wires, root_wire);定深有界遍历,不碰 server/events 等镜像目录。
 
@@ -9801,6 +10389,245 @@ def scan_kimicode(bounds, cache):
         day["projects"] = sorted(live_projects.get(day_key, set()))
 
     for day_key, day in ledger_reconcile("kimicode", live_days).items():
+        try:
+            local_day = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for range_key in classify_date(local_day, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    if changed:
+        cache["_dirty"] = True
+    return {"ranges": B}
+
+
+# ---------- Muse Code CLI ----------
+# 会话日志 sessions/YYYY/MM/DD/<sid>/session.jsonl,顶层 JSONL 记录:
+#   payload_type=runtime.session.metadata → payload.record.workspace_root(项目)
+#   payload_type=run.model.configured → payload.record.run_stream.id/model_id(运行→模型)
+#   payload.kind=run 且 event.kind=model_completed → event.usage + event.model(用量事件)
+# input_tokens 含 cached(与 Codex 同口径):输入=input-cached,缓存读=cached,推理视为输出子集。
+# 日志不持久化成本,按价格表估算(muse-* → meta/muse-*,见 _normalize)。
+_MUSE_PARSER_VERSION = 1
+_MUSE_SESSION_PATTERNS = (
+    os.path.join("sessions", "*", "*", "*", "*", "session.jsonl"),
+    os.path.join("sessions", "*", "session.jsonl"),
+)
+
+
+def _muse_roots():
+    configured = os.environ.get("TOKEI_MUSE_DIR")
+    if configured:
+        candidates = [configured]
+    elif os.path.normcase(MUSE_DIR) != os.path.normcase(_MUSE_DEFAULT_DIR):
+        # Tests and embedders may replace MUSE_DIR after importing this module.
+        candidates = [MUSE_DIR]
+    else:
+        candidates = [_MUSE_DEFAULT_DIR]
+    roots = []
+    seen = set()
+    for candidate in candidates:
+        root = os.path.abspath(os.path.expanduser(candidate))
+        key = os.path.normcase(os.path.realpath(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
+def _muse_session_files():
+    files = []
+    for root in _muse_roots():
+        for pattern in _MUSE_SESSION_PATTERNS:
+            for path in glob.glob(os.path.join(root, pattern)):
+                if os.path.isfile(path):
+                    files.append(os.path.abspath(path))
+    return sorted(set(files))
+
+
+def _muse_number(value):
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _muse_datetime(value):
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(epoch):
+        return None
+    if epoch > 100_000_000_000_000:  # 微秒
+        epoch /= 1_000_000
+    elif epoch > 100_000_000_000:  # 毫秒
+        epoch /= 1000
+    try:
+        return datetime.fromtimestamp(epoch).astimezone()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _muse_token_total(usage):
+    return sum(usage.get(key, 0) for key in ("in", "out", "cr", "cw"))
+
+
+def _muse_event_cost(model, inp, out, cr, cw):
+    price_id = _pricing_id(model)
+    if not price_id:
+        return 0.0
+    price = _raw_price(price_id)
+    return (inp / 1e6 * price["in"] + out / 1e6 * price["out"]
+            + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
+
+
+def _scan_muse_session(path):
+    """→ (days, sid, proj)。只认 model_completed 用量事件,按 source_run_record_id 去重。"""
+    days = {}
+    seen_records = set()
+    sid = None
+    proj = None
+    run_models = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if ('"model_completed"' not in line
+                        and '"run.model.configured"' not in line
+                        and '"runtime.session.metadata"' not in line):
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                stream = record.get("stream")
+                if sid is None and isinstance(stream, dict):
+                    stream_id = stream.get("id")
+                    if isinstance(stream_id, str) and stream_id:
+                        sid = stream_id
+                payload_type = record.get("payload_type")
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                if payload_type == "runtime.session.metadata":
+                    meta = payload.get("record")
+                    if isinstance(meta, dict):
+                        workspace = meta.get("workspace_root")
+                        if isinstance(workspace, str) and workspace:
+                            proj = workspace
+                    continue
+                if payload_type == "run.model.configured":
+                    meta = payload.get("record")
+                    if isinstance(meta, dict):
+                        run_stream = meta.get("run_stream")
+                        model_id = meta.get("model_id")
+                        if (isinstance(run_stream, dict) and isinstance(model_id, str)
+                                and model_id and model_id != "same-as-main"):
+                            run_id = run_stream.get("id")
+                            if isinstance(run_id, str) and run_id:
+                                run_models[run_id] = model_id
+                    continue
+                if payload_type != "runtime.session" or payload.get("kind") != "run":
+                    continue
+                event = payload.get("event")
+                if not isinstance(event, dict) or event.get("kind") != "model_completed":
+                    continue
+                usage = event.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                input_total = _muse_number(usage.get("input_tokens"))
+                cached = _muse_number(usage.get("cached_tokens",
+                                                usage.get("cache_read_tokens")))
+                cached = min(cached, input_total)
+                inp = input_total - cached
+                out = _muse_number(usage.get("output_tokens"))
+                cw = _muse_number(usage.get("cache_write_tokens"))
+                reason = _muse_number(usage.get("reasoning_tokens"))
+                if inp + out + cached + cw + reason == 0:
+                    continue
+                record_id = record.get("source_run_record_id")
+                if isinstance(record_id, str) and record_id:
+                    if record_id in seen_records:
+                        continue
+                    seen_records.add(record_id)
+                model = event.get("model")
+                if not isinstance(model, str) or not model or model == "same-as-main":
+                    model = run_models.get(payload.get("run_id", ""), "")
+                if not model:
+                    model = None
+                display_model = _known_id_or_raw(model) if model else None
+                cost = _muse_event_cost(model or "unknown", inp, out, cached, cw)
+                dt = _muse_datetime(record.get("recorded_at"))
+                if dt is None:
+                    continue
+                day = days.setdefault(dt.date().isoformat(), _empty_token_day())
+                _add_token_usage(day, inp, out, cached, cw, reason, cost, display_model)
+                day["hours"][dt.hour] += inp + out + cached + cw
+    except OSError:
+        return {}, sid, proj
+    return days, sid, proj
+
+
+def scan_musecode(bounds, cache):
+    ledger_touch("musecode")
+    fc = cache.setdefault("musecode", {})
+    B = _empty_token_ranges()
+    files = _muse_session_files()
+    if not files:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+    stale = set(fc)
+    changed = False
+    for path in files:
+        stale.discard(path)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        entry = fc.get(path)
+        if (not isinstance(entry, dict) or entry.get("sig") != signature
+                or entry.get("parser_version") != _MUSE_PARSER_VERSION):
+            days, sid, proj = _scan_muse_session(path)
+            fc[path] = {
+                "sig": signature,
+                "days": days,
+                "sid": sid or path,
+                "proj": proj,
+                "parser_version": _MUSE_PARSER_VERSION,
+            }
+            changed = True
+
+    for path in stale:
+        fc.pop(path, None)
+        changed = True
+
+    live_days = {}
+    live_sessions = {}
+    live_projects = {}
+    for path, entry in fc.items():
+        if not isinstance(entry, dict):
+            continue
+        for day_key, day in entry.get("days", {}).items():
+            try:
+                date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
+            session = entry.get("sid") or path
+            live_sessions.setdefault(day_key, set()).add(session)
+            project = entry.get("proj")
+            if isinstance(project, str) and project:
+                live_projects.setdefault(day_key, set()).add(project)
+
+    for day_key, day in live_days.items():
+        day["sessions"] = sorted(live_sessions.get(day_key, set()))
+        day["projects"] = sorted(live_projects.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("musecode", live_days).items():
         try:
             local_day = date.fromisoformat(day_key)
         except (TypeError, ValueError):
@@ -10135,6 +10962,7 @@ def compute():
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     kimi = _safe_scan("kimicode", lambda: scan_kimicode(bounds, cache), _empty_kimicode, errors)
+    muse = _safe_scan("musecode", lambda: scan_musecode(bounds, cache), _empty_musecode, errors)
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     if cache.pop("_pricing_changed", False):
@@ -10259,7 +11087,7 @@ def compute():
         hit = (b["cr"] / denom * 100) if denom else 0.0
         return {"tasks": b["tasks"], "completed": b["completed"], "failed": b["failed"],
                 "hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
-                "cost": b["cost"], "sessions": len(b["sessions"]),
+                "reason": b["reason"], "cost": b["cost"], "sessions": len(b["sessions"]),
                 "models": _format_token_models(b["models"])}
 
     hranges = {k: hermes_range(hm["ranges"][k]) for k in RANGE_KEYS}
@@ -10295,6 +11123,7 @@ def compute():
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
     qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
     kimiranges = {k: token_usage_range(kimi["ranges"][k]) for k in RANGE_KEYS}
+    museranges = {k: token_usage_range(muse["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -10307,6 +11136,9 @@ def compute():
     grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
     qwenwork_quota = _safe_scan(
         "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
+    kimi_live = _safe_scan("kimi_quota", fetch_kimi_live_limits, lambda: None, errors)
+    kimi_limits, kimi_plan, kimi_updated = kimi_live if kimi_live else (None, None, None)
+    kimi_quota = _kimi_quota_values(kimi_limits, updated_at=kimi_updated)
     provider_quotas = scan_provider_quotas(errors)
     _cache_dashboard_days(
         cache, _CURSOR_PROVIDER_DAYS_CACHE_KEY,
@@ -10426,6 +11258,14 @@ def compute():
         },
         "kimicode": {
             "ranges": kimiranges,
+            "p5": kimi_quota["p5"], "pw": kimi_quota["pw"],
+            "r5": kimi_quota["r5"], "rw": kimi_quota["rw"],
+            "q_updated": int(kimi_updated) if kimi_updated else None,
+            "p5_stale": kimi_quota["p5_stale"], "pw_stale": kimi_quota["pw_stale"],
+            "plan": kimi_plan,
+        },
+        "musecode": {
+            "ranges": museranges,
         },
     }
     if errors:
@@ -10580,6 +11420,13 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    kimi = snapshot.get("kimicode")
+    if isinstance(kimi, dict):
+        kimi = dict(kimi)
+        for key in ("p5", "pw", "r5", "rw", "q_updated",
+                    "p5_stale", "pw_stale", "plan"):
+            kimi.pop(key, None)
+        snapshot["kimicode"] = kimi
     # Grok Bot has no account label in its normalized output. Its official
     # aggregate stays in the snapshot so peers can adopt the freshest copy;
     # SyncManager replaces this quota instead of adding account totals.
@@ -10809,6 +11656,20 @@ def main():
         print(f"今日 缓存读 {human(kt['cr']):>6} {F}")
         if kt.get("cw"):
             print(f"今日 缓存写 {human(kt['cw']):>6} {F}")
+        print("---")
+    # Muse Code 块（model_completed 自带模型名；无持久化成本，按价格表估算）
+    mt = d["musecode"]["ranges"]["today"]
+    if mt["sessions"] > 0:
+        print(f"Muse Code {HEAD}")
+        print(f"命中率   {mt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(mt['in']):>6} {F}")
+        print(f"今日 输出   {human(mt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(mt['cr']):>6} {F}")
+        if mt.get("cw"):
+            print(f"今日 缓存写 {human(mt['cw']):>6} {F}")
+        if mt.get("reason"):
+            print(f"今日 思考   {human(mt['reason']):>6} {F}")
+        print(f"今日 ≈成本  ${mt['cost']:.2f} {F}")
         print("---")
     print("刷新 | refresh=true")
 
@@ -11116,6 +11977,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
+                       "musecode": 0.0,
                        "prime_agent": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
@@ -11349,6 +12211,24 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 for key in TOKEN_FIELDS:
                     model[key] += mv.get(key, 0)
 
+    for _, entry in cache.get("musecode", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            d["musecode"] += day.get("cost", 0)
+            _add_day_tokens(d, dk, "musecode", _muse_token_total(day))
+            for mn, mv in day.get("models", {}).items():
+                name = f"{nice_model(mn)} (Muse Code)"
+                model = models.setdefault(
+                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                           "reason": 0, "tool": "musecode"})
+                model["cost"] += mv.get("cost", 0)
+                for key in TOKEN_FIELDS:
+                    model[key] += mv.get(key, 0)
+
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
@@ -11365,23 +12245,20 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 for key in TOKEN_FIELDS:
                     model[key] += mv.get(key, 0)
 
-    for entry_key, entry in cache.get("openclaw", {}).items():
-        if entry_key.startswith("_") or not isinstance(entry, dict):
+    for dk, day in cache.get("openclaw", {}).get("_selected_days", {}).items():
+        if cutoff and dk < cutoff:
             continue
-        for dk, day in entry.get("days", {}).items():
-            if cutoff and dk < cutoff:
-                continue
-            d = days.setdefault(dk, _empty())
-            d["openclaw"] += day.get("cost", 0)
-            _add_day_tokens(d, dk, "openclaw", token_total(day))
-            for mn, mv in day.get("models", {}).items():
-                name = f"{nice_model(mn)} (OpenClaw)"
-                model = models.setdefault(
-                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
-                           "reason": 0, "tool": "openclaw"})
-                model["cost"] += mv.get("cost", 0)
-                for key in TOKEN_FIELDS:
-                    model[key] += mv.get(key, 0)
+        d = days.setdefault(dk, _empty())
+        d["openclaw"] += day.get("cost", 0)
+        _add_day_tokens(d, dk, "openclaw", _openclaw_token_total(day))
+        for mn, mv in day.get("models", {}).items():
+            name = f"{nice_model(mn)} (OpenClaw)"
+            model = models.setdefault(
+                name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                       "reason": 0, "tool": "openclaw"})
+            model["cost"] += mv.get("cost", 0)
+            for key in TOKEN_FIELDS:
+                model[key] += mv.get(key, 0)
 
     for fp, entry in cache.get("qoder", {}).items():
         model_name = entry.get("model") or "QoderWork"
@@ -11435,7 +12312,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
         "mimocode", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
-        "opencode", "qwencode"))
+        "opencode", "qwencode", "musecode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
             continue
@@ -11445,7 +12322,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 continue
             if cutoff and dk < cutoff:
                 continue
-            ledger_tok = _ledger_token_sum(day)
+            ledger_tok = _ledger_token_sum(day, tool)
             cost = day.get("cost")
             ledger_cost = (float(cost) if isinstance(cost, (int, float))
                            and not isinstance(cost, bool) else 0.0)
@@ -11477,12 +12354,13 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "deepseek_harness": round(v["deepseek_harness"], 2),
               "qwencode": round(v["qwencode"], 2),
               "kimicode": round(v["kimicode"], 2),
+              "musecode": round(v["musecode"], 2),
               "prime_agent": round(v["prime_agent"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"] + v["workbuddy_ai"]
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
-                             + v["kimicode"] + v["prime_agent"] + v["hermes"]
+                             + v["kimicode"] + v["musecode"] + v["prime_agent"] + v["hermes"]
                              + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
@@ -11502,6 +12380,10 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     def model_tokens(v):
         if v.get("tool") == "codex":
             return v["in"] + v.get("cr", 0) + v["out"]  # out 已含 reasoning
+        if v.get("tool") == "openclaw":
+            return _openclaw_token_total(v)
+        if v.get("tool") == "musecode":
+            return _muse_token_total(v)
         return v["in"] + v["out"] + v.get("cr", 0) + v.get("cw", 0) + v.get("reason", 0)
 
     model_list = []
@@ -11707,21 +12589,18 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 name = f"{nice_model(model)} (Hermes)"
                 model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- OpenClaw (in + out + cr + cw) ---
-    for f, entry in cache.get("openclaw", {}).items():
-        if not isinstance(entry, dict):
+    # --- OpenClaw (reasoning is a subset of output) ---
+    for dk, day in cache.get("openclaw", {}).get("_selected_days", {}).items():
+        if cutoff and dk < cutoff:
             continue
-        for dk, day in entry.get("days", {}).items():
-            if cutoff and dk < cutoff:
-                continue
-            tok = token_total(day)
-            day_tokens[dk] = day_tokens.get(dk, 0) + tok
-            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
-            weekday[date.fromisoformat(dk).weekday()] += tok
-            add_hours(dk, day.get("hours"))
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (OpenClaw)"
-                model_tok[name] = model_tok.get(name, 0) + token_total(usage)
+        tok = _openclaw_token_total(day)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        add_hours(dk, day.get("hours"))
+        for model, usage in day.get("models", {}).items():
+            name = f"{nice_model(model)} (OpenClaw)"
+            model_tok[name] = model_tok.get(name, 0) + _openclaw_token_total(usage)
 
     # --- OpenCode (in + out + cr + cw + reason) ---
     for dk, day in _iter_cached_token_days(cache.get("opencode", {})):
@@ -11794,6 +12673,28 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             for mn, mv in day.get("models", {}).items():
                 model_name = f"{nice_model(mn)} (Kimi Code)"
                 model_tok[model_name] = model_tok.get(model_name, 0) + token_total(mv)
+
+    # --- Muse Code (model_completed usage;成本按价格表估算) ---
+    for _, entry in cache.get("musecode", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        project_path = entry.get("proj") or ""
+        project = os.path.basename(project_path.rstrip("/")) or "Muse Code"
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = _muse_token_total(day)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            pt = proj_tok.setdefault(project, [0, 0.0])
+            pt[0] += tok
+            pt[1] += day.get("cost", 0)
+            day_projs.setdefault(dk, set()).add(project)
+            for mn, mv in day.get("models", {}).items():
+                model_name = f"{nice_model(mn)} (Muse Code)"
+                model_tok[model_name] = model_tok.get(model_name, 0) + _muse_token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
     for f, entry in cache.get("pi", {}).items():
@@ -11921,7 +12822,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     # 让 total/active/streak/busiest/peak 与 peak_days 同口径,避免同页口径分裂。
     ledger_day_tokens = {}
     ledger_day_cost = {}
-    for tool_days in _load_ledger().get("tools", {}).values():
+    for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
             continue
         for dk, day in tool_days.items():
@@ -11929,7 +12830,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 continue
             if cutoff and dk < cutoff:
                 continue
-            tok = _ledger_token_sum(day)
+            tok = _ledger_token_sum(day, tool)
             if tok:
                 ledger_day_tokens[dk] = ledger_day_tokens.get(dk, 0) + tok
             cost = day.get("cost")
@@ -12680,6 +13581,29 @@ def projects():
                 name = f"{nice_model(model)} (Kimi Code)"
                 p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
     for proj_path, session_ids in kimi_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
+
+    # Muse Code sessions. one session.jsonl per session, count the stream id once.
+    muse_sessions = {}
+    for entry in cache.get("musecode", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("musecode")
+        muse_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+        for dk, day in entry.get("days", {}).items():
+            p["tokens"] += _muse_token_total(day)
+            p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for model, usage in day.get("models", {}).items():
+                name = f"{nice_model(model)} (Muse Code)"
+                p["model_tok"][name] = p["model_tok"].get(name, 0) + _muse_token_total(usage)
+    for proj_path, session_ids in muse_sessions.items():
         proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
 
     # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
