@@ -16,7 +16,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` | SQLite, `messages.metadata` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` | JSONL, 会话/调用/工具/时长；文本量估算 Token |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` | SQLite, `session_model_usage*` 用量表，回退 `sessions` 表 |
-| OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` | JSONL 用量 + SQLite 任务 |
+| OpenClaw | `~/.openclaw/state/openclaw.sqlite` + agent SQLite；兼容旧 JSONL | SQLite/JSONL 用量 + SQLite 任务 |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` | JSONL, `message.usage` |
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` | JSONL, assistant `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
@@ -26,6 +26,8 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
+| Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` | JSONL, `model_completed` 事件 `usage` + `model` |
+| Kimi Code(额度) | `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` → `api.kimi.com/coding/v1/usages` | 本机登录态只读查询，见 §5 |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
 
@@ -119,6 +121,19 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 仍递归展开主 wire 中的 `SubagentEvent`，且不扫描旧 `session/subagents`，避免重复。
 新格式提供权威 `model`，可展示模型明细；两种格式都不持久化实际成本，因此 Kimi Code
 卡片不展示推测的 API 成本。
+
+**Muse Code** — `model_completed` 事件字段独立，与 Codex 同口径:
+- 输入 = `usage.input_tokens - usage.cached_tokens`（`input_tokens` 已包含缓存）
+- 输出 = `usage.output_tokens`
+- 缓存读 = `usage.cached_tokens`（与 `cache_read_tokens` 一致）
+- 缓存写 = `usage.cache_write_tokens`
+- 推理 = `usage.reasoning_tokens`（视为输出子集展示）
+- 模型 = 事件自带 `model`（如 `muse-spark-1.3-contributor`），`same-as-main` 时回退到
+  同 run 的 `run.model.configured`；`muse-*` 按 `meta/muse-*` 查价格表估算成本
+
+只读取 `model_completed` 用量事件，按 `source_run_record_id` 去重；`goal_usage_attribution`
+是归因账本，不重复计入。项目取自 `runtime.session.metadata` 的 `workspace_root`，
+时刻取自记录的 `recorded_at`（微秒）。
 **Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
 - 输入 = `usage.input`
 - 输出 = `usage.output`
@@ -158,9 +173,16 @@ Dashboard、Wrapped 或项目 token 总量。
 
 **Qoder** — `inputTokens` / `outputTokens` 目前全为 0,仅 `durationMs` 和 `contextUsageRatio` 有值。
 
-**OpenClaw** — Session JSONL 的 `message.usage` 提供输入、输出、缓存读写和成本；
-`state/openclaw.sqlite` 的 `task_runs` 提供任务状态。旧版
-`~/.openclaw/tasks/runs.sqlite` 仍作为兼容回退。
+**OpenClaw** — 新版从 `state/openclaw.sqlite` 的 `agent_databases` 动态发现每个 agent 的
+`openclaw-agent.sqlite`，只读取 `transcript_events.event_json` 中 role 为 assistant 且带
+`message.usage` 的原始事件。输入、输出、缓存读写、推理和成本分别使用
+`input` / `output` / `cacheRead` / `cacheWrite` / `reasoningTokens` / `cost`；日期以事件时间为准，
+模型依次使用 `message.responseModel`、`message.model` 和 `session_windows.model`。未知模型保留原名且
+不套用其他模型价格。
+
+旧版 `agents/*/sessions/*.jsonl` 继续兼容；SQLite 与 JSONL 中相同 session 只保留记录更完整的一份，
+`.trajectory.jsonl`、全文索引和非 usage 事件不参与统计。`state/openclaw.sqlite` 的 `task_runs`
+仍提供任务状态，旧版 `~/.openclaw/tasks/runs.sqlite` 作为任务统计回退。
 
 ---
 
@@ -300,6 +322,36 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQ
 ID、邀请信息或个人资料；每天最多自动查询一次，最近一张卡到期后立即更新，失败后
 6 小时再试。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
 Codex 刷新登录 Token 后立即重试。
+
+### Kimi Code(usages)
+
+使用 Kimi Code CLI 已有的本机登录态只读查询 `https://api.kimi.com/coding/v1/usages`:
+- `p5` — 5 小时滚动窗口已用百分比,取 `limits[]` 中 `window` 折算为 300 分钟的那条
+  (`TIME_UNIT_MINUTE`/`TIME_UNIT_HOUR` 均按同一口径折算,不假设接口固定用哪种单位)
+- `pw` — 订阅周期额度已用百分比,取顶层 `usage`
+- `r5` / `rw` — 各自的 `resetTime`
+- `plan` — `user.membership.level`
+
+接口把额度数字写成字符串(`"limit": "100"`),解析时统一转数值;`used` 缺失时按
+`limit - remaining` 推算。顶层 `usage` 不带 `window` 字段,接口没有说明该额度是周还是月,
+因此界面只显示"订阅额度剩余"和它给出的重置时刻,不替接口命名周期。
+
+**凭据只读、绝不代刷。** access_token 由 CLI 写在
+`${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json`,有效期很短(实测约 30 分钟)。
+Tokei 只读 `access_token`,从不使用同一文件中的 `refresh_token`:OAuth 刷新令牌通常带
+rotation,由 Tokei 抢先刷新会顶掉 Kimi Code 自己的登录态。因此凭据过期时直接跳过这次
+请求(发出去也必然 401),转为使用缓存并标记读数已过期。
+
+额度过期的判定有两条,命中任一即标 `p5_stale` / `pw_stale`,卡片改为显示"额度读数已过期"
+并附上读数时间:
+- 窗口的 `resetTime` 已经过去 —— 这份读数不再代表当前窗口
+- 读数本身超过 30 分钟未更新 —— 通常是 CLI 长时间未使用,登录态已过期
+
+Codex 在窗口翻篇后若本机零消耗会判定"确实回满",Kimi 不套用这条:Kimi 额度按调用次数
+计量,本机 token 日志无法反推它的真实消耗,谎报满额比承认不知道危险得多。
+
+成功查询缓存 5 分钟;网络失败后 5 分钟内不再重试,避免每轮 30 秒刷新都白等超时。
+可用 `TOKEI_KIMI_LIVE_QUOTA=0` 完全关闭该查询,关闭后 token 用量统计不受影响。
 
 ### Grok Build(credits)
 

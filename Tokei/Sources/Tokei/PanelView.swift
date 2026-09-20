@@ -14,6 +14,7 @@ struct PanelView: View {
     @State private var zaiModelsOpen = false
     @State private var grokModelsOpen = false
     @State private var grokBotModelsOpen = false
+    @State private var qoderCliModelsOpen = false
     @State private var hermesModelsOpen = false
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
@@ -25,6 +26,7 @@ struct PanelView: View {
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
     @State private var kimiCodeModelsOpen = false
+    @State private var museCodeModelsOpen = false
     @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
@@ -68,6 +70,7 @@ struct PanelView: View {
     @AppStorage("showQwenCode") private var showQwenCode = true
     @AppStorage("showQwenWork") private var showQwenWork = true
     @AppStorage("showKimiCode") private var showKimiCode = true
+    @AppStorage("showMuseCode") private var showMuseCode = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
     /// 默认关闭：显式授权后复用 Grok Bot 或 Cursor 登录态查询官方额度。
@@ -76,6 +79,7 @@ struct PanelView: View {
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
+    @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude5h.defaultsKey) private var menuBarQuotaClaude5h = true
@@ -83,6 +87,8 @@ struct PanelView: View {
     @AppStorage(MenuBarQuotaSource.claudeFable.defaultsKey) private var menuBarQuotaClaudeFable = false
     @AppStorage(MenuBarQuotaSource.codex5h.defaultsKey) private var menuBarQuotaCodex5h = false
     @AppStorage(MenuBarQuotaSource.codexWeek.defaultsKey) private var menuBarQuotaCodexWeek = true
+    @AppStorage(MenuBarQuotaSource.kimi5h.defaultsKey) private var menuBarQuotaKimi5h = false
+    @AppStorage(MenuBarQuotaSource.kimiSubscription.defaultsKey) private var menuBarQuotaKimiSubscription = false
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
     @State private var copyFeedback = false
     @State private var copiedToolID: String?
@@ -96,7 +102,8 @@ struct PanelView: View {
             openclaw: showOpenClaw, pi: showPi, primeAgent: showPrimeAgent,
             workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
             deepseekHarness: showDeepSeekHarness,
-            opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode
+            opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
+            musecode: showMuseCode
         )
     }
 
@@ -106,7 +113,7 @@ struct PanelView: View {
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showPrimeAgent].filter { $0 }.count
+         showQwenWork, showKimiCode, showMuseCode, showPrimeAgent].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -335,7 +342,7 @@ struct PanelView: View {
 
     private func toolCards(for u: Usage) -> [ToolCardItem] {
         let cr = u.claude.ranges.get(sel), xr = u.codex.ranges.get(sel)
-        let geminiDisplay = u.gemini.ranges.displayRange(for: sel)
+        let geminiRange = u.gemini.ranges.get(sel)
         let kr = u.grok.ranges.get(sel)
         let grokBotDisplay: (key: RangeKey, range: QoderRange, usage: TokenUsageRange) = {
             let selected = u.grokBot.ranges.get(sel)
@@ -375,6 +382,7 @@ struct PanelView: View {
         let cursorUsage = u.cursor.usage?.ranges.get(sel) ?? TokenUsageRange()
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
+        let mcr = u.musecode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
@@ -388,15 +396,9 @@ struct PanelView: View {
                              (u.codex.reset_cards?.count ?? 0) > 0,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini,
-                         active: geminiDisplay.range.hasUsage || u.antigravity.available,
+                         active: geminiRange.hasUsage,
                          tint: Theme.gemini,
-                         presentation: !geminiDisplay.range.hasUsage && u.antigravity.available
-                             ? .compactStatus : .standard,
-                         content: AnyView(geminiBlock(
-                            geminiDisplay.range,
-                            quota: u.antigravity,
-                            displayedRange: geminiDisplay.key
-                         ))),
+                         content: AnyView(geminiBlock(geminiRange, quota: u.antigravity))),
             ToolCardItem(id: "cursor", name: "Cursor", visible: showCursor,
                          active: u.cursor.available || cursorUsage.totalTokens > 0,
                          tint: Theme.cursor,
@@ -409,7 +411,7 @@ struct PanelView: View {
                          tint: Theme.zed, presentation: .compactStatus,
                          content: AnyView(providerQuotaBlock(
                             "Zed", quota: u.zed, tint: Theme.zed,
-                            setupHint: "请先在 Zed 中登录 GitHub；Tokei 会无弹窗读取现有 Keychain 登录态。"))),
+                            setupHint: "请先在 Zed 中登录 GitHub，再到设置的「Provider 额度」中授权读取登录态。"))),
             ToolCardItem(id: "sub2api", name: "Sub2API", visible: showSub2API, active: showSub2API,
                          tint: Theme.sub2api, presentation: .compactStatus,
                          content: AnyView(providerQuotaBlock(
@@ -447,11 +449,14 @@ struct PanelView: View {
                          content: AnyView(grokBotBlock(
                             u.grokBot, grokBotDisplay.range, grokBotDisplay.usage,
                             displayedRange: grokBotDisplay.key))),
-            ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder, active: qr.calls > 0,
+            ToolCardItem(id: "qoder", name: "Qoder Desktop", visible: showQoder,
+                         active: qr.calls > 0 || qr.in + qr.cached + qr.out > 0,
                          tint: Theme.qoder, content: AnyView(qoderIdeBlock(u.qoder, qr))),
-            ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork, active: qwr.calls > 0,
+            ToolCardItem(id: "qoderwork", name: "QoderWork", visible: showQoderWork,
+                         active: qwr.calls > 0 || qwr.totalTokens > 0,
                          tint: Theme.qoderwork, content: AnyView(qoderworkBlock(u.qoderwork, qwr))),
-            ToolCardItem(id: "qodercli", name: "Qoder CLI", visible: showQoderCli, active: qclir.calls > 0,
+            ToolCardItem(id: "qodercli", name: "Qoder CLI", visible: showQoderCli,
+                         active: qclir.calls > 0 || qclir.totalTokens > 0,
                          tint: Theme.qodercli, content: AnyView(qodercliBlock(u.qodercli, qclir))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr, modelsOpen: $hermesModelsOpen))),
@@ -460,7 +465,7 @@ struct PanelView: View {
             ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
                          tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen, toolID: "mimocode"))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw,
-                         active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw > 0,
+                         active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw + lr.reason > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr, modelsOpen: $openClawModelsOpen))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen, toolID: "pi"))),
@@ -490,8 +495,11 @@ struct PanelView: View {
                              u.qwenwork.remaining != nil || !u.qwenwork.segments.isEmpty ||
                              u.qwenwork.shared != nil,
                          tint: Theme.qwenwork, content: AnyView(qwenWorkBlock(u.qwenwork))),
-            ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode, active: kcr.sessions > 0,
-                         tint: Theme.kimicode, content: AnyView(tokenUsageBlock(title: "Kimi Code", kcr, tint: Theme.kimicode, modelsOpen: $kimiCodeModelsOpen, showsCost: false, toolID: "kimicode"))),
+            ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode,
+                         active: kcr.sessions > 0 || u.kimicode.hasQuota || u.kimicode.hasStaleQuota,
+                         tint: Theme.kimicode, content: AnyView(kimiCodeBlock(u.kimicode, kcr))),
+            ToolCardItem(id: "musecode", name: "Muse Code", visible: showMuseCode, active: mcr.sessions > 0,
+                         tint: Theme.musecode, content: AnyView(tokenUsageBlock(title: "Muse Code", mcr, tint: Theme.musecode, modelsOpen: $museCodeModelsOpen, reasonIncludedInOutput: true, toolID: "musecode"))),
         ]
     }
 
@@ -678,6 +686,69 @@ struct PanelView: View {
         }
     }
 
+    // MARK: - Kimi Code 卡片
+    // 额度来自官方 usages 接口,登录态由 Kimi Code CLI 自己刷新(有效期很短),
+    // 因此这里必须能表达"读数已过期",而不是把上一次的百分比一直显示下去。
+    @ViewBuilder
+    func kimiCodeBlock(_ x: KimiCodeStat, _ r: TokenUsageRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Kimi Code", tint: Theme.kimicode, sessions: r.sessions, toolID: "kimicode")
+            if r.sessions > 0 {
+                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason),
+                             caption: "\(sel.label) 总量", tint: Theme.kimicode)
+                metricGrid([], hit: r.hit, extra: tokenUsageMetrics(r), tint: Theme.kimicode)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $kimiCodeModelsOpen, tint: Theme.kimicode)
+                }
+            } else if x.hasQuota {
+                usageEmptyHint
+            } else {
+                emptyHint
+            }
+            if x.hasQuota || x.hasStaleQuota {
+                thinDivider
+            }
+            if let p5 = x.p5, x.p5_stale != true {
+                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.kimicode)
+            }
+            if let pw = x.pw, x.pw_stale != true {
+                // 接口只给了这一档的重置时刻,没有说周期是周还是月,所以标题不写周期名。
+                quotaRow(title: "订阅额度剩余", pct: 100 - pw, reset: x.rw, tint: Theme.kimicode)
+            }
+            if x.hasStaleQuota {
+                quotaStateNotice(
+                    title: "额度读数已过期",
+                    detail: "Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。",
+                    source: "api.kimi.com",
+                    updated: x.q_updated,
+                    tint: Theme.kimicode,
+                    warning: true
+                )
+            }
+            if let plan = x.plan, !plan.isEmpty {
+                HStack {
+                    Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text(plan.replacingOccurrences(of: "LEVEL_", with: ""))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tSecondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.kimicode.opacity(0.16)))
+                }
+            }
+            if r.sessions > 0 && !x.hasQuota && !x.hasStaleQuota {
+                thinDivider
+                quotaStateNotice(
+                    title: "暂未获取到额度数据",
+                    detail: "用量统计不受影响；登录 Kimi Code 后会自动展示官方额度。",
+                    source: "Kimi Code 本地登录态",
+                    updated: nil,
+                    tint: Theme.kimicode
+                )
+            }
+        }
+    }
+
     @ViewBuilder
     func codexResetCardsRow(_ cards: CodexResetCards) -> some View {
         let expirations = cards.expires.sorted()
@@ -751,19 +822,13 @@ struct PanelView: View {
     @ViewBuilder
     func geminiBlock(
         _ r: GeminiRange,
-        quota: ProviderQuotaStat,
-        displayedRange: RangeKey? = nil
+        quota: ProviderQuotaStat
     ) -> some View {
-        let usageLabel = (displayedRange ?? sel).label
+        let usageLabel = sel.label
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions,
-                     toolID: r.hasUsage ? "gemini" : nil)
             if r.hasUsage {
-                if let displayedRange, displayedRange != sel {
-                    Text("\(sel.label)暂无用量，显示\(displayedRange.label)最近用量")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(Theme.tTertiary)
-                }
+                cardHead("Gemini / Antigravity", tint: Theme.gemini, sessions: r.sessions,
+                         toolID: "gemini")
                 CostHeadline(value: Fmt.human(r.totalTokens), caption: "\(usageLabel) 总量", tint: Theme.gemini)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {
@@ -786,12 +851,10 @@ struct PanelView: View {
                     modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini,
                                     periodLabel: usageLabel)
                 }
-            } else {
-                quota.available ? AnyView(usageEmptyHint) : AnyView(emptyHint)
-            }
-            if quota.available {
-                if r.hasUsage { thinDivider }
-                providerQuotaContent(quota, tint: Theme.gemini)
+                if quota.available {
+                    thinDivider
+                    providerQuotaContent(quota, tint: Theme.gemini)
+                }
             }
         }
     }
@@ -1447,8 +1510,8 @@ struct PanelView: View {
     func qoderIdeBlock(_ q: QoderIdeStat, _ r: QoderIdeRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain("Qoder Desktop", tint: Theme.qoder, toolID: "qoder")
-            if r.calls > 0 {
-                let total = r.in + r.cached + r.out
+            let total = r.in + r.cached + r.out
+            if r.calls > 0 || total > 0 {
                 if total > 0 {
                     CostHeadline(value: Fmt.human(total), caption: "\(sel.label) 总量", tint: Theme.qoder)
                 }
@@ -1494,13 +1557,18 @@ struct PanelView: View {
     func qoderworkBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain("QoderWork", tint: Theme.qoderwork, toolID: "qoderwork")
-            if r.calls > 0 {
+            if r.calls > 0 || r.totalTokens > 0 {
+                if r.totalTokens > 0 {
+                    CostHeadline(value: Fmt.human(r.totalTokens), caption: "\(sel.label) 总量", tint: Theme.qoderwork)
+                }
                 metricGrid({
                     var items: [Metric] = [
                         .init("terminal", "任务", "\(r.calls)"),
                         .init("person.2", "会话", "\(r.sessions)"),
                         .init("clock", "耗时", Fmt.duration(r.duration)),
                     ]
+                    if r.in > 0 { items.append(.init("arrow.down", "输入", Fmt.human(r.in))) }
+                    if r.out > 0 { items.append(.init("arrow.up", "输出", Fmt.human(r.out))) }
                     if r.sub_agents > 0 {
                         items.append(.init("point.3.connected.trianglepath.dotted", "子agent", "\(r.sub_agents)"))
                     }
@@ -1521,19 +1589,30 @@ struct PanelView: View {
         }
     }
 
-    // MARK: - Qoder CLI 卡片(仅活跃维度:qodercli 本地不落 token 数)
+    // MARK: - Qoder CLI 卡片
     @ViewBuilder
     func qodercliBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHeadPlain("Qoder CLI", tint: Theme.qodercli, toolID: "qodercli")
-            if r.calls > 0 {
-                metricGrid({
+            if r.calls > 0 || r.totalTokens > 0 {
+                if r.usage_available && r.totalTokens > 0 {
+                    CostHeadline(value: Fmt.human(r.totalTokens), caption: "\(sel.label) 总量", tint: Theme.qodercli)
+                }
+                metricGrid(r.credits > 0 ? [
+                    .init("circle.hexagongrid.fill", "Credits", Fmt.credits(r.credits)),
+                ] : [], hit: r.hit, extra: {
                     var items: [Metric] = [
                         .init("terminal", "模型调用", "\(r.calls)"),
                         .init("person.2", "会话", "\(r.sessions)"),
                         .init("bubble.left.and.bubble.right", "消息数", Fmt.human(r.turns)),
                         .init("clock", "活跃", Fmt.duration(r.duration)),
                     ]
+                    if r.usage_available {
+                        items.append(.init("arrow.down", "输入", Fmt.human(r.in)))
+                        items.append(.init("arrow.up", "输出", Fmt.human(r.out)))
+                        if r.cr > 0 { items.append(.init("bolt.fill", "缓存读", Fmt.human(r.cr))) }
+                        if r.cw > 0 { items.append(.init("square.stack.3d.up.fill", "缓存写", Fmt.human(r.cw))) }
+                    }
                     if r.tools > 0 {
                         items.append(.init("wrench.and.screwdriver", "工具调用", Fmt.human(r.tools)))
                     }
@@ -1542,7 +1621,9 @@ struct PanelView: View {
                     }
                     return items
                 }(), tint: Theme.qodercli)
-                if let model = q.model, !model.isEmpty {
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $qoderCliModelsOpen, tint: Theme.qodercli)
+                } else if let model = q.model, !model.isEmpty {
                     modelBadge(model, tint: Theme.qodercli)
                 }
             } else {
@@ -1582,7 +1663,7 @@ struct PanelView: View {
     func openclawBlock(_ r: OpenClawRange, modelsOpen: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions, toolID: "openclaw")
-            if r.in + r.out + r.cr + r.cw > 0 {
+            if r.in + r.out + r.cr + r.cw + r.reason > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.openclaw)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {
@@ -1591,11 +1672,13 @@ struct PanelView: View {
                         .init("arrow.up", "输出", Fmt.human(r.out)),
                         .init("bolt.fill", "缓存读", Fmt.human(r.cr)),
                     ]
+                    if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
                     if r.tasks > 0 { items.append(.init("checklist", "任务", "\(r.tasks)")) }
                     return items
                 }(), tint: Theme.openclaw)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw,
+                                         reasonIncludedInOutput: true)
                 }
             } else if r.tasks > 0 {
                 HStack(spacing: 16) {
@@ -1633,15 +1716,18 @@ struct PanelView: View {
     @ViewBuilder
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
-                         showsCost: Bool = true, toolID: String? = nil) -> some View {
+                         showsCost: Bool = true, reasonIncludedInOutput: Bool = false,
+                         toolID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if r.sessions > 0 {
-                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
+                let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+                CostHeadline(value: Fmt.human(total), caption: "\(sel.label) 总量", tint: tint)
                 metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))] : [],
                     hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
+                                         reasonIncludedInOutput: reasonIncludedInOutput,
                                          inclusiveIO: inclusiveIO)
                 }
             } else {
@@ -2368,6 +2454,8 @@ struct PanelView: View {
     @State private var providerSettingsResult = ""
     @State private var grokBotAuthorizing = false
     @State private var grokBotAuthorizationResult = ""
+    @State private var zedAuthorizing = false
+    @State private var zedAuthorizationResult = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @State private var configuredDeviceID: String?
@@ -2448,6 +2536,8 @@ struct PanelView: View {
         case .claudeFable: return $menuBarQuotaClaudeFable
         case .codex5h: return $menuBarQuotaCodex5h
         case .codexWeek: return $menuBarQuotaCodexWeek
+        case .kimi5h: return $menuBarQuotaKimi5h
+        case .kimiSubscription: return $menuBarQuotaKimiSubscription
         case .grok: return $menuBarQuotaGrok
         }
     }
@@ -2606,6 +2696,7 @@ struct PanelView: View {
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
                 settingsRow("千问办公", tint: Theme.qwenwork, isOn: $showQwenWork)
                 settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
+                settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -2635,10 +2726,29 @@ struct PanelView: View {
 
     var settingsProviderQuotaSection: some View {
         settingsSection("key.horizontal.fill", "Provider 额度") {
-            Text("Cursor 复用 Cursor.app 登录态，Zed 复用 Zed Keychain；两者无需在 Tokei 中保存密钥。显示对应卡片即允许查询。")
+            Text("Cursor 复用 Cursor.app 登录态；Zed 首次使用需允许 Tokei 读取其 Keychain 登录态。Tokei 不保存这些登录密钥。")
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if showZed {
+                HStack(spacing: 8) {
+                    settingsActionButton(
+                        icon: "key.fill",
+                        title: zedAuthorizing ? "等待授权…" : "授权 Zed"
+                    ) {
+                        authorizeZedQuota()
+                    }
+                    .disabled(zedAuthorizing)
+                    if zedAuthorizing { ProgressView().controlSize(.mini) }
+                    if !zedAuthorizationResult.isEmpty {
+                        Text(zedAuthorizationResult)
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(Theme.tTertiary)
+                            .lineLimit(2)
+                    }
+                }
+            }
 
             thinDivider
 
@@ -2785,6 +2895,42 @@ struct PanelView: View {
         store.refresh()
     }
 
+    private func authorizeZedQuota() {
+        guard !zedAuthorizing, let executable = Bundle.main.executableURL else { return }
+        zedAuthorizing = true
+        zedAuthorizationResult = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            func run(_ argument: String) -> Bool {
+                let process = Process()
+                process.executableURL = executable
+                process.arguments = [argument]
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    return process.terminationStatus == 0
+                } catch {
+                    return false
+                }
+            }
+            let interactiveSucceeded = run("--zed-authorize")
+            let persistentSucceeded = interactiveSucceeded && run("--zed-verify")
+            DispatchQueue.main.async {
+                zedAuthorizing = false
+                if persistentSucceeded {
+                    zedAuthorizationResult = "授权成功，正在刷新 Zed 额度"
+                    store.refresh()
+                } else if interactiveSucceeded {
+                    zedAuthorizationResult = "仅允许了本次读取，请重新授权并选择“始终允许”"
+                } else {
+                    zedAuthorizationResult = "未授权，或 Zed 尚未登录"
+                }
+            }
+        }
+    }
+
     private static func validSub2APIBaseURL(_ value: String) -> Bool {
         guard let components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
@@ -2798,6 +2944,14 @@ struct PanelView: View {
 
     var settingsPrivacySection: some View {
         settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("应用活跃统计", isOn: $activityStatisticsEnabled)
+            Text("用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
             settingsToggleRow("Claude Code CLI 额度查询", isOn: $claudeCLIQuotaEnabled)
             Text("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")
                 .font(.system(size: 8.5))
@@ -2845,6 +2999,9 @@ struct PanelView: View {
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: activityStatisticsEnabled) { _ in
+            ActivityReporter.shared.preferencesChanged()
         }
         .onChange(of: claudeCLIQuotaEnabled) { _ in
             store.refresh()
@@ -3318,7 +3475,12 @@ struct PanelView: View {
             }
             .buttonStyle(.plain)
             .tip("GitHub")
-            if case .idle = updater.state {
+            if Updater.isLocalBuild {
+                Text("本地验证版")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.tTertiary)
+                    .tip("此版本包含尚未发布的改动，不检查线上更新")
+            } else if case .idle = updater.state {
                 Button { updater.checkForUpdate() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 10, weight: .semibold))
@@ -3590,10 +3752,10 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
-                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "hermes",
+                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork", "kimicode", "prime_agent"]
+                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "prime_agent"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

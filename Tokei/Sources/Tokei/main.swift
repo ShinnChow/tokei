@@ -238,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
+    static let kimicodeColor = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -275,6 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()
+        ActivityReporter.shared.reportLaunchIfNeeded(appVersion: Updater.releaseTag)
         autoFetchPricing()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()
@@ -323,6 +325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                     let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
                     let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
+                    let showQW = ud.object(forKey: "showQoderWork") as? Bool ?? true
+                    let showQoderCli = ud.object(forKey: "showQoderCli") as? Bool ?? true
                     let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
                     let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
                     var total = 0
@@ -335,6 +339,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
                     if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showQW { let r = u.qoderwork.ranges.get(.today); total += r.totalTokens }
+                    if showQoderCli { let r = u.qodercli.ranges.get(.today); total += r.totalTokens }
                     if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if total > 0 {
@@ -527,6 +533,10 @@ enum Icon {
 }
 
 if GrokBotQuotaBridge.runIfRequested() {
+    exit(0)
+}
+
+if ProviderCredentialStore.runIfRequested() {
     exit(0)
 }
 

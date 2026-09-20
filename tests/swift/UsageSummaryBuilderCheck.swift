@@ -87,6 +87,14 @@ struct UsageSummaryBuilderCheck {
         try expect(lines[1].cost == 0.50, "codex cost value")
         try expect(lines[1].tokens == 350, "codex tokens 100+50+200")
 
+        try expect(usage.openclaw.ranges.today.reason == 0,
+                   "older OpenClaw snapshots without reason must decode as zero")
+        let openClawYear = UsageSummaryBuilder.toolLines(
+            usage: usage, range: .year, visibility: allVisible
+        ).first(where: { $0.id == "openclaw" })
+        try expect(openClawYear?.tokens == 7 && openClawYear?.reason == 7,
+                   "OpenClaw reasoning tokens must survive decode and summary aggregation")
+
         let totals = UsageSummaryBuilder.totals(for: lines)
         try expect(totals.tools == 2, "totals tools")
         try expect(abs(totals.cost - 1.75) < 0.001, "totals cost")
@@ -135,6 +143,13 @@ struct UsageSummaryBuilderCheck {
             let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
                 || pb.data(forType: .png) != nil
             try expect(hasImage, "pasteboard should contain image/png")
+        }
+
+        // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
+        let gray = NSColor(Theme.tTertiary)
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
+            let tint = NSColor(UsageShareImage.tint(for: name))
+            try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
         }
 
         print("usage summary builder checks passed")
@@ -211,7 +226,7 @@ struct UsageSummaryBuilderCheck {
           "week": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "last_week": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "month": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
-          "year": {"tasks": 0, "completed": 0, "failed": 0, "models": []}
+          "year": {"tasks": 0, "completed": 0, "failed": 0, "reason": 7, "models": []}
         }
       },
       "opencode": {

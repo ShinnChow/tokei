@@ -254,6 +254,38 @@ class ProviderQuotaTests(unittest.TestCase):
         self.assertEqual(unlimited["windows"][0]["used_pct"], 0.0)
         self.assertEqual(unlimited["windows"][0]["detail"], "Unlimited")
 
+    def test_zed_lists_plans_for_each_organization(self):
+        payload = {
+            "user": {"github_login": "octocat", "name": "Octo Cat"},
+            "default_organization_id": 10,
+            "organizations": [
+                {"id": 10, "name": "Octo's Organization", "is_personal": True},
+                {"id": 20, "name": "Zed VIP", "is_personal": False},
+            ],
+            "plans_by_organization": {
+                "10": "zed_student",
+                "20": "zed_vip",
+            },
+            "plan": {
+                "plan_v3": "zed_student",
+                "usage": {"edit_predictions": {"used": 2, "limit": {"limited": 10}}},
+            },
+        }
+
+        quota = USAGE._normalize_zed_quota(payload)
+
+        self.assertEqual(quota["plan"], "Zed Student + Zed VIP")
+        self.assertEqual(quota["details"], [
+            {"label": "账号", "value": "Octo Cat"},
+            {
+                "label": "Octo's Organization",
+                "value": "Zed Student",
+                "secondary": "当前组织",
+            },
+            {"label": "Zed VIP", "value": "Zed VIP"},
+        ])
+        self.assertEqual(quota["windows"][0]["used_pct"], 20.0)
+
     def test_zed_settings_reject_cross_origin_credentials(self):
         trusted = USAGE._zed_connection_settings({
             "credentials_url": "zed-preview-key",
@@ -283,6 +315,7 @@ class ProviderQuotaTests(unittest.TestCase):
         def request(url, **kwargs):
             self.assertEqual(url, "https://cloud.zed.dev/client/users/me")
             self.assertEqual(kwargs["headers"]["Authorization"], "42 zed-token")
+            self.assertEqual(kwargs["headers"]["User-Agent"], "Tokei/1.0")
             return payload
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -511,11 +544,136 @@ class ProviderQuotaTests(unittest.TestCase):
 
         self.assertEqual(
             [row["title"] for row in quota["windows"]],
-            ["Gemini 5h", "Gemini 周", "Claude/GPT 5h", "Claude/GPT 周"],
+            ["Gemini 周", "Gemini 5h", "Claude/GPT 周", "Claude/GPT 5h"],
         )
-        self.assertEqual([row["used_pct"] for row in quota["windows"]], [9.0, 18.0, 27.0, 36.0])
-        self.assertEqual(quota["windows"][0]["window_minutes"], 300)
-        self.assertEqual(quota["windows"][1]["window_minutes"], 10080)
+        self.assertEqual([row["used_pct"] for row in quota["windows"]], [18.0, 9.0, 36.0, 27.0])
+        self.assertEqual(quota["windows"][0]["window_minutes"], 10080)
+        self.assertEqual(quota["windows"][1]["window_minutes"], 300)
+
+    def test_antigravity_flat_quota_summary_matches_live_response(self):
+        quota = USAGE._normalize_antigravity_quota_summary({
+            "response": {"groups": [
+                {"displayName": "Gemini Models", "buckets": [
+                    {"bucketId": "gemini-weekly", "remainingFraction": 0.9921567,
+                     "description": "You have used some of your weekly limit.",
+                     "resetTime": "2026-09-27T00:57:44Z"},
+                    {"bucketId": "gemini-5h", "remainingFraction": 0.9899,
+                     "description": "You have used some of your 5-hour limit."},
+                ]},
+                {"displayName": "Claude and GPT models", "buckets": [
+                    {"bucketId": "3p-weekly", "remainingFraction": 1},
+                    {"bucketId": "3p-5h", "remainingFraction": 1},
+                ]},
+            ]},
+        })
+
+        rows = quota["windows"]
+        self.assertEqual([row["used_pct"] for row in rows], [0.78433, 1.01, 0.0, 0.0])
+        self.assertTrue(all(row["usage_known"] for row in rows))
+        self.assertTrue(all(row["detail"] is None for row in rows))
+        self.assertIsNotNone(rows[0]["reset"])
+
+    def test_antigravity_remaining_distinguishes_zero_full_and_unknown(self):
+        for fields, used in [
+            ({"remainingFraction": 0}, 100.0),
+            ({"remainingFraction": 1}, 0.0),
+            ({"remainingFraction": 0, "remaining": {"remainingFraction": 1}}, 100.0),
+            ({"remaining": {"remainingFraction": 0}}, 100.0),
+            ({"remaining": {"case": "remainingFraction", "value": 1}}, 0.0),
+            ({}, None),
+            ({"remainingFraction": None}, None),
+            ({"remainingFraction": "invalid"}, None),
+        ]:
+            with self.subTest(fields=fields):
+                quota = USAGE._normalize_antigravity_quota_summary({"groups": [{
+                    "displayName": "Gemini Models",
+                    "buckets": [{"bucketId": "gemini-5h", "description": "Quota status",
+                                 **fields}],
+                }]})
+                row = quota["windows"][1]
+                self.assertEqual(row["used_pct"], used)
+                self.assertEqual(row["usage_known"], used is not None)
+                self.assertEqual(row["detail"], "暂时无法读取" if used is None else None)
+
+    def test_antigravity_refreshes_quota_cached_by_old_parser(self):
+        process = {"pid": 123, "csrf_token": "local-token"}
+        endpoints = [("https", 64123, "local-token", True)]
+        summary = {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-5h", "remainingFraction": 1},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            old_marker = USAGE._provider_credential_marker(
+                "antigravity", "quota-summary-v2", process["pid"], process["csrf_token"], endpoints)
+            USAGE._save_provider_quota_cache("antigravity", old_marker, {
+                "available": True, "windows": [{"usage_known": False, "used_pct": None}],
+            })
+            with mock.patch.object(USAGE, "_antigravity_running_processes", return_value=[process]), \
+                    mock.patch.object(USAGE, "_antigravity_endpoints", return_value=endpoints), \
+                    mock.patch.object(USAGE, "_antigravity_request", side_effect=[summary, {}]) as request:
+                quota = USAGE.fetch_antigravity_quota()
+                self.assertEqual(quota["windows"][1]["used_pct"], 0.0)
+                self.assertTrue(quota["windows"][1]["usage_known"])
+                self.assertEqual(request.call_count, 2)
+                self.assertEqual(USAGE.fetch_antigravity_quota(), quota)
+                self.assertEqual(request.call_count, 2)
+
+    def test_antigravity_only_keeps_four_official_shared_windows(self):
+        quota = USAGE._normalize_antigravity_quota_summary({"groups": [
+            {"displayName": "Gemini Models", "buckets": [
+                {"bucketId": "opaque-id", "window": "weekly", "remainingFraction": 1},
+                {"bucketId": "gemini-weekly-duplicate", "remainingFraction": 0.2},
+                {"bucketId": "gemini-daily", "remainingFraction": 0.5},
+                {"bucketId": "gemini-5h", "remainingFraction": 0.9},
+            ]},
+            {"displayName": "Other Models", "buckets": [
+                {"bucketId": "other-weekly", "remainingFraction": 0.4},
+            ]},
+        ]})
+        self.assertEqual([row["title"] for row in quota["windows"]],
+                         ["Gemini 周", "Gemini 5h", "Claude/GPT 周", "Claude/GPT 5h"])
+        self.assertEqual([row["used_pct"] for row in quota["windows"]], [0.0, 10.0, None, None])
+        self.assertFalse(quota["windows"][2]["usage_known"])
+
+    def test_antigravity_summary_failure_keeps_stale_groups_not_model_rows(self):
+        process = {"pid": 123, "csrf_token": "local-token"}
+        endpoints = [("https", 64123, "local-token", True)]
+        summary = {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-weekly", "remainingFraction": 1},
+            {"bucketId": "gemini-5h", "remainingFraction": 0.98},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            with mock.patch.object(USAGE, "_antigravity_running_processes", return_value=[process]), \
+                    mock.patch.object(USAGE, "_antigravity_endpoints", return_value=endpoints):
+                with mock.patch.object(USAGE, "_antigravity_request", side_effect=[summary, {}]):
+                    fresh = USAGE.fetch_antigravity_quota()
+                cache_path = Path(USAGE.PROVIDER_QUOTA_CACHE)
+                cache = json.loads(cache_path.read_text())
+                cache["providers"]["antigravity"]["fetched_at"] -= USAGE._PROVIDER_QUOTA_TTL + 1
+                cache_path.write_text(json.dumps(cache))
+                with mock.patch.object(USAGE, "_antigravity_request", side_effect=TimeoutError) as request:
+                    stale = USAGE.fetch_antigravity_quota()
+                self.assertTrue(stale["stale"])
+                self.assertEqual(stale["windows"], fresh["windows"])
+                self.assertEqual(len(stale["windows"]), 4)
+                self.assertEqual(request.call_count, 1)
+                self.assertTrue(request.call_args.args[1].endswith("/RetrieveUserQuotaSummary"))
+
+                cache_path.unlink()
+                with mock.patch.object(USAGE, "_antigravity_request", side_effect=TimeoutError) as request:
+                    with self.assertRaises(TimeoutError):
+                        USAGE.fetch_antigravity_quota()
+                self.assertEqual(request.call_count, 1)
+
+    def test_antigravity_user_status_only_supplies_account_identity(self):
+        identity = USAGE._antigravity_user_identity({"userStatus": {
+            "email": "test@example.com", "userTier": {"name": "Google AI Pro"},
+            "cascadeModelConfigData": {"clientModelConfigs": [
+                {"label": "Gemini Pro", "quotaInfo": {"remainingFraction": 1}},
+            ]},
+        }})
+        self.assertEqual(identity, {"plan": "Google AI Pro", "account": "test@example.com"})
 
     def test_antigravity_scan_skips_ps_after_an_empty_result(self):
         with tempfile.TemporaryDirectory() as tmp:

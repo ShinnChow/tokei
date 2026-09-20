@@ -133,10 +133,10 @@ class DashboardCacheTests(unittest.TestCase):
                   "cost": 2.5, "hours": [0, 15] + [0] * 22,
                   "models": {"gpt-5.5": {
                       "in": 1, "out": 2, "cr": 3, "cw": 4, "reason": 5, "cost": 2.5}}}
-        openclaw = {"in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 0,
+        openclaw = {"in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6,
                     "cost": 3.5, "hours": [0, 0, 30] + [0] * 21,
                     "models": {"claude-sonnet-4.6": {
-                        "in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 0, "cost": 3.5}}}
+                        "in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6, "cost": 3.5}}}
         qoderwork = {"in": 19, "out": 11, "hours": [0, 0, 0, 0, 30] + [0] * 19}
         cache = {
             "v": USAGE._SCAN_CACHE_VERSION,
@@ -150,7 +150,7 @@ class DashboardCacheTests(unittest.TestCase):
                     "reason": 10, "cost": 0}},
                 "sessions": ["session-1"]}},
             "hermes": {"db": {"days": {today: hermes}}},
-            "openclaw": {"session": {"days": {today: openclaw}}},
+            "openclaw": {"_selected_days": {today: openclaw}},
             "qoder": {"db": {"model": "performance", "days": {today: qoderwork}}},
         }
 
@@ -168,6 +168,37 @@ class DashboardCacheTests(unittest.TestCase):
         self.assertEqual(wrapped["total_tokens"], 255)
         self.assertEqual(wrapped["total_cost"], 7.25)
         self.assertEqual(sum(wrapped["hours"]), 255)
+
+    def test_qodercli_exact_usage_is_included_once_in_dashboard_and_wrapped(self):
+        today = date.today().isoformat()
+        first = {
+            "id": "request-1", "day": today, "model": "ultimate",
+            "in": 60, "out": 20, "cr": 30, "cw": 10,
+            "credits": 1.5, "usage_available": True, "est": 999,
+        }
+        second = {
+            "id": "request-2", "day": today, "model": "cmodel",
+            "in": 30, "out": 8, "cr": 20, "cw": 0,
+            "credits": 0.4, "usage_available": True, "est": 999,
+        }
+        cache = {
+            "v": USAGE._SCAN_CACHE_VERSION,
+            "_dirty": False,
+            "qodercli": {
+                "/tmp/main.jsonl": {"responses": [first, second], "days": {}},
+                "/tmp/child.jsonl": {"responses": [first], "days": {}, "sub": True},
+            },
+        }
+
+        daily = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
+        wrapped = USAGE.build_wrapped("1d", refresh=False, _cache=cache)
+
+        self.assertEqual(daily["daily"][0]["tokens"], 178)
+        cli_models = [model for model in daily["models"] if model["tool"] == "qodercli"]
+        self.assertEqual(sum(model["tokens"] for model in cli_models), 178)
+        self.assertEqual(daily["daily"][0]["total"], 0)
+        self.assertEqual(wrapped["total_tokens"], 178)
+        self.assertEqual(wrapped["total_cost"], 0)
 
     def test_account_provider_models_are_reported_without_double_counting_local_totals(self):
         today = date.today().isoformat()
