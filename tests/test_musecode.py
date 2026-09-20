@@ -186,19 +186,33 @@ class MuseCodeScanTests(unittest.TestCase):
         self.assertEqual(usage["cr"], 28000)
         self.assertEqual(usage["cw"], 100)
         self.assertEqual(usage["reason"], 60)
-        self.assertEqual(USAGE.token_total(usage), 40860)
+        self.assertEqual(USAGE._muse_token_total(usage), 40800)
         self.assertEqual(usage["sessions"], {"sess-1"})
         self.assertAlmostEqual(usage["cost"], self.expected_cost(), places=9)
         models = usage["models"]
         self.assertEqual(set(models), {"meta/muse-spark-1.2"})
         self.assertEqual(models["meta/muse-spark-1.2"]["in"], 12000)
         self.assertEqual(models["meta/muse-spark-1.2"]["reason"], 60)
+        self.assertEqual(USAGE._muse_token_total(models["meta/muse-spark-1.2"]), 40800)
         entry = cache["musecode"][str(session_file)]
         self.assertEqual(entry["sid"], "sess-1")
         self.assertEqual(entry["proj"], project)
         self.assertEqual(entry["parser_version"], USAGE._MUSE_PARSER_VERSION)
         self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour],
                          40800)
+
+        with mock.patch.object(
+            USAGE, "_load_ledger",
+            return_value={"v": USAGE._LEDGER_VERSION, "tools": {}},
+        ):
+            daily = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
+            wrapped = USAGE.build_wrapped("1d", refresh=False, _cache=cache)
+        self.assertEqual(daily["daily"][0]["tokens"], 40800)
+        muse_model = next(model for model in daily["models"]
+                          if model["tool"] == "musecode")
+        self.assertEqual(muse_model["tokens"], 40800)
+        self.assertEqual(wrapped["total_tokens"], 40800)
+        self.assertEqual(wrapped["top_model"]["tokens"], 40800)
 
     def test_missing_source_clears_stale_cache(self):
         stale = {
@@ -211,6 +225,28 @@ class MuseCodeScanTests(unittest.TestCase):
         self.assertEqual(result["ranges"]["all"]["in"], 0)
         self.assertEqual(cache["musecode"], {})
         self.assertTrue(cache["_dirty"])
+
+    def test_ledger_fallback_preserves_cost_without_double_counting_reasoning(self):
+        today = datetime.now().astimezone().date().isoformat()
+        day = {
+            "in": 12000, "out": 700, "cr": 28000, "cw": 100,
+            "reason": 60, "cost": 0.25, "models": {}, "hours": [0] * 24,
+        }
+        ledger = {
+            "v": USAGE._LEDGER_VERSION,
+            "tools": {"musecode": {today: day}},
+        }
+        cache = {"v": USAGE._SCAN_CACHE_VERSION, "musecode": {}}
+
+        with mock.patch.object(USAGE, "_load_ledger", return_value=ledger):
+            daily = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
+            wrapped = USAGE.build_wrapped("1d", refresh=False, _cache=cache)
+
+        self.assertEqual(daily["daily"][0]["tokens"], 40800)
+        self.assertEqual(daily["daily"][0]["musecode"], 0.25)
+        self.assertEqual(daily["daily"][0]["total"], 0.25)
+        self.assertEqual(wrapped["total_tokens"], 40800)
+        self.assertEqual(wrapped["total_cost"], 0.25)
 
     def test_millisecond_timestamps_and_flat_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,6 +278,22 @@ class MuseCodeScanTests(unittest.TestCase):
         self.assertEqual(USAGE._normalize("muse-glimmer-30b"),
                          "meta/muse-glimmer-30b")
         self.assertIsNotNone(USAGE._pricing_id("muse-spark-1.3"))
+
+    def test_muse_ui_totals_treat_reasoning_as_output_detail(self):
+        root = Path(__file__).resolve().parents[1]
+        sources = root / "Tokei" / "Sources" / "Tokei"
+        panel = (sources / "PanelView.swift").read_text()
+        dashboard = (sources / "DashboardView.swift").read_text()
+        summary = (sources / "UsageSummaryBuilder.swift").read_text()
+        muse_call = next(line for line in panel.splitlines()
+                         if 'toolID: "musecode"' in line)
+        self.assertIn("reasonIncludedInOutput: true", muse_call)
+        self.assertIn(
+            "tokenUsageTotal(usage.musecode.ranges.get(key), "
+            "reasonIncludedInOutput: true)", dashboard)
+        self.assertIn(
+            'range: usage.musecode.ranges.get(range), reasonIncludedInOutput: true',
+            summary)
 
 
 if __name__ == "__main__":

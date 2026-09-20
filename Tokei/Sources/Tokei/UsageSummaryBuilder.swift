@@ -249,9 +249,10 @@ enum UsageSummaryBuilder {
             let r = usage.qodercli.ranges.get(range)
             let line = Line(
                 id: "qodercli", name: "Qoder CLI", cost: nil,
-                tokens: nil, sessions: r.sessions, calls: r.calls,
-                input: nil, output: nil, cacheRead: nil, cacheWrite: nil,
-                reason: nil, hit: nil, extra: nil
+                tokens: r.totalTokens, sessions: r.sessions, calls: r.calls,
+                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+                reason: nil, hit: r.hit > 0 ? r.hit : nil,
+                extra: r.credits > 0 ? "\(Fmt.credits(r.credits)) Credits" : nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -276,10 +277,11 @@ enum UsageSummaryBuilder {
             let r = usage.openclaw.ranges.get(range)
             let line = Line(
                 id: "openclaw", name: "OpenClaw", cost: r.cost,
-                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions,
+                tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions,
                 calls: r.tasks > 0 ? r.tasks : nil,
                 input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil, extra: nil
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -314,7 +316,7 @@ enum UsageSummaryBuilder {
         }
         if visibility.musecode {
             appendTokenTool(&lines, id: "musecode", name: "Muse Code",
-                            range: usage.musecode.ranges.get(range))
+                            range: usage.musecode.ranges.get(range), reasonIncludedInOutput: true)
         }
         return lines
     }
@@ -331,11 +333,12 @@ enum UsageSummaryBuilder {
 
     private static func appendTokenTool(
         _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange,
-        includesCost: Bool = true
+        includesCost: Bool = true, reasonIncludedInOutput: Bool = false
     ) {
+        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
         let line = Line(
             id: id, name: name, cost: includesCost ? r.cost : nil,
-            tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+            tokens: total, sessions: r.sessions, calls: nil,
             input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
             reason: r.reason > 0 ? r.reason : nil,
             hit: r.hit > 0 ? r.hit : nil, extra: nil

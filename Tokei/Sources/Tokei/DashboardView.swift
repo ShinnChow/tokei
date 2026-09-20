@@ -442,6 +442,8 @@ struct DashboardView: View {
         case "grok_bot": return Theme.grokBot
         case "grok": return Theme.grok
         case "qoder": return Theme.qoder
+        case "qoderwork": return Theme.qoderwork
+        case "qodercli": return Theme.qodercli
         case "hermes": return Theme.hermes
         case "zcode": return Theme.zcode
         case "mimocode": return Theme.mimocode
@@ -1231,6 +1233,16 @@ struct DashboardView: View {
                                  input: qoder.in + qoder.cached, out: qoder.out, tokens: qoderTokens))
         }
 
+        let qodercli = usage.qodercli.ranges.get(key)
+        if !qodercli.models.isEmpty {
+            appendTokenModels(qodercli.models, tool: "qodercli", suffix: "Qoder CLI", to: &out)
+        } else if qodercli.totalTokens > 0 {
+            out.append(modelCost(name: usage.qodercli.model ?? "Qoder CLI", cost: 0,
+                                 tool: "qodercli", input: qodercli.in, out: qodercli.out,
+                                 cr: qodercli.cr, cw: qodercli.cw,
+                                 tokens: qodercli.totalTokens))
+        }
+
         appendTokenModels(usage.hermes.ranges.get(key).models, tool: "hermes", suffix: "Hermes", to: &out)
         appendTokenModels(usage.zcode.ranges.get(key).models, tool: "zcode", suffix: "ZCode", to: &out)
         appendTokenModels(usage.mimocode.ranges.get(key).models, tool: "mimocode", suffix: "MiMoCode", to: &out)
@@ -1245,7 +1257,8 @@ struct DashboardView: View {
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
         appendTokenModels(usage.kimicode.ranges.get(key).models, tool: "kimicode", suffix: "Kimi Code", to: &out)
-        appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code", to: &out)
+        appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code",
+                          reasonIncludedInOutput: true, to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -1253,9 +1266,11 @@ struct DashboardView: View {
         }
     }
 
-    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String, to out: inout [ModelCost]) {
+    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String,
+                                  reasonIncludedInOutput: Bool = false,
+                                  to out: inout [ModelCost]) {
         for model in models {
-            let tokens = tokenModelTotal(model)
+            let tokens = tokenModelTotal(model, reasonIncludedInOutput: reasonIncludedInOutput)
             if tokens > 0 || model.cost > 0 {
                 out.append(modelCost(name: "\(model.name) (\(suffix))", cost: model.cost, tool: tool,
                                      input: model.in, out: model.out, cr: model.cr, cw: model.cw,
@@ -1287,12 +1302,14 @@ struct DashboardView: View {
         let grok = usage.grok.ranges.get(key)
         let qoderwork = usage.qoderwork.ranges.get(key)
         let qoder = usage.qoder.ranges.get(key)
+        let qodercli = usage.qodercli.ranges.get(key)
         return claude.in + claude.out + claude.cr + claude.cw
             + codex.in + codex.cached + codex.out
             + gemini.in + gemini.cached + gemini.out + gemini.thoughts
             + (grok.usage_available ? grok.tokens : 0)
             + qoderwork.in + qoderwork.out
             + qoder.in + qoder.cached + qoder.out
+            + qodercli.totalTokens
             + hermesTotal(usage.hermes.ranges.get(key))
             + tokenUsageTotal(usage.zcode.ranges.get(key))
             + tokenUsageTotal(usage.mimocode.ranges.get(key))
@@ -1304,7 +1321,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
             + tokenUsageTotal(usage.kimicode.ranges.get(key))
-            + tokenUsageTotal(usage.musecode.ranges.get(key))
+            + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -1326,8 +1343,11 @@ struct DashboardView: View {
             + usage.musecode.ranges.get(key).cost
     }
 
-    static func tokenUsageTotal(_ r: TokenUsageRange) -> Int {
-        r.in + r.out + r.cr + r.cw + r.reason
+    static func tokenUsageTotal(
+        _ r: TokenUsageRange,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
     }
 
     static func hermesTotal(_ r: HermesRange) -> Int {
@@ -1335,11 +1355,14 @@ struct DashboardView: View {
     }
 
     static func openClawTotal(_ r: OpenClawRange) -> Int {
-        r.in + r.out + r.cr + r.cw
+        r.in + r.out + r.cr + r.cw + r.reason
     }
 
-    static func tokenModelTotal(_ m: TokenModelStat) -> Int {
-        m.in + m.out + m.cr + m.cw + m.reason
+    static func tokenModelTotal(
+        _ m: TokenModelStat,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
     }
 
     static func runScript(_ args: [String]) -> Data {
