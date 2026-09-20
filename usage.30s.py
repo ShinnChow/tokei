@@ -6322,44 +6322,58 @@ def _antigravity_remaining(value):
     return max(0.0, min(1.0, number)) if number is not None else None
 
 
+_ANTIGRAVITY_QUOTA_WINDOWS = (
+    ("gemini-weekly", "Gemini 周", 10080),
+    ("gemini-5h", "Gemini 5h", 300),
+    ("3p-weekly", "Claude/GPT 周", 10080),
+    ("3p-5h", "Claude/GPT 5h", 300),
+)
+
+
 def _normalize_antigravity_quota_summary(payload, updated=None):
     root = payload.get("response") if isinstance(payload, dict) \
         and isinstance(payload.get("response"), dict) else payload
     groups = root.get("groups") if isinstance(root, dict) and isinstance(root.get("groups"), list) else []
-    windows = []
-    for group_index, group in enumerate(groups):
+    buckets = {}
+    for group in groups:
         if not isinstance(group, dict):
             continue
-        display = str(group.get("displayName") or f"Group {group_index + 1}")
-        lower_group = display.lower()
-        if "gemini" in lower_group:
-            family, family_order = "Gemini", 0
-        elif "claude" in lower_group or "gpt" in lower_group or "third" in lower_group:
-            family, family_order = "Claude/GPT", 1
+        display = str(group.get("displayName") or "").lower()
+        if "gemini" in display:
+            family = "gemini"
+        elif any(name in display for name in ("claude", "gpt", "third")):
+            family = "3p"
         else:
-            family, family_order = display, 2 + group_index
-        for bucket_index, bucket in enumerate(group.get("buckets") or []):
+            continue
+        for bucket in group.get("buckets") or []:
             if not isinstance(bucket, dict) or bucket.get("disabled") is True:
                 continue
-            bucket_id = str(bucket.get("bucketId") or f"bucket-{bucket_index}")
-            cadence = (bucket_id + " " + str(bucket.get("displayName") or "")).lower()
-            normalized = cadence.replace("_", "-")
-            if any(marker in normalized for marker in ("5h", "5-hour", "five hour",
-                                                        "five-hour", "session")):
-                cadence_title, minutes, cadence_order = "5h", 300, 0
-            elif any(marker in normalized for marker in ("weekly", "week", "7d")):
-                cadence_title, minutes, cadence_order = "周", 10080, 1
+            cadence = " ".join(str(bucket.get(key) or "") for key in
+                               ("window", "bucketId", "displayName")).lower().replace("_", "-")
+            if any(marker in cadence for marker in ("weekly", "week", "7d")):
+                cadence_id = "weekly"
+            elif any(marker in cadence for marker in ("5h", "5-hour", "five hour",
+                                                       "five-hour", "session")):
+                cadence_id = "5h"
             else:
-                cadence_title, minutes, cadence_order = str(
-                    bucket.get("displayName") or bucket_id), None, 2
-            remaining = _antigravity_remaining(bucket.get("remaining"))
-            windows.append((family_order, cadence_order, bucket_index, _provider_window(
-                "antigravity-" + bucket_id, f"{family} {cadence_title}",
+                continue
+            buckets.setdefault(f"{family}-{cadence_id}", bucket)
+    rows = []
+    # Match the official shared quota groups, never individual model variants.
+    # Missing windows stay unknown; a model quota cannot stand in for a week.
+    if buckets:
+        for bucket_id, title, minutes in _ANTIGRAVITY_QUOTA_WINDOWS:
+            bucket = buckets.get(bucket_id, {})
+            # Connect JSON flattens the oneof; older clients wrap `remaining`.
+            remaining = _antigravity_remaining(bucket)
+            if remaining is None:
+                remaining = _antigravity_remaining(bucket.get("remaining"))
+            rows.append(_provider_window(
+                "antigravity-" + bucket_id, title,
                 (1 - remaining) * 100 if remaining is not None else None,
-                bucket.get("resetTime"), minutes, bucket.get("description"),
-                usage_known=remaining is not None)))
-    windows.sort(key=lambda item: item[:3])
-    rows = [item[3] for item in windows]
+                bucket.get("resetTime"), minutes,
+                "暂时无法读取" if remaining is None else None,
+                usage_known=remaining is not None))
     return {
         "available": bool(rows),
         "plan": None, "account": None, "windows": rows, "details": [],
@@ -6369,31 +6383,10 @@ def _normalize_antigravity_quota_summary(payload, updated=None):
     }
 
 
-def _normalize_antigravity_user_status(payload, updated=None):
+def _antigravity_user_identity(payload):
     if not isinstance(payload, dict):
         return {}
     status = payload.get("userStatus") if isinstance(payload.get("userStatus"), dict) else payload
-    config_data = status.get("cascadeModelConfigData") if isinstance(
-        status.get("cascadeModelConfigData"), dict) else {}
-    configs = config_data.get("clientModelConfigs")
-    if not isinstance(configs, list):
-        configs = payload.get("clientModelConfigs") if isinstance(
-            payload.get("clientModelConfigs"), list) else []
-    windows = []
-    for index, config in enumerate(configs):
-        if not isinstance(config, dict) or not isinstance(config.get("quotaInfo"), dict):
-            continue
-        info = config["quotaInfo"]
-        remaining = _provider_number(info.get("remainingFraction"))
-        if remaining is None:
-            continue
-        label = config.get("label")
-        model = config.get("modelOrAlias") if isinstance(config.get("modelOrAlias"), dict) else {}
-        model_id = model.get("model") or f"model-{index}"
-        windows.append(_provider_window(
-            "antigravity-model-" + str(model_id), str(label or model_id),
-            (1 - max(0, min(1, remaining))) * 100, info.get("resetTime")))
-    windows.sort(key=lambda row: (-(row.get("used_pct") or 0), row["title"]))
     tier = status.get("userTier") if isinstance(status.get("userTier"), dict) else {}
     plan_status = status.get("planStatus") if isinstance(status.get("planStatus"), dict) else {}
     plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
@@ -6402,19 +6395,13 @@ def _normalize_antigravity_user_status(payload, updated=None):
         plan_info.get("displayName"), plan_info.get("productName"),
         plan_info.get("planShortName")) if isinstance(value, str) and value.strip()), None)
     account = status.get("email") if isinstance(status.get("email"), str) else None
-    return {
-        "available": bool(windows), "plan": plan, "account": account,
-        "windows": windows[:12], "details": [], "source": "antigravity-local",
-        "updated": int(updated if updated is not None else datetime.now().timestamp()),
-        "stale": False,
-    }
+    return {"plan": plan, "account": account}
 
 
 def fetch_antigravity_quota():
     paths = {
         "summary": "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
         "status": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
-        "models": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
     }
     metadata = {"metadata": {
         "ideName": "antigravity", "extensionName": "antigravity",
@@ -6426,7 +6413,8 @@ def fetch_antigravity_quota():
         if not endpoints:
             continue
         marker = _provider_credential_marker(
-            "antigravity", process.get("pid"), process.get("csrf_token"), endpoints)
+            "antigravity", "quota-summary-v3", process.get("pid"),
+            process.get("csrf_token"), endpoints)
         cached = _cached_provider_quota("antigravity", marker, _PROVIDER_QUOTA_TTL)
         if cached:
             return cached
@@ -6438,7 +6426,7 @@ def fetch_antigravity_quota():
                 if quota.get("available"):
                     try:
                         identity_payload = _antigravity_request(endpoint, paths["status"], metadata)
-                        identity = _normalize_antigravity_user_status(identity_payload)
+                        identity = _antigravity_user_identity(identity_payload)
                         quota["plan"] = identity.get("plan")
                         quota["account"] = identity.get("account")
                     except Exception:
@@ -6447,16 +6435,6 @@ def fetch_antigravity_quota():
                     return quota
             except Exception as error:
                 last_error = error
-        for path, body in ((paths["status"], metadata), (paths["models"], metadata)):
-            for endpoint in endpoints:
-                try:
-                    quota = _normalize_antigravity_user_status(
-                        _antigravity_request(endpoint, path, body))
-                    if quota.get("available"):
-                        _save_provider_quota_cache("antigravity", marker, quota)
-                        return quota
-                except Exception as error:
-                    last_error = error
         fallback = _cached_provider_quota(
             "antigravity", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
         if fallback:

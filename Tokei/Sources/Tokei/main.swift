@@ -275,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()
+        ActivityReporter.shared.reportLaunchIfNeeded(appVersion: Updater.releaseTag)
         autoFetchPricing()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()

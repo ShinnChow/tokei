@@ -95,7 +95,8 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 可自定义间隔时间
 
 ### 隐私优先
-- 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据；Cursor 与 z.ai 还可读取对应 Provider 返回的账号级 Token/模型摘要
+- 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传这些用量数据；Cursor 与 z.ai 还可读取对应 Provider 返回的账号级 Token/模型摘要
+- 应用活跃统计默认开启，可在「设置 → 隐私与额度 → 应用活跃统计」关闭；升级保留已明确关闭的选择，重新开启于下次启动生效。启用期间，每次应用启动仅尝试上报一次随机安装 ID、Tokei 版本、系统名称和主次版本；服务端记录首次/最近活跃时间及最近一次来源 IP。关闭后停止发送，已发送的数据不会自动删除。安装 ID 独立保存在本机，不进入多设备同步。详情见 [应用活跃统计说明](docs/activity-statistics.md)
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Grok 实时额度默认关闭，可选择只读本地日志
 - Grok Bot 本地活动直接读取会话快照，快照不含 Token、模型和成本，Tokei 不按文本量估算。官方用量查询默认关闭；用户明确授权后，Tokei 临时解密 Grok Bot 当前登录态，只查询 `sand` 客户端的官方 Token、模型、成本和额度。登录 Token 只在内存中使用
@@ -123,9 +124,12 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 ```bash
 git clone https://github.com/cclank/tokei.git
 cd tokei/Tokei
-bash package.sh
+TOKEI_LOCAL_BUILD=1 bash package.sh
 open Tokei.app
 ```
+
+本地验证包在设置中显示“本地验证版”，不检查线上更新，避免尚未发布的改动被发布包覆盖。
+正式发布由 `release.sh` 使用 `TOKEI_LOCAL_BUILD=0` 打包，保留正常的更新功能。
 
 `package.sh` 会优先使用本机可用的 Developer ID / Apple Development
 证书，让 Keychain 中的 Provider 密钥在重复构建后仍可访问；没有证书时会回退到

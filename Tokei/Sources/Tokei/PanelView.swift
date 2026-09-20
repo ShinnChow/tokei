@@ -77,6 +77,7 @@ struct PanelView: View {
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
+    @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude5h.defaultsKey) private var menuBarQuotaClaude5h = true
@@ -2806,6 +2807,14 @@ struct PanelView: View {
 
     var settingsPrivacySection: some View {
         settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("应用活跃统计", isOn: $activityStatisticsEnabled)
+            Text("用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
             settingsToggleRow("Claude Code CLI 额度查询", isOn: $claudeCLIQuotaEnabled)
             Text("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")
                 .font(.system(size: 8.5))
@@ -2853,6 +2862,9 @@ struct PanelView: View {
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: activityStatisticsEnabled) { _ in
+            ActivityReporter.shared.preferencesChanged()
         }
         .onChange(of: claudeCLIQuotaEnabled) { _ in
             store.refresh()
@@ -3326,7 +3338,12 @@ struct PanelView: View {
             }
             .buttonStyle(.plain)
             .tip("GitHub")
-            if case .idle = updater.state {
+            if Updater.isLocalBuild {
+                Text("本地验证版")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.tTertiary)
+                    .tip("此版本包含尚未发布的改动，不检查线上更新")
+            } else if case .idle = updater.state {
                 Button { updater.checkForUpdate() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 10, weight: .semibold))
