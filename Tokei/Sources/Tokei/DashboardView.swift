@@ -68,6 +68,131 @@ struct DailyCost: Codable, Identifiable {
     var id: String { date }
 }
 
+private struct HeatToolCell: View {
+    let name: String
+    let tint: Color
+    let tokens: Int
+    let cost: Double
+    var cny: Double? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Circle().fill(tint).frame(width: 6, height: 6)
+                Text(name)
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
+                    .foregroundStyle(tint)
+            }
+            Text("\(Fmt.human(tokens)) tok")
+                .font(.system(size: Theme.fontSize(11), design: .monospaced))
+                .foregroundStyle(Theme.tTertiary)
+            Text(nativeMoney(cost, cny))
+                .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.tSecondary)
+        }
+    }
+}
+
+struct HeatDetailCard: View {
+    let day: DailyCost
+    var onClose: () -> Void
+
+    private var waTokens: Int {
+        (day.wa_in ?? 0) + (day.wa_out ?? 0) + (day.wa_cr ?? 0) + (day.wa_cw ?? 0)
+    }
+    private var dTokens: Int {
+        (day.d_in ?? 0) + (day.d_out ?? 0) + (day.d_cr ?? 0) + (day.d_cw ?? 0) + (day.d_reason ?? 0)
+    }
+    private var gTokens: Int {
+        (day.g_in ?? 0) + (day.g_out ?? 0) + (day.g_cr ?? 0) + (day.g_reason ?? 0)
+    }
+    private var wTokens: Int {
+        (day.w_in ?? 0) + (day.w_out ?? 0) + (day.w_cr ?? 0) + (day.w_cw ?? 0)
+    }
+    private var qTokens: Int {
+        (day.q_in ?? 0) + (day.q_out ?? 0) + (day.q_cr ?? 0) + (day.q_reason ?? 0)
+    }
+    private var cbTokens: Int {
+        (day.cb_in ?? 0) + (day.cb_out ?? 0) + (day.cb_cr ?? 0) + (day.cb_cw ?? 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(day.date).font(.system(size: Theme.fontSize(13), weight: .bold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+                Spacer()
+                Text(nativeMoney(day.total, day.cost_cny))
+                    .font(.system(size: Theme.fontSize(15), weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: Theme.fontSize(12)))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 12)],
+                      alignment: .leading, spacing: 8) {
+                HeatToolCell(name: "Claude", tint: Theme.claude,
+                             tokens: day.c_in + day.c_out + day.c_cr + day.c_cw, cost: day.claude)
+                HeatToolCell(name: "Codex", tint: Theme.codex,
+                             tokens: day.x_in + day.x_out, cost: day.codex)
+                let reserveTokens = (day.xr_in ?? 0) + (day.xr_out ?? 0)
+                if reserveTokens > 0 || (day.codex_reserve ?? 0) > 0 {
+                    HeatToolCell(name: "Luna Reserve", tint: Theme.codex,
+                                 tokens: reserveTokens, cost: day.codex_reserve ?? 0)
+                }
+                HeatToolCell(name: "Pi", tint: Theme.pi,
+                             tokens: day.p_in + day.p_out + day.p_cr + day.p_cw + day.p_reason,
+                             cost: day.pi)
+                HeatToolCell(name: "Prime Agent", tint: Theme.primeAgent,
+                             tokens: day.pa_in + day.pa_out + day.pa_cr + day.pa_cw + day.pa_reason,
+                             cost: day.prime_agent ?? 0)
+                HeatToolCell(name: "WorkBuddy", tint: Theme.workbuddy,
+                             tokens: wTokens, cost: day.workbuddy ?? 0)
+                if waTokens > 0 {
+                    HeatToolCell(name: "WorkBuddy Intl.", tint: Theme.workbuddyAI,
+                                 tokens: waTokens, cost: day.workbuddy_ai ?? 0)
+                }
+                if dTokens > 0 {
+                    HeatToolCell(name: "DeepSeek Harness", tint: Theme.deepseekHarness,
+                                 tokens: dTokens, cost: day.deepseek_harness ?? 0,
+                                 cny: day.cny_by_tool?["deepseek_harness"])
+                }
+                if cbTokens > 0 || (day.cb_credits ?? 0) > 0 {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Circle().fill(Theme.codebuddy).frame(width: 6, height: 6)
+                            Text("CodeBuddy")
+                                .font(.system(size: Theme.fontSize(11), weight: .medium))
+                                .foregroundStyle(Theme.codebuddy)
+                        }
+                        Text("\(Fmt.human(cbTokens)) tok")
+                            .font(.system(size: Theme.fontSize(11), design: .monospaced))
+                            .foregroundStyle(Theme.tTertiary)
+                        if (day.cb_credits ?? 0) > 0 {
+                            Text("\(Fmt.credits(day.cb_credits ?? 0)) Credits")
+                                .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                        }
+                    }
+                }
+                HeatToolCell(name: "Qwen Code", tint: Theme.qwencode,
+                             tokens: qTokens, cost: day.qwencode ?? 0)
+                if gTokens > 0 {
+                    HeatToolCell(name: "Grok Build", tint: Theme.grok,
+                                 tokens: gTokens, cost: day.grok ?? 0)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(Color.black.opacity(0.3))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Theme.claude.opacity(0.2), lineWidth: 0.5)))
+    }
+}
+
 struct ModelCost: Codable, Identifiable {
     var name: String
     var cost_cny: Double? = nil
@@ -537,104 +662,8 @@ struct DashboardView: View {
         }
     }
 
-    func heatDetail(_ d: DailyCost) -> some View {
-        let workbuddyAITokens = optionalTokenTotal(d.wa_in, d.wa_out, d.wa_cr, d.wa_cw)
-        let deepseekTokens = optionalTokenTotal(d.d_in, d.d_out, d.d_cr, d.d_cw, d.d_reason)
-        let grokTokens = optionalTokenTotal(d.g_in, d.g_out, d.g_cr, d.g_reason)
-        let codebuddyTokens = optionalTokenTotal(d.cb_in, d.cb_out, d.cb_cr, d.cb_cw)
-
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(d.date).font(.system(size: Theme.fontSize(13), weight: .bold, design: .monospaced))
-                    .foregroundStyle(Theme.tPrimary)
-                Spacer()
-                Text(nativeMoney(d.total, d.cost_cny))
-                    .font(.system(size: Theme.fontSize(15), weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                Button { selectedCell = nil } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: Theme.fontSize(12)))
-                        .foregroundStyle(Theme.tTertiary)
-                }
-                .buttonStyle(.plain)
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 12)],
-                      alignment: .leading, spacing: 8) {
-                heatProviderMetric("Claude", tint: Theme.claude,
-                                   tokens: d.c_in + d.c_out + d.c_cr + d.c_cw, cost: d.claude)
-                heatProviderMetric("Codex", tint: Theme.codex,
-                                   tokens: d.x_in + d.x_out, cost: d.codex)
-                let reserveTokens = (d.xr_in ?? 0) + (d.xr_out ?? 0)
-                if reserveTokens > 0 || (d.codex_reserve ?? 0) > 0 {
-                    heatProviderMetric("Luna Reserve", tint: Theme.codex,
-                                       tokens: reserveTokens, cost: d.codex_reserve ?? 0)
-                }
-                heatProviderMetric("Pi", tint: Theme.pi,
-                                   tokens: d.p_in + d.p_out + d.p_cr + d.p_cw + d.p_reason, cost: d.pi)
-                heatProviderMetric("Prime Agent", tint: Theme.primeAgent,
-                                   tokens: d.pa_in + d.pa_out + d.pa_cr + d.pa_cw + d.pa_reason,
-                                   cost: d.prime_agent ?? 0)
-                heatProviderMetric("WorkBuddy", tint: Theme.workbuddy,
-                                   tokens: (d.w_in ?? 0) + (d.w_out ?? 0) + (d.w_cr ?? 0) + (d.w_cw ?? 0),
-                                   cost: d.workbuddy ?? 0)
-                if workbuddyAITokens > 0 {
-                    heatProviderMetric("WorkBuddy Intl.", tint: Theme.workbuddyAI,
-                                       tokens: workbuddyAITokens, cost: d.workbuddy_ai ?? 0)
-                }
-                if deepseekTokens > 0 {
-                    heatProviderMetric("DeepSeek Harness", tint: Theme.deepseekHarness,
-                                       tokens: deepseekTokens, cost: d.deepseek_harness ?? 0, cny: d.cny_by_tool?["deepseek_harness"])
-                }
-                if codebuddyTokens > 0 || (d.cb_credits ?? 0) > 0 {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Circle().fill(Theme.codebuddy).frame(width: 6, height: 6)
-                            Text("CodeBuddy").font(.system(size: Theme.fontSize(11), weight: .medium))
-                                .foregroundStyle(Theme.codebuddy)
-                        }
-                        Text("\(Fmt.human((d.cb_in ?? 0) + (d.cb_out ?? 0) + (d.cb_cr ?? 0) + (d.cb_cw ?? 0))) tok")
-                            .font(.system(size: Theme.fontSize(11), design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                        if (d.cb_credits ?? 0) > 0 {
-                            Text("\(Fmt.credits(d.cb_credits ?? 0)) Credits")
-                                .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
-                                .foregroundStyle(Theme.tSecondary)
-                        }
-                    }
-                }
-                heatProviderMetric("Qwen Code", tint: Theme.qwencode,
-                                   tokens: (d.q_in ?? 0) + (d.q_out ?? 0) + (d.q_cr ?? 0) + (d.q_reason ?? 0),
-                                   cost: d.qwencode ?? 0)
-                if grokTokens > 0 {
-                    heatProviderMetric("Grok Build", tint: Theme.grok,
-                                       tokens: grokTokens, cost: d.grok ?? 0)
-                }
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color.black.opacity(0.3))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Theme.claude.opacity(0.2), lineWidth: 0.5)))
-    }
-
-    private func heatProviderMetric(_ name: String, tint: Color, tokens: Int, cost: Double, cny: Double? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 4) {
-                Circle().fill(tint).frame(width: 6, height: 6)
-                Text(name)
-                    .font(.system(size: Theme.fontSize(11), weight: .medium))
-                    .foregroundStyle(tint)
-            }
-            Text("\(Fmt.human(tokens)) tok")
-                .font(.system(size: Theme.fontSize(11), design: .monospaced))
-                .foregroundStyle(Theme.tTertiary)
-            Text(nativeMoney(cost, cny))
-                .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
-                .foregroundStyle(Theme.tSecondary)
-        }
-    }
-
-    private func optionalTokenTotal(_ values: Int?...) -> Int {
-        values.reduce(0) { total, value in total + (value ?? 0) }
+    func heatDetail(_ d: DailyCost) -> HeatDetailCard {
+        HeatDetailCard(day: d) { selectedCell = nil }
     }
 
     var weekStrip: some View {

@@ -5907,14 +5907,18 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
     if legacy:
         total_pct = _provider_percent(requests_used / requests_limit * 100)
         primary_detail = f"{int(requests_used)} / {int(requests_limit)} requests"
+        windows = [_provider_window(
+            "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
     else:
-        primary_detail = (
-            f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}"
+        # $70 是 Other Models 池。plan.used 经常是套餐面额，按 apiPercentUsed 折算。
+        spend = plan_used
+        if plan_limit > 0 and abs(plan_used / plan_limit * 100 - total_pct) > 5:
+            spend_pct = api_pct if api_pct is not None else total_pct
+            spend = plan_limit * spend_pct / 100.0
+        spend_detail = (
+            f"{_provider_money(spend / 100)} / {_provider_money(plan_limit / 100)}"
             if plan_limit > 0 else None)
-
-    windows = [_provider_window(
-        "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
-    if not legacy:
+        windows = []
         if auto_pct is not None:
             windows.append(_provider_window(
                 "cursor-auto", "Cursor 模型", auto_pct, cycle_end, window_minutes))
@@ -5925,7 +5929,8 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
     if plan_limit > 0 and not legacy:
         details.append({
             "label": "套餐用量",
-            "value": f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}",
+            "value": spend_detail or (
+                f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}"),
         })
     on_demand = individual.get("onDemand") if isinstance(individual.get("onDemand"), dict) else {}
     team_on_demand = team.get("onDemand") if isinstance(team.get("onDemand"), dict) else {}
