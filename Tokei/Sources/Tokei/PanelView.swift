@@ -528,7 +528,6 @@ struct PanelView: View {
             ToolCardItem(id: "devin", name: "Devin", visible: showDevin,
                          active: dvr.sessions > 0 || u.devin.quota.available,
                          tint: Theme.devin,
-                         presentation: dvr.sessions > 0 ? .standard : .compactStatus,
                          content: AnyView(devinBlock(dvr, quota: u.devin.quota))),
             ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode,
                          active: kcr.sessions > 0 || u.kimicode.hasQuota || u.kimicode.hasStaleQuota,
