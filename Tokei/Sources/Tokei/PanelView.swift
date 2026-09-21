@@ -2549,6 +2549,7 @@ struct PanelView: View {
                 VStack(alignment: .leading, spacing: 11) {
                     settingsAppearanceSection
                     settingsMenuBarSection
+                    settingsUpdateSection
                     settingsPrivacySection
                     settingsSystemSection
                     settingsReminderSection
@@ -2719,6 +2720,74 @@ struct PanelView: View {
         }
         .onChange(of: menuBarQuotaDigest) { _ in
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+        }
+    }
+
+    var settingsUpdateSection: some View {
+        settingsSection("arrow.triangle.2.circlepath", "版本与更新") {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前版本 \(Updater.releaseTag)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Theme.tPrimary)
+                    Text(Updater.isLocalBuild ? "本地验证版不检查线上更新" : "启动时自动检查，也可在这里手动检查")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                Spacer()
+                if Updater.isLocalBuild {
+                    Text("本地验证版")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tTertiary)
+                } else {
+                    switch updater.state {
+                    case .idle:
+                        settingsActionButton(icon: "arrow.triangle.2.circlepath", title: "检查更新") {
+                            updater.checkForUpdate()
+                        }
+                    case .checking:
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("正在检查")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tTertiary)
+                    case .upToDate:
+                        Label("已是最新版本", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.green)
+                    case .available(let tag, _, _):
+                        settingsActionButton(icon: "arrow.down.circle.fill", title: "升级到 \(tag)") {
+                            updater.performUpdate()
+                        }
+                    case .downloading(let progress):
+                        Text("下载中 \(Int(progress * 100))%")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Theme.tSecondary)
+                    case .installing:
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("正在安装")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tSecondary)
+                    case .failed(let message):
+                        VStack(alignment: .trailing, spacing: 3) {
+                            settingsActionButton(icon: "arrow.clockwise", title: "重试") {
+                                updater.checkForUpdate()
+                            }
+                            Text(message)
+                                .font(.system(size: 8))
+                                .foregroundStyle(.red.opacity(0.85))
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.04)))
         }
     }
 
