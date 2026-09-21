@@ -53,6 +53,7 @@ enum Theme {
     static let primeAgent = Color(red: 0.96, green: 0.58, blue: 0.28) // 活力橙
     static let workbuddy = Color(red: 0.25, green: 0.78, blue: 0.72) // 青绿
     static let workbuddyAI = Color(red: 0.36, green: 0.66, blue: 0.94) // 国际版蓝
+    static let codebuddy = Color(red: 0.46, green: 0.58, blue: 0.96) // CodeBuddy 蓝紫
     static let deepseekHarness = Color(red: 0.18, green: 0.58, blue: 0.94) // 深海蓝
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝

@@ -21,6 +21,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` | JSONL, assistant `message.usage` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | WorkBuddy Intl. | `~/.workbuddy-ai/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
+| CodeBuddy Code | `~/.codebuddy/projects/**/*.jsonl`（含主会话与 `subagents`） | JSONL, `message.usage` / `providerData.rawUsage` / `providerData.messageId` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd` | 多帧 zstd JSONL，最终 `assistant/message.data.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
@@ -216,13 +217,22 @@ Dashboard、Wrapped 或项目 token 总量。
 `.trajectory.jsonl`、全文索引和非 usage 事件不参与统计。`state/openclaw.sqlite` 的 `task_runs`
 仍提供任务状态，旧版 `~/.openclaw/tasks/runs.sqlite` 作为任务统计回退。
 
+**CodeBuddy Code** — `message.usage.input_tokens` 与 `providerData.rawUsage.prompt_tokens` 包含缓存输入:
+- 输入 = prompt 总量 - `cache_read_input_tokens` - `prompt_cache_write_tokens`
+- 输出 = `output_tokens` / `completion_tokens`（`completion_thinking_tokens` 已包含在输出中）
+- 缓存读 = `cache_read_input_tokens` / `prompt_cache_hit_tokens`
+- 缓存写 = `cache_creation_input_tokens` / `prompt_cache_write_tokens`
+- Credit = `providerData.rawUsage.credit`，按模型调用累计，不换算成美元
+- 去重优先使用 `sessionId + providerData.messageId`，回退 entry `id`；`conversationRequestId` 只作轮次关联，不能作为去重键
+- 主会话和 `subagents` 都参与统计；`traces`、`logs`、auth 和 transcript 正文不作为数据源
+
 ---
 
 ## 3. 缓存命中率
 
 两种公式,取决于 `input` 是否包含缓存:
 
-### Claude / Grok Build / Hermes / Pi / WorkBuddy / WorkBuddy Intl. / OpenCode / Qwen Code(input 不含缓存)
+### Claude / Grok Build / Hermes / Pi / WorkBuddy / WorkBuddy Intl. / CodeBuddy / OpenCode / Qwen Code(input 不含缓存)
 
 ```
 hit% = cache_read / (cache_read + cache_write + input) × 100
@@ -346,6 +356,10 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQ
 
 不估算成本。Grok Build 的 OAuth/订阅交互日志没有完整成本，缺失值不会显示为 0 美元；
 只有 token 参与聚合和排行。
+
+### CodeBuddy Code 成本
+
+CodeBuddy 的 `Credit` 是产品原生消耗单位，不等同于美元。Tokei 保留并展示 Credit；只有模型命中明确价格表时才计算美元估算，未知模型的美元成本保持为未知/零估算，不解释为免费。
 
 ---
 

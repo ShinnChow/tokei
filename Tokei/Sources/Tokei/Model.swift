@@ -573,6 +573,7 @@ struct TokenModelStat: Codable, Identifiable {
     var reason: Int = 0
     var cost_cny: Double? = nil
     var cost: Double
+    var credits: Double = 0
     var pin: Double = 0
     var pout: Double = 0
     var id: String { modelId ?? name }
@@ -588,6 +589,7 @@ struct TokenModelStat: Codable, Identifiable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        credits = try c.decodeIfPresent(Double.self, forKey: .credits) ?? 0
         cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
@@ -596,6 +598,7 @@ struct TokenModelStat: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
         case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout
+        case credits
     }
 }
 struct HermesRanges: Codable {
@@ -682,6 +685,7 @@ struct TokenUsageRange: Codable {
     var reason: Int
     var cost_cny: Double? = nil
     var cost: Double
+    var credits: Double
     var requests: Int
     var sessions: Int = 0
     var models: [TokenModelStat] = []
@@ -697,7 +701,7 @@ struct TokenUsageRange: Codable {
 
     init(tokens: Int = 0, hit: Double = 0, `in` input: Int = 0, out: Int = 0,
          cr: Int = 0, cw: Int = 0, reason: Int = 0, cost: Double = 0,
-         requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
+         credits: Double = 0, requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
          coverage: String? = nil) {
         self.tokens = tokens
         self.hit = hit
@@ -707,6 +711,7 @@ struct TokenUsageRange: Codable {
         self.cw = cw
         self.reason = reason
         self.cost = cost
+        self.credits = credits
         self.requests = requests
         self.sessions = sessions
         self.models = models
@@ -723,6 +728,7 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        credits = try c.decodeIfPresent(Double.self, forKey: .credits) ?? 0
         cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
@@ -954,6 +960,7 @@ struct Usage: Codable {
     var prime_agent: TokenUsageStat
     var workbuddy: TokenUsageStat
     var workbuddyAI: TokenUsageStat
+    var codebuddy: TokenUsageStat
     var deepseekHarness: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
@@ -971,6 +978,7 @@ struct Usage: Codable {
         case claude, codex, gemini, grok, grokBot = "grok_bot"
         case qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
+        case codebuddy
         case deepseekHarness = "deepseek_harness", opencode, qwencode
         case qwenwork, kimicode, musecode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
@@ -996,6 +1004,7 @@ struct Usage: Codable {
         prime_agent = try c.decodeIfPresent(TokenUsageStat.self, forKey: .prime_agent) ?? TokenUsageStat(ranges: .empty)
         workbuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddy) ?? TokenUsageStat(ranges: .empty)
         workbuddyAI = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddyAI) ?? TokenUsageStat(ranges: .empty)
+        codebuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .codebuddy) ?? TokenUsageStat(ranges: .empty)
         deepseekHarness = try c.decodeIfPresent(TokenUsageStat.self, forKey: .deepseekHarness) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)

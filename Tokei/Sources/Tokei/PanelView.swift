@@ -24,6 +24,7 @@ struct PanelView: View {
     @State private var primeAgentModelsOpen = false
     @State private var workBuddyModelsOpen = false
     @State private var workBuddyAIModelsOpen = false
+    @State private var codeBuddyModelsOpen = false
     @State private var deepSeekHarnessModelsOpen = false
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
@@ -68,6 +69,7 @@ struct PanelView: View {
     @AppStorage("showPrimeAgent") private var showPrimeAgent = true
     @AppStorage("showWorkBuddy") private var showWorkBuddy = true
     @AppStorage("showWorkBuddyAI") private var showWorkBuddyAI = true
+    @AppStorage("showCodeBuddy") private var showCodeBuddy = true
     @AppStorage("showDeepSeekHarness") private var showDeepSeekHarness = true
     @AppStorage("showOpenCode") private var showOpenCode = true
     @AppStorage("showQwenCode") private var showQwenCode = true
@@ -105,6 +107,7 @@ struct PanelView: View {
             hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
             openclaw: showOpenClaw, pi: showPi, primeAgent: showPrimeAgent,
             workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
+            codebuddy: showCodeBuddy,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
             musecode: showMuseCode, cmdcode: showCmdCode
@@ -116,6 +119,7 @@ struct PanelView: View {
          showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showHermes,
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
+         showCodeBuddy,
          showOpenCode, showQwenCode,
          showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent].filter { $0 }.count
     }
@@ -383,6 +387,7 @@ struct PanelView: View {
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
         let par = u.prime_agent.ranges.get(sel)
         let wr = u.workbuddy.ranges.get(sel), wair = u.workbuddyAI.ranges.get(sel)
+        let cbr = u.codebuddy.ranges.get(sel)
         let or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
         let claudeQuotaState = SubscriptionQuotaState.resolve([
@@ -493,6 +498,13 @@ struct PanelView: View {
                          content: AnyView(tokenUsageBlock(
                             title: "WorkBuddy Intl.", wair, tint: Theme.workbuddyAI,
                             modelsOpen: $workBuddyAIModelsOpen, toolID: "workbuddy-ai"))),
+            ToolCardItem(id: "codebuddy", name: "CodeBuddy", visible: showCodeBuddy,
+                         active: cbr.sessions > 0 || cbr.totalTokens > 0 || cbr.credits > 0,
+                         tint: Theme.codebuddy,
+                         content: AnyView(tokenUsageBlock(
+                            title: "CodeBuddy", cbr, tint: Theme.codebuddy,
+                            modelsOpen: $codeBuddyModelsOpen, showsCost: false,
+                            showsCredits: true, toolID: "codebuddy"))),
             ToolCardItem(id: "deepseek_harness", name: "DeepSeek Harness", visible: showDeepSeekHarness,
                          active: dshr.sessions > 0, tint: Theme.deepseekHarness,
                          content: AnyView(tokenUsageBlock(title: "DeepSeek Harness", dshr,
@@ -1761,15 +1773,19 @@ struct PanelView: View {
     @ViewBuilder
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
-                         showsCost: Bool = true, reasonIncludedInOutput: Bool = false,
+                         showsCost: Bool = true, showsCredits: Bool = false,
+                         reasonIncludedInOutput: Bool = false,
                          toolID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if r.sessions > 0 {
                 let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
                 CostHeadline(value: Fmt.human(total), caption: "\(sel.label) 总量", tint: tint)
+                let creditMetrics: [Metric] = showsCredits && r.credits > 0
+                    ? [.init("circle.hexagongrid.fill", "Credits", Fmt.credits(r.credits))]
+                    : []
                 metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", nativeMoney(r.cost, r.cost_cny))] : [],
-                    hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
+                    hit: r.hit, extra: creditMetrics + tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
                                          reasonIncludedInOutput: reasonIncludedInOutput,
@@ -2034,7 +2050,7 @@ struct PanelView: View {
                     let total = tokenModelTotal(m, reasonIncludedInOutput: reasonIncludedInOutput)
                     let hit = tokenModelHit(m)
                     let hasBreakdown = m.in + m.out + m.cr + m.cw + m.reason > 0
-                        || m.cost > 0 || m.pin > 0 || m.pout > 0
+                        || m.cost > 0 || m.credits > 0 || m.pin > 0 || m.pout > 0
                     let isExpanded = expandedModels.contains(m.id)
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
@@ -2073,6 +2089,11 @@ struct PanelView: View {
                                     }
                                     if m.cost > 0 || (m.cost_cny ?? 0) > 0 {
                                         Text(nativeMoney(m.cost, m.cost_cny))
+                                            .font(.system(size: Theme.fontSize(11.5), weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(Theme.tPrimary)
+                                    }
+                                    if m.credits > 0 {
+                                        Text("\(Fmt.credits(m.credits)) C")
                                             .font(.system(size: Theme.fontSize(11.5), weight: .semibold, design: .monospaced))
                                             .foregroundStyle(Theme.tPrimary)
                                     }
@@ -2528,6 +2549,7 @@ struct PanelView: View {
                 VStack(alignment: .leading, spacing: 11) {
                     settingsAppearanceSection
                     settingsMenuBarSection
+                    settingsUpdateSection
                     settingsPrivacySection
                     settingsSystemSection
                     settingsReminderSection
@@ -2701,6 +2723,74 @@ struct PanelView: View {
         }
     }
 
+    var settingsUpdateSection: some View {
+        settingsSection("arrow.triangle.2.circlepath", "版本与更新") {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前版本 \(Updater.releaseTag)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Theme.tPrimary)
+                    Text(Updater.isLocalBuild ? "本地验证版不检查线上更新" : "启动时自动检查，也可在这里手动检查")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                Spacer()
+                if Updater.isLocalBuild {
+                    Text("本地验证版")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tTertiary)
+                } else {
+                    switch updater.state {
+                    case .idle:
+                        settingsActionButton(icon: "arrow.triangle.2.circlepath", title: "检查更新") {
+                            updater.checkForUpdate()
+                        }
+                    case .checking:
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("正在检查")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tTertiary)
+                    case .upToDate:
+                        Label("已是最新版本", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.green)
+                    case .available(let tag, _, _):
+                        settingsActionButton(icon: "arrow.down.circle.fill", title: "升级到 \(tag)") {
+                            updater.performUpdate()
+                        }
+                    case .downloading(let progress):
+                        Text("下载中 \(Int(progress * 100))%")
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Theme.tSecondary)
+                    case .installing:
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text("正在安装")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.tSecondary)
+                    case .failed(let message):
+                        VStack(alignment: .trailing, spacing: 3) {
+                            settingsActionButton(icon: "arrow.clockwise", title: "重试") {
+                                updater.checkForUpdate()
+                            }
+                            Text(message)
+                                .font(.system(size: 8))
+                                .foregroundStyle(.red.opacity(0.85))
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.04)))
+        }
+    }
+
     var settingsSystemSection: some View {
         settingsSection("gearshape.2", "系统") {
             settingsToggleRow(
@@ -2754,6 +2844,7 @@ struct PanelView: View {
                 settingsRow("Prime Agent", tint: Theme.primeAgent, isOn: $showPrimeAgent)
                 settingsRow("WorkBuddy", tint: Theme.workbuddy, isOn: $showWorkBuddy)
                 settingsRow("WorkBuddy Intl.", tint: Theme.workbuddyAI, isOn: $showWorkBuddyAI)
+                settingsRow("CodeBuddy", tint: Theme.codebuddy, isOn: $showCodeBuddy)
                 settingsRow("DeepSeek Harness", tint: Theme.deepseekHarness, isOn: $showDeepSeekHarness)
                 settingsRow("OpenCode", tint: Theme.opencode, isOn: $showOpenCode)
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
@@ -3818,6 +3909,7 @@ struct PanelView: View {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
                          "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
+                         "codebuddy",
                          "deepseek_harness",
                          "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent"]
                 .filter { json[$0] != nil }

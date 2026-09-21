@@ -19,6 +19,7 @@
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   WorkBuddy AI:~/.workbuddy-ai/projects/**/*.jsonl (国际版,同结构独立统计)
+#   CodeBuddy:   ~/.codebuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   Grok Bot:    ~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob
 #                (本地会话活动；当前快照不含 Token / 模型 / 成本)
 #                额度默认关闭；授权后由 Tokei 原生 helper 临时读取 Keychain 登录态
@@ -115,6 +116,8 @@ GROK_LOG = os.path.join(GROK_HOME, "logs", "unified.jsonl")
 GROK_AUTH = os.path.join(GROK_HOME, "auth.json")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
 WORKBUDDY_AI_DIR = os.path.join(HOME, ".workbuddy-ai", "projects")
+CODEBUDDY_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "TOKEI_CODEBUDDY_DIR", os.path.join(HOME, ".codebuddy", "projects"))))
 GROK_BOT_DIRS = _path_candidates(
     "TOKEI_GROK_BOT_DIR",
     os.path.join(HOME, "Library", "Application Support", "Grok Bot",
@@ -1180,7 +1183,10 @@ def _ledger_file_sources(file_cache, identity_field=None, accounting_version=1):
 
 def _ledger_add_record_source(sources, identity, day_key, record, hour=None):
     days = sources.setdefault(str(identity), {})
-    contribution = {field: record.get(field, 0) for field in (*TOKEN_FIELDS, "cost", "cost_cny")}
+    contribution = {
+        field: record.get(field, 0)
+        for field in (*TOKEN_FIELDS, "cost", "cost_cny", "credits")
+    }
     if record.get("models"):
         contribution["models"] = record["models"]
     elif record.get("model"):
@@ -1380,12 +1386,12 @@ def _empty_openclaw():
 
 def _empty_token_bucket():
     return {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
-            "cost": 0.0, "sessions": set(), "models": {}}
+            "cost": 0.0, "credits": 0.0, "sessions": set(), "models": {}}
 
 
 def _empty_token_day():
     return {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
-            "cost": 0.0, "models": {}, "hours": [0] * 24}
+            "cost": 0.0, "credits": 0.0, "models": {}, "hours": [0] * 24}
 
 
 def _empty_token_ranges():
@@ -1475,41 +1481,54 @@ def _iter_cached_token_days(tool_cache):
             yield day["date"], day
 
 
-def _add_model_usage(models, model, inp=0, out=0, cr=0, cw=0, reason=0, cost=0.0, cost_cny=0.0):
+def _add_model_usage(models, model, inp=0, out=0, cr=0, cw=0, reason=0,
+                     cost=0.0, credits=0.0, cost_cny=0.0):
     if not model:
         return
-    mm = models.setdefault(model, {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0})
+    mm = models.setdefault(model, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                                    "reason": 0, "cost": 0.0, "credits": 0.0,
+                                    "cost_cny": 0.0})
     mm["in"] += int(inp or 0); mm["out"] += int(out or 0)
     mm["cr"] += int(cr or 0); mm["cw"] += int(cw or 0); mm["reason"] += int(reason or 0)
     mm["cost"] += float(cost or 0)
+    mm["credits"] = float(mm.get("credits", 0) or 0) + float(credits or 0)
     mm["cost_cny"] = mm.get("cost_cny", 0.0) + float(cost_cny or 0)
 
 
-def _add_token_usage(target, inp=0, out=0, cr=0, cw=0, reason=0, cost=0.0, model=None, cost_cny=0.0):
+def _add_token_usage(target, inp=0, out=0, cr=0, cw=0, reason=0, cost=0.0,
+                     model=None, credits=0.0, cost_cny=0.0):
     target["in"] += int(inp or 0); target["out"] += int(out or 0)
     target["cr"] += int(cr or 0); target["cw"] += int(cw or 0); target["reason"] += int(reason or 0)
     target["cost"] += float(cost or 0)
+    target["credits"] = float(target.get("credits", 0.0) or 0.0) + float(credits or 0)
     target["cost_cny"] = target.get("cost_cny", 0.0) + float(cost_cny or 0)
-    _add_model_usage(target.get("models", {}), model, inp, out, cr, cw, reason, cost, cost_cny)
+    _add_model_usage(target.get("models", {}), model, inp, out, cr, cw, reason, cost,
+                     credits=credits, cost_cny=cost_cny)
 
 
 def _merge_token_day(bucket, day, session=None):
     if session is not None:
         bucket["sessions"].add(session)
     _add_token_usage(bucket, day.get("in", 0), day.get("out", 0), day.get("cr", 0),
-                     day.get("cw", 0), day.get("reason", 0), day.get("cost", 0), cost_cny=day.get("cost_cny", 0))
+                     day.get("cw", 0), day.get("reason", 0), day.get("cost", 0),
+                     credits=day.get("credits", 0), cost_cny=day.get("cost_cny", 0))
     for model, mv in day.get("models", {}).items():
         _add_model_usage(bucket["models"], model, mv.get("in", 0), mv.get("out", 0),
-                         mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0), mv.get("cost", 0), mv.get("cost_cny", 0))
+                         mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
+                         mv.get("cost", 0), credits=mv.get("credits", 0),
+                         cost_cny=mv.get("cost_cny", 0))
 
 
 def _merge_live_token_day(agg, day):
     """跨文件合并同日数据(token 字段/models/hours,均 JSON 兼容),用作 ledger 的 live_days。"""
     _add_token_usage(agg, day.get("in", 0), day.get("out", 0), day.get("cr", 0),
-                     day.get("cw", 0), day.get("reason", 0), day.get("cost", 0), cost_cny=day.get("cost_cny", 0))
+                     day.get("cw", 0), day.get("reason", 0), day.get("cost", 0),
+                     credits=day.get("credits", 0), cost_cny=day.get("cost_cny", 0))
     for model, mv in (day.get("models") or {}).items():
         _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
-                         mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0), mv.get("cost", 0), mv.get("cost_cny", 0))
+                         mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
+                         mv.get("cost", 0), credits=mv.get("credits", 0),
+                         cost_cny=mv.get("cost_cny", 0))
     hours = day.get("hours")
     if isinstance(hours, list):
         agg_hours = agg.setdefault("hours", [0] * 24)
@@ -1524,7 +1543,7 @@ def _format_token_models(models, include_prices=True):
     for model, usage in models.items():
         model_id = _model_identity_id(model)
         merged = canonical_models.setdefault(model_id, {})
-        for field in ("in", "out", "cr", "cw", "reason", "cost", "cost_cny"):
+        for field in ("in", "out", "cr", "cw", "reason", "cost", "cost_cny", "credits"):
             merged[field] = merged.get(field, 0) + usage.get(field, 0)
     result = []
     sort_key = (lambda kv: -kv[1].get("cost", 0)) if include_prices else (
@@ -1536,7 +1555,10 @@ def _format_token_models(models, include_prices=True):
         result.append({"model_id": model_id, "name": nice_model(model_id),
                        "in": v.get("in", 0), "out": v.get("out", 0),
                         "cr": v.get("cr", 0), "cw": v.get("cw", 0), "reason": v.get("reason", 0),
-                        "cost": v.get("cost", 0), "cost_cny": v.get("cost_cny", 0), "pin": 0 if v.get("cost_cny") else p["in"], "pout": 0 if v.get("cost_cny") else p["out"]})
+                        "cost": v.get("cost", 0), "cost_cny": v.get("cost_cny", 0),
+                        "credits": v.get("credits", 0),
+                        "pin": 0 if v.get("cost_cny") else p["in"],
+                        "pout": 0 if v.get("cost_cny") else p["out"]})
     return result
 
 
@@ -8184,7 +8206,8 @@ def scan_hermes(bounds, cache):
             for mn, mv in (day.get("models") or {}).items():
                 _add_model_usage(agg["models"], mn, mv.get("in", 0), mv.get("out", 0),
                                  mv.get("cr", 0), mv.get("cw", 0),
-                                 mv.get("reason", 0), mv.get("cost", 0), mv.get("cost_cny", 0))
+                                 mv.get("reason", 0), mv.get("cost", 0),
+                                 cost_cny=mv.get("cost_cny", 0))
             for hour, amount in enumerate((day.get("hours") or [])[:24]):
                 agg["hours"][hour] += amount
 
@@ -9016,6 +9039,9 @@ def scan_prime_agent(bounds, cache):
 # 两个独立 App 共用解析逻辑,但缓存、账本和展示分别统计。
 # 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
 # 不重复累计；reasoning_tokens 已包含在 output_tokens 中。
+_WORKBUDDY_PARSER_VERSION = 2
+
+
 def _workbuddy_number(obj, *keys):
     if not isinstance(obj, dict):
         return None
@@ -9029,6 +9055,24 @@ def _workbuddy_number(obj, *keys):
             return max(int(value), 0)
         except (TypeError, ValueError):
             continue
+    return None
+
+
+def _workbuddy_float(obj, *keys):
+    if not isinstance(obj, dict):
+        return None
+    for key in keys:
+        if key not in obj:
+            continue
+        value = obj.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return max(value, 0.0)
     return None
 
 
@@ -9053,7 +9097,7 @@ def _workbuddy_timestamp(value):
     return None
 
 
-def _workbuddy_usage_record(item):
+def _workbuddy_usage_record(item, model_id_first=False):
     message = item.get("message") or {}
     if not isinstance(message, dict):
         message = {}
@@ -9066,6 +9110,10 @@ def _workbuddy_usage_record(item):
     raw = provider.get("rawUsage") or {}
     sources = [x for x in (message_usage, normalized, raw) if isinstance(x, dict) and x]
 
+    credits = max(
+        (_workbuddy_float(source, "credit", "credits") or 0.0 for source in sources),
+        default=0.0,
+    )
     selected = None
     input_total = output = 0
     for source in sources:
@@ -9077,7 +9125,9 @@ def _workbuddy_usage_record(item):
             output = out or 0
             break
     if selected is None:
-        return None
+        if credits <= 0:
+            return None
+        selected = sources[0]
 
     cache_read_candidates = []
     cache_write_candidates = []
@@ -9115,12 +9165,19 @@ def _workbuddy_usage_record(item):
     if dt is None:
         return None
 
-    model = (provider.get("requestModelName") or provider.get("requestModelId")
+    model_keys = (("requestModelId", "requestModelName") if model_id_first else
+                  ("requestModelName", "requestModelId"))
+    model = (provider.get(model_keys[0]) or provider.get(model_keys[1])
              or provider.get("model") or message.get("model") or item.get("model") or "unknown")
     price = _raw_price(str(model))
     cost = (input_tokens / 1e6 * price["in"] + output / 1e6 * price["out"]
             + cache_read / 1e6 * price["cache_read"]
             + cache_write / 1e6 * price["cache_write"])
+    # CodeBuddy already records its native Credit value. Do not turn an
+    # unrecognised model into a guessed dollar estimate; keep the Credit
+    # total authoritative and leave USD at zero until an exact price exists.
+    if model_id_first and not _exact_pricing_id(_model_identity_id(str(model))):
+        cost = 0.0
     item_id = item.get("id") or provider.get("messageId") or ""
     return {
         "date": dt.date().isoformat(),
@@ -9134,7 +9191,9 @@ def _workbuddy_usage_record(item):
         "cw": cache_write,
         "reason": 0,
         "cost": cost,
+        "credits": credits,
         "model": str(model),
+        "message_id": str(provider.get("messageId") or ""),
     }
 
 
@@ -9148,12 +9207,21 @@ def _iter_workbuddy_records(file_cache):
                 items.append((record.get("ts", 0), path, entry, record))
     items.sort(key=lambda x: (x[0], x[1]))
 
-    seen = set()
+    selected = {}
     for _, path, entry, record in items:
         key = record.get("dedup") or f"{path}:{record.get('line', 0)}:{record.get('ts_key', '')}"
-        if key in seen:
+        current = selected.get(key)
+        if current is None:
+            selected[key] = (path, entry, record)
             continue
-        seen.add(key)
+        _, _, existing = current
+        current_score = (token_total(current[2]), float(current[2].get("credits", 0) or 0))
+        candidate_score = (token_total(record), float(record.get("credits", 0) or 0))
+        if candidate_score > current_score:
+            selected[key] = (path, entry, record)
+
+    for path, entry, record in sorted(
+            selected.values(), key=lambda item: (item[2].get("ts", 0), item[0])):
         yield path, entry, record
 
 
@@ -9161,11 +9229,10 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
     ledger_touch(tool_key)
     fc = cache.setdefault(tool_key, {})
     B = _empty_token_ranges()
-    if not os.path.isdir(root):
-        return {"ranges": B}
-
-    files = set(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
+    files = (set(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
+             if os.path.isdir(root) else set())
     stale = set(fc.keys())
+    changed = False
     for path in sorted(files):
         stale.discard(path)
         try:
@@ -9173,7 +9240,8 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
         except OSError:
             continue
         sig = f"{st.st_mtime}:{st.st_size}"
-        if isinstance(fc.get(path), dict) and fc[path].get("sig") == sig:
+        if (isinstance(fc.get(path), dict) and fc[path].get("sig") == sig
+                and fc[path].get("parser") == _WORKBUDDY_PARSER_VERSION):
             continue
 
         records = []
@@ -9190,13 +9258,19 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                         continue
                     project = item.get("cwd") or project
                     session_id = item.get("sessionId") or session_id
-                    record = _workbuddy_usage_record(item)
+                    record = _workbuddy_usage_record(
+                        item, model_id_first=tool_key == "codebuddy")
                     if record is None:
                         continue
                     record_session = str(item.get("sessionId") or session_id)
-                    if record["item_id"]:
+                    dedup_id = record.get("message_id") or record["item_id"]
+                    if tool_key == "codebuddy" and record.get("message_id"):
+                        record["dedup"] = "codebuddy:" + hashlib.sha256(
+                            record["message_id"].encode("utf-8")
+                        ).hexdigest()
+                    elif dedup_id:
                         record["dedup"] = json.dumps(
-                            [record_session, record["item_id"], record["ts_key"]], separators=(",", ":"))
+                            [record_session, dedup_id, record["ts_key"]], separators=(",", ":"))
                     else:
                         record["dedup"] = f"{path}:{line_no}:{record['ts_key']}"
                     record["session"] = record_session
@@ -9204,10 +9278,13 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                     records.append(record)
         except OSError:
             continue
-        fc[path] = {"sig": sig, "records": records, "proj": project, "sid": str(session_id)}
+        fc[path] = {"sig": sig, "parser": _WORKBUDDY_PARSER_VERSION,
+                    "records": records, "proj": project, "sid": str(session_id)}
+        changed = True
 
     for path in stale:
         fc.pop(path, None)
+        changed = True
 
     days = {}
     ledger_sources = {}
@@ -9218,7 +9295,7 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                                   record["date"], record, record.get("hour"))
         day = days.setdefault(record["date"], _empty_token_day())
         _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
-                         0, record["cost"], record["model"])
+                         0, record["cost"], record["model"], credits=record.get("credits", 0))
         sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
         proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         if proj_name:
@@ -9243,6 +9320,8 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
             continue
         for range_key in classify_date(day_date, bounds):
             _merge_token_day(B[range_key], day)
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -9252,6 +9331,10 @@ def scan_workbuddy(bounds, cache):
 
 def scan_workbuddy_ai(bounds, cache):
     return _scan_workbuddy_root(bounds, cache, WORKBUDDY_AI_DIR, "workbuddy_ai")
+
+
+def scan_codebuddy(bounds, cache):
+    return _scan_workbuddy_root(bounds, cache, CODEBUDDY_DIR, "codebuddy")
 
 
 # ---------- Grok Bot ----------
@@ -9621,7 +9704,8 @@ def scan_deepseek_harness(bounds, cache):
                                   record["date"], record, record.get("hour"))
         day = days.setdefault(record["date"], _empty_token_day())
         _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
-                         record["reason"], record["cost"], record["model"], record.get("cost_cny", 0))
+                         record["reason"], record["cost"], record["model"],
+                         cost_cny=record.get("cost_cny", 0))
         day["hours"][record["hour"]] += token_total(record)
         session = str(entry.get("sid") or "unknown")
         sessions.setdefault(record["date"], set()).add(session)
@@ -9730,7 +9814,7 @@ def _opencode_message_day(message, session_id="", created_ms=0, estimate_missing
     }
     day["hours"][created.hour] = token_total(day)
     _add_model_usage(day["models"], model, day["in"], day["out"], day["cr"],
-                     day["cw"], day["reason"], day["cost"], cost_cny)
+                     day["cw"], day["reason"], day["cost"], cost_cny=cost_cny)
     return day
 
 
@@ -9761,7 +9845,8 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
                              day["reason"], day["cost"], cost_cny=day.get("cost_cny", 0))
             for model, usage in day["models"].items():
                 _add_model_usage(target["models"], model, usage["in"], usage["out"],
-                                 usage["cr"], usage["cw"], usage["reason"], usage["cost"], usage.get("cost_cny", 0))
+                                 usage["cr"], usage["cw"], usage["reason"], usage["cost"],
+                                 cost_cny=usage.get("cost_cny", 0))
             for hour, amount in enumerate(day["hours"]):
                 target["hours"][hour] += amount
             if day.get("session"):
@@ -11814,6 +11899,8 @@ def compute():
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
     wbai = _safe_scan("workbuddy_ai", lambda: scan_workbuddy_ai(bounds, cache),
                       _empty_workbuddy, errors)
+    cb = _safe_scan("codebuddy", lambda: scan_codebuddy(bounds, cache),
+                    _empty_workbuddy, errors)
     grok_bot = _safe_scan("grok_bot", lambda: scan_grok_bot(bounds, cache),
                           _empty_grok_bot, errors)
     dsh = _safe_scan("deepseek_harness", lambda: scan_deepseek_harness(bounds, cache),
@@ -11960,7 +12047,8 @@ def compute():
         denom = b["cr"] + b["cw"] + b["in"]
         hit = (b["cr"] / denom * 100) if denom else 0.0
         return {"hit": hit, "in": b["in"], "out": b["out"], "cr": b["cr"], "cw": b["cw"],
-                "reason": b["reason"], "cost": b["cost"], "cost_cny": b.get("cost_cny", 0), "sessions": len(b["sessions"]),
+                "reason": b["reason"], "cost": b["cost"], "cost_cny": b.get("cost_cny", 0),
+                "credits": b.get("credits", 0.0), "sessions": len(b["sessions"]),
                 "models": _format_token_models(b["models"])}
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
@@ -11969,6 +12057,7 @@ def compute():
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
+    cbranges = {k: token_usage_range(cb["ranges"][k]) for k in RANGE_KEYS}
     grok_bot_ranges = {
         key: {
             "in": 0, "out": 0,
@@ -12109,6 +12198,9 @@ def compute():
         "workbuddy_ai": {
             "ranges": wbairanges,
         },
+        "codebuddy": {
+            "ranges": cbranges,
+        },
         "deepseek_harness": {
             "ranges": dshranges,
         },
@@ -12142,7 +12234,7 @@ def compute():
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
-                     "workbuddy_ai",
+                     "workbuddy_ai", "codebuddy",
                      "deepseek_harness", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
@@ -12478,6 +12570,20 @@ def main():
         print(f"今日 缓存读 {human(wat['cr']):>6} {F}")
         print(f"今日 ≈成本  ${wat['cost']:.2f} {F}")
         print("---")
+    # CodeBuddy 块：Credit 是产品原生消耗单位，不换算成美元。
+    cbt = d["codebuddy"]["ranges"]["today"]
+    if cbt["sessions"] > 0:
+        print(f"CodeBuddy {HEAD}")
+        print(f"命中率   {cbt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(cbt['in']):>6} {F}")
+        print(f"今日 输出   {human(cbt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(cbt['cr']):>6} {F}")
+        if cbt.get("credits", 0) > 0:
+            print(f"今日 Credit {cbt['credits']:>6.2f} {F}")
+        if cbt.get("cost", 0) > 0:
+            print(f"今日 ≈成本  ${cbt['cost']:.2f} {F}")
+        print("  (Credit 为 CodeBuddy 原生消耗单位；美元仅按已知价格估算) | font=Menlo size=11")
+        print("---")
     # DeepSeek Harness 块
     dt = d["deepseek_harness"]["ranges"]["today"]
     if dt["sessions"] > 0:
@@ -12662,7 +12768,7 @@ def _scan_local_models():
                             pass
             except OSError:
                 pass
-    for root in (WORKBUDDY_DIR, WORKBUDDY_AI_DIR):
+    for root in (WORKBUDDY_DIR, WORKBUDDY_AI_DIR, CODEBUDDY_DIR):
         for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
             try:
                 with open(f, encoding="utf-8", errors="ignore") as fh:
@@ -12872,7 +12978,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
                        "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
-                       "workbuddy": 0.0, "workbuddy_ai": 0.0,
+                       "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
                        "musecode": 0.0, "cmdcode": 0.0,
@@ -12885,6 +12991,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                         "pa_in": 0, "pa_out": 0, "pa_cr": 0, "pa_cw": 0, "pa_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
                        "wa_in": 0, "wa_out": 0, "wa_cr": 0, "wa_cw": 0,
+                       "cb_in": 0, "cb_out": 0, "cb_cr": 0, "cb_cw": 0,
+                       "cb_credits": 0.0,
                        "d_in": 0, "d_out": 0, "d_cr": 0, "d_cw": 0, "d_reason": 0,
                        "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "g_in": 0, "g_out": 0, "g_cr": 0, "g_reason": 0,
@@ -13051,7 +13159,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     for tool_key, field_prefix, suffix in (
             ("workbuddy", "w", "WorkBuddy"),
-            ("workbuddy_ai", "wa", "WorkBuddy Intl.")):
+            ("workbuddy_ai", "wa", "WorkBuddy Intl."),
+            ("codebuddy", "cb", "CodeBuddy")):
         for _, _, record in _iter_workbuddy_records(cache.get(tool_key, {})):
             dk = record.get("date")
             if not dk or (cutoff and dk < cutoff):
@@ -13062,13 +13171,17 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             d[f"{field_prefix}_out"] += record.get("out", 0)
             d[f"{field_prefix}_cr"] += record.get("cr", 0)
             d[f"{field_prefix}_cw"] += record.get("cw", 0)
+            if tool_key == "codebuddy":
+                d["cb_credits"] += record.get("credits", 0)
             _add_day_tokens(d, dk, tool_key, token_total(record))
             name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
             m = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0,
-                                         "cw": 0, "reason": 0, "tool": tool_key})
+                                         "cw": 0, "reason": 0, "credits": 0.0,
+                                         "tool": tool_key})
             m["cost"] += record.get("cost", 0)
             for key in TOKEN_FIELDS:
                 m[key] += record.get(key, 0)
+            m["credits"] += record.get("credits", 0)
 
     for _, _, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
         dk = record.get("date")
@@ -13241,7 +13354,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "workbuddy_ai", "deepseek_harness",
+        "mimocode", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
@@ -13256,7 +13369,10 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             cost = day.get("cost")
             ledger_cost = (float(cost) if isinstance(cost, (int, float))
                            and not isinstance(cost, bool) else 0.0)
-            if ledger_tok <= 0 and ledger_cost <= 0:
+            credit_value = day.get("credits")
+            ledger_credits = (float(credit_value) if isinstance(credit_value, (int, float))
+                              and not isinstance(credit_value, bool) else 0.0)
+            if ledger_tok <= 0 and ledger_cost <= 0 and ledger_credits <= 0:
                 continue
             d = days.setdefault(dk, _empty())
             live_tok = live_tool_tokens.get(dk, {}).get(tool, 0)
@@ -13264,6 +13380,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 d["tokens"] += ledger_tok - live_tok
             if column and ledger_cost > d[column]:
                 d[column] = ledger_cost
+            if tool == "codebuddy" and ledger_credits > d["cb_credits"]:
+                d["cb_credits"] = ledger_credits
 
     codex_total = sum(d["codex"] for d in days.values())
     codex_in = sum(d["x_in"] for d in days.values())
@@ -13292,6 +13410,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
               "workbuddy_ai": round(v["workbuddy_ai"], 2),
+              "codebuddy": round(v["codebuddy"], 2),
               "deepseek_harness": round(v["deepseek_harness"], 2),
               "qwencode": round(v["qwencode"], 2),
               "kimicode": round(v["kimicode"], 2),
@@ -13301,6 +13420,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "total": round(v["claude"] + v["codex"] + v["codex_reserve"]
                              + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"] + v["workbuddy_ai"]
+                             + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["musecode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
                              + v["openclaw"], 2),
@@ -13312,6 +13432,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                "pa_in": v["pa_in"], "pa_out": v["pa_out"], "pa_cr": v["pa_cr"], "pa_cw": v["pa_cw"], "pa_reason": v["pa_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
               "wa_in": v["wa_in"], "wa_out": v["wa_out"], "wa_cr": v["wa_cr"], "wa_cw": v["wa_cw"],
+              "cb_in": v["cb_in"], "cb_out": v["cb_out"], "cb_cr": v["cb_cr"], "cb_cw": v["cb_cw"],
+              "cb_credits": round(v["cb_credits"], 3),
               "d_in": v["d_in"], "d_out": v["d_out"], "d_cr": v["d_cr"],
               "d_cw": v["d_cw"], "d_reason": v["d_reason"],
               "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
@@ -13338,7 +13460,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         out_ratio = round(v["out"] / total_tok * 100, 1) if total_tok > 0 else 0
         model_list.append({"name": n, "cost": round(v["cost"], 2),
                            "in": v["in"], "out": v["out"], "cr": v.get("cr", 0), "cw": v.get("cw", 0),
-                           "reason": v.get("reason", 0), "tokens": total_tok, "tool": v["tool"],
+                           "reason": v.get("reason", 0), "credits": round(v.get("credits", 0), 3),
+                           "tokens": total_tok, "tool": v["tool"],
                            "cost_per_k": cost_per_k, "out_ratio": out_ratio})
 
     def account_model_rows(specs):
@@ -13697,7 +13820,8 @@ def build_wrapped(period="all", refresh=True, _cache=None):
 
     # --- WorkBuddy 国内版与国际版（逐次调用，output 已含 reasoning） ---
     for tool_key, suffix in (("workbuddy", "WorkBuddy"),
-                             ("workbuddy_ai", "WorkBuddy Intl.")):
+                             ("workbuddy_ai", "WorkBuddy Intl."),
+                             ("codebuddy", "CodeBuddy")):
         for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
             dk = record.get("date", "")
             if not dk or (cutoff and dk < cutoff):
@@ -14514,7 +14638,8 @@ def projects():
 
     # WorkBuddy 国内版与国际版 sessions
     for tool_key, suffix in (("workbuddy", "WorkBuddy"),
-                             ("workbuddy_ai", "WorkBuddy Intl.")):
+                             ("workbuddy_ai", "WorkBuddy Intl."),
+                             ("codebuddy", "CodeBuddy")):
         workbuddy_sessions = {}
         for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
             proj_path = entry.get("proj") or ""

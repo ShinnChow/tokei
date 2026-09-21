@@ -18,6 +18,7 @@ struct UsageToolVisibility: Equatable {
     var primeAgent = true
     var workbuddy = true
     var workbuddyAI = true
+    var codebuddy = true
     var deepseekHarness = true
     var opencode = true
     var qwencode = true
@@ -313,6 +314,11 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "workbuddy-ai", name: "WorkBuddy Intl.",
                             range: usage.workbuddyAI.ranges.get(range))
         }
+        if visibility.codebuddy {
+            appendTokenTool(&lines, id: "codebuddy", name: "CodeBuddy",
+                            range: usage.codebuddy.ranges.get(range),
+                            includesCost: false, includesCredits: true)
+        }
         if visibility.deepseekHarness {
             appendTokenTool(&lines, id: "deepseek_harness", name: "DeepSeek Harness",
                             range: usage.deepseekHarness.ranges.get(range))
@@ -351,16 +357,19 @@ enum UsageSummaryBuilder {
 
     private static func appendTokenTool(
         _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange,
-        includesCost: Bool = true, reasonIncludedInOutput: Bool = false
+        includesCost: Bool = true, includesCredits: Bool = false,
+        reasonIncludedInOutput: Bool = false
     ) {
         let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+        let extra = includesCredits && r.credits > 0
+            ? "\(Fmt.credits(r.credits)) Credits" : nil
         let line = Line(
             id: id, name: name, cost_cny: includesCost ? r.cost_cny : nil,
             cost: includesCost ? r.cost : nil,
             tokens: total, sessions: r.sessions, calls: nil,
             input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
             reason: r.reason > 0 ? r.reason : nil,
-            hit: r.hit > 0 ? r.hit : nil, extra: nil
+            hit: r.hit > 0 ? r.hit : nil, extra: extra
         )
         if !line.isEmpty { lines.append(line) }
     }

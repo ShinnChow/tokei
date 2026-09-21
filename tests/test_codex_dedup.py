@@ -13,6 +13,35 @@ def event(ts, day, total, last, cost):
 
 
 class CodexDedupedDaysTests(unittest.TestCase):
+    def test_legacy_model_cache_without_credits_accepts_new_events(self):
+        first = event(
+            "2026-07-10T00:00:00+00:00",
+            "2026-07-10",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            1.0,
+        ) + ["openai/gpt-5.4"]
+        second = event(
+            "2026-07-10T01:00:00+00:00",
+            "2026-07-10",
+            (150, 120, 8, 3),
+            (50, 40, 3, 1),
+            0.5,
+        ) + ["openai/gpt-5.4"]
+
+        days = {}
+        USAGE._codex_add_event(days, first)
+        days["2026-07-10"]["models"]["openai/gpt-5.4"].pop("credits")
+
+        USAGE._codex_add_event(days, second)
+
+        usage = days["2026-07-10"]["models"]["openai/gpt-5.4"]
+        self.assertEqual(usage["in"], 30)
+        self.assertEqual(usage["out"], 8)
+        self.assertEqual(usage["cr"], 120)
+        self.assertEqual(usage["reason"], 3)
+        self.assertEqual(usage["credits"], 0.0)
+
     def test_replayed_parent_snapshot_is_counted_once(self):
         parent = event(
             "2026-07-10T00:00:00+00:00",

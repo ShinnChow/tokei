@@ -462,6 +462,7 @@ final class SyncManager {
             mergeRanges(&u.prime_agent.ranges, peer.usage.prime_agent.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
             mergeRanges(&u.workbuddyAI.ranges, peer.usage.workbuddyAI.ranges, pairs)
+            mergeRanges(&u.codebuddy.ranges, peer.usage.codebuddy.ranges, pairs)
             mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
@@ -669,7 +670,7 @@ final class SyncManager {
         for pair in pairs {
             var d = dst.get(pair.dst), s = src.get(pair.src)
             d.in += s.in; d.out += s.out; d.cr += s.cr; d.cw += s.cw
-            d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
+            d.reason += s.reason; d.cost += s.cost; d.credits += s.credits; d.sessions += s.sessions
             d.cost_cny = (d.cost_cny ?? 0) + (s.cost_cny ?? 0)
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
@@ -744,6 +745,7 @@ final class SyncManager {
                 dst[idx].cw += m.cw
                 dst[idx].reason += m.reason
                 dst[idx].cost += m.cost
+                dst[idx].credits += m.credits
                 dst[idx].cost_cny = (dst[idx].cost_cny ?? 0) + (m.cost_cny ?? 0)
                 if dst[idx].name == "未知" && m.name != "未知" {
                     dst[idx].name = m.name

@@ -403,8 +403,8 @@ struct BadgeView: View {
 struct ConfettiView: View {
     @State private var fall = false
     private let palette: [Color] = [Theme.claude, Theme.qoder, Theme.qoderwork, Theme.qodercli, Theme.hermes,
-                                     Theme.deepseekHarness,
-                                    Theme.codex, Theme.gemini, Theme.zcode, Theme.mimocode,
+                                    Theme.deepseekHarness,
+                                    Theme.codex, Theme.gemini, Theme.zcode, Theme.mimocode, Theme.codebuddy,
                                     Theme.openclaw]
     var body: some View {
         GeometryReader { geo in

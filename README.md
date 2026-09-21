@@ -45,6 +45,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Prime Agent** | Token、成本、缓存命中率、模型、项目（含 RLM 子代理） |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **WorkBuddy Intl.** | Token、成本、缓存命中率、模型、项目 |
+| **CodeBuddy Code** | Token、缓存命中率、原生 Credit、模型、项目；不读取账户余额 |
 | **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
@@ -65,6 +66,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 
 ### 成本估算
 - 基于 API 实际定价估算成本（非订阅费用）
+- CodeBuddy 优先展示产品原生 Credit；没有精确价格的模型不会冒充美元成本
 - 317 个模型价格表（来源 OpenRouter），支持一键更新
 - DeepSeek Harness 官方路由按请求时间使用工作日北京时间潮汐价格；OpenRouter 等其他路由仍按价格表计算
 - 本地价格覆盖（`pricing_overrides.json`），更新不丢失
@@ -80,7 +82,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 随时切换，对比不同时段用量趋势
 
 ### 项目追踪
-- 按项目维度查看 Claude Code / Pi / WorkBuddy / WorkBuddy Intl. / Grok Build 用量
+- 按项目维度查看 Claude Code / Pi / WorkBuddy / WorkBuddy Intl. / CodeBuddy / Grok Build 用量
 - 了解每个项目消耗了多少 Token 和成本
 
 ### 多设备同步
@@ -114,6 +116,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - Antigravity 额度只连接已运行客户端的 `127.0.0.1` language server，不会自动启动客户端
 - 这 5 个 Provider 的额度与账号标签只保存在本机缓存，不写入多设备 Git 同步快照
 - 其他联网操作包括检查/下载更新，以及手动更新模型价格表
+- CodeBuddy 只读取本地 `~/.codebuddy/projects` 会话 JSONL；不读取 auth、local storage、trace、日志或会话正文，也不会发起账户额度请求
 
 ## 快速开始
 
@@ -207,6 +210,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | WorkBuddy Intl. | `~/.workbuddy-ai/projects/<project>/*.jsonl` |
+| CodeBuddy Code | `~/.codebuddy/projects/**/*.jsonl`（含 `subagents`） |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
@@ -388,7 +392,7 @@ Tokei is a **macOS menu bar app** that tracks usage, cost, and quotas across **2
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, Muse Code, Command Code, QwenWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., CodeBuddy Code, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, Muse Code, Command Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

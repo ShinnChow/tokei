@@ -43,6 +43,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 - OpenClaw (`~/.openclaw/`)
 - Pi Coding Agent CLI (`~/.pi/agent/sessions/`)
 - WorkBuddy (`~/.workbuddy/projects/`)
+- CodeBuddy Code (`~/.codebuddy/projects/`)
 - DeepSeek Harness (`~/.dsh/sessions/`)
 - OpenCode (`~/.local/share/opencode/`)
 - Qwen Code (`~/.qwen/`)
