@@ -18,6 +18,9 @@ final class DataLoader {
             let bundledScript = (bundled as NSString).appendingPathComponent("usage.30s.py")
             if FileManager.default.fileExists(atPath: bundledScript) {
                 syncToUserDir(from: bundled)
+                // App 与采集逻辑随同一个安装包运行。用户目录的脚本供独立 CLI 使用，
+                // 可能由其他版本安装包写入，不能用它替换当前 App 的采集逻辑。
+                return bundledScript
             }
         }
         return userScript
@@ -28,29 +31,11 @@ final class DataLoader {
 
     private static func syncToUserDir(from resourceDir: String) {
         let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tokei")
-        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-        let markerPath = dest.appendingPathComponent("script.version").path
-        let bundledTag = Updater.releaseTag
-        for name in ["usage.30s.py", "pricing.json", "pricing_overrides.json"] {
-            let src = (resourceDir as NSString).appendingPathComponent(name)
-            let dst = dest.appendingPathComponent(name).path
-            guard FileManager.default.fileExists(atPath: src) else { continue }
-            if name == "usage.30s.py" {
-                // 只升不降:旧版 app 启动不得用旧脚本覆盖新版脚本
-                if FileManager.default.fileExists(atPath: dst),
-                   let recorded = try? String(contentsOfFile: markerPath, encoding: .utf8)
-                       .trimmingCharacters(in: .whitespacesAndNewlines),
-                   !recorded.isEmpty,
-                   UpdateSecurity.isNewerVersion(recorded, than: bundledTag) {
-                    continue
-                }
-                try? FileManager.default.removeItem(atPath: dst)
-                try? FileManager.default.copyItem(atPath: src, toPath: dst)
-                try? bundledTag.write(toFile: markerPath, atomically: true, encoding: .utf8)
-            } else if !FileManager.default.fileExists(atPath: dst) {
-                try? FileManager.default.copyItem(atPath: src, toPath: dst)
-            }
-        }
+        CollectorScriptInstaller.sync(
+            resourceDir: resourceDir,
+            userDir: dest,
+            bundledRelease: Updater.releaseTag
+        )
     }
 
     // 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
