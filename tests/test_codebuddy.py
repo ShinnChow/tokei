@@ -99,7 +99,10 @@ class CodeBuddyUsageTests(unittest.TestCase):
             cache = {"v": USAGE._SCAN_CACHE_VERSION}
             with mock.patch.object(USAGE, "CODEBUDDY_DIR", str(root)), \
                  mock.patch.object(USAGE, "ledger_touch"), \
-                 mock.patch.object(USAGE, "ledger_reconcile", side_effect=lambda _tool, days: days):
+                 mock.patch.object(
+                     USAGE, "ledger_reconcile",
+                     side_effect=lambda _tool, days, _source_days=None: days,
+                 ):
                 result = USAGE.scan_codebuddy(USAGE.range_bounds(), cache)
 
         usage = result["ranges"]["all"]

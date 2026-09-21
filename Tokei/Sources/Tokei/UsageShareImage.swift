@@ -141,6 +141,7 @@ enum UsageShareImage {
         case "Qwen Code": return Theme.qwencode
         case "Kimi Code": return Theme.kimicode
         case "Muse Code": return Theme.musecode
+        case "Command Code": return Theme.cmdcode
         case "Prime Agent": return Theme.primeAgent
         case "DeepSeek Harness": return Theme.deepseekHarness
         default: return Theme.tTertiary
@@ -201,9 +202,9 @@ struct UsageShareOverviewView: View {
                 alignment: .leading,
                 spacing: 9
             ) {
-                if totals.cost > 0 {
+                if totals.cost > 0 || totals.cost_cny > 0 {
                     MetricCell(icon: "dollarsign.circle", label: "≈成本",
-                               value: String(format: "$%.2f", totals.cost), tint: Theme.claude)
+                               value: nativeMoney(totals.cost, totals.cost_cny), tint: Theme.claude)
                 }
                 MetricCell(icon: "square.grid.2x2", label: "工具",
                            value: "\(totals.tools)", tint: Theme.codex)
@@ -349,9 +350,9 @@ private func nativeToolCard(
             alignment: .leading,
             spacing: 8
         ) {
-            if let cost = line.cost, cost > 0 {
+            if let cost = line.cost, cost > 0 || (line.cost_cny ?? 0) > 0 {
                 MetricCell(icon: "dollarsign.circle", label: "≈成本",
-                           value: String(format: "$%.2f", cost), tint: tint)
+                           value: nativeMoney(cost, line.cost_cny), tint: tint)
             }
             if let hit = line.hit, hit > 0 {
                 RingMetricCell(value: hit, label: "Cache Hit", tint: tint)

@@ -54,6 +54,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **QoderWork** | Token、调用次数、配额 |
 | **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、配额（5h / 订阅周期） |
 | **Muse Code** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
+| **Command Code** | Token（输入/输出/缓存）、成本、模型、项目 |
 
 ## 功能一览
 
@@ -67,6 +68,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 基于 API 实际定价估算成本（非订阅费用）
 - CodeBuddy 优先展示产品原生 Credit；没有精确价格的模型不会冒充美元成本
 - 317 个模型价格表（来源 OpenRouter），支持一键更新
+- DeepSeek Harness 官方路由按请求时间使用工作日北京时间潮汐价格；OpenRouter 等其他路由仍按价格表计算
 - 本地价格覆盖（`pricing_overrides.json`），更新不丢失
 - 未知模型按家族关键词回退，兜底用 Opus 价格（保守上限）
 
@@ -217,6 +219,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl`；额度用本机登录态查 `api.kimi.com/coding/v1/usages` |
 | Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` |
+| Command Code | `${TOKEI_CMDCODE_DIR:-~/.commandcode}/projects/*/*.jsonl` |
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` |
@@ -389,7 +392,7 @@ Tokei is a **macOS menu bar app** that tracks usage, cost, and quotas across **2
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., CodeBuddy Code, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, Muse Code, QwenWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., CodeBuddy Code, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, Muse Code, Command Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 
