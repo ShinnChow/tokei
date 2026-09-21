@@ -9,8 +9,9 @@ enum PanelPlacement {
     /// 等于每次都顶满屏幕，看着很压抑。按比例封顶才是跟着屏幕走的做法：
     /// 之前写死的 840 在 1112 高的屏幕上正好约 3/4，换到 13 寸上却会顶满。
     /// 面板占屏幕的份额固定，无论哪块屏幕看起来都是同一个观感。
-    /// 实测取值：0.618 偏短、0.718 仍偏短，0.8 在 1122 高的屏幕上约 898 点。
-    static let heightRatio: CGFloat = 0.8
+    /// 实测取值：0.618 / 0.718 / 0.8 依次偏短，0.88 在 1122 高的屏幕上约 987 点，
+    /// 距离顶满（1082）仍留约 95 点余量，不至于贴边。
+    static let heightRatio: CGFloat = 0.88
     static let minimumHeight: CGFloat = 320
     static let minimumWidth: CGFloat = 322
     static let fallbackVisibleHeight: CGFloat = 900
