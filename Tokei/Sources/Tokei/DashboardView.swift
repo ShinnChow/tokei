@@ -324,8 +324,6 @@ struct DashboardView: View {
         let candidates: [(id: String, title: String, quota: ProviderQuotaStat,
                          usage: TokenUsageRange?, tint: Color)] = [
             ("antigravity", "Gemini / Antigravity", usage.antigravity, nil, Theme.gemini),
-            ("devin", "Devin", usage.devin.quota,
-             usage.devin.ranges.get(range), Theme.devin),
             ("cursor", "Cursor", usage.cursor,
              usage.cursor.usage?.ranges.get(range), Theme.cursor),
             ("zed", "Zed", usage.zed, nil, Theme.zed),
