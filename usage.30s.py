@@ -3350,6 +3350,42 @@ def _iter_codex_token_lines(path, chunk_size=64 * 1024, header_limit=4 * 1024):
             yield value
 
 
+# 每轮扫描最多回填多少个会话的项目路径。
+#
+# cwd 就在会话文件第 0 行，但光是打开一个文件就要约 10ms——几千个历史会话
+# 合起来是几十秒，不能让升级后的第一次刷新扛下来。所以分摊到多轮，并且
+# 按最近活跃优先：项目足迹本来就按 last_active 排序，用户看得见的那几行
+# 第一轮就补齐，长尾在后台几分钟内自然补完。
+_CODEX_PROJECT_BACKFILL_PER_SCAN = 150
+
+
+def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
+    """会话的工作目录。cwd 在文件头部的 session_meta 记录里，所以只读前几行——
+    为了一个字段重解析几千个会话文件是不值当的。
+
+    只认 session_meta 那一行：按 cwd 匹配会一路扫到后面的大事件行上去,
+    几千个会话累计起来就是几十秒。"""
+    try:
+        with open(path, "rb", buffering=0) as fh:
+            for _ in range(max_lines):
+                line = fh.readline(max_line_bytes)
+                if not line:
+                    break
+                if b'"session_meta"' not in line:
+                    continue
+                try:
+                    record = json.loads(line.decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                payload = record.get("payload")
+                cwd = payload.get("cwd") if isinstance(payload, dict) else record.get("cwd")
+                if isinstance(cwd, str) and cwd.startswith("/"):
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
 def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
     try:
         with open(path, "rb", buffering=0) as fh:
@@ -3718,6 +3754,15 @@ def scan_codex(bounds, cache):
     linked_paths = _codex_link_segment_mirrors(fc)
     if linked_paths:
         dedupe_paths.update(linked_paths)
+    # 项目路径按需补齐,让 Codex 参与项目足迹与回顾页。没读到也写空串占位,
+    # 免得每轮扫描都为同一批读不出 cwd 的会话重复开文件。
+    pending = [(str(entry.get("last_event_ts") or ""), f, entry)
+               for f, entry in fc.items()
+               if isinstance(entry, dict) and "proj" not in entry]
+    if pending:
+        pending.sort(reverse=True)      # 最近活跃的会话先补，排序用缓存里现成的时间戳
+        for _, f, entry in pending[:_CODEX_PROJECT_BACKFILL_PER_SCAN]:
+            entry["proj"] = _codex_session_cwd(f) or ""
         cache["_dirty"] = True
 
     # A session can briefly exist in active and archived directories together.
@@ -7881,6 +7926,7 @@ def _scan_hermes_db(db_path, _sq):
             SELECT s.id AS session_id,
                    {expr('s', session_columns, 'started_at')} AS started_at,
                    {expr('s', session_columns, 'model', "''")} AS model,
+                   {expr('s', session_columns, 'cwd', "''")} AS cwd,
                    {expr('s', session_columns, 'input_tokens')} AS input_tokens,
                    {expr('s', session_columns, 'output_tokens')} AS output_tokens,
                    {expr('s', session_columns, 'cache_read_tokens')} AS cache_read_tokens,
@@ -8021,6 +8067,17 @@ def _scan_hermes_db(db_path, _sq):
             day["hours"][local_dt.hour] += inp + out + cr + cw + reason
             if session_id in sessions:
                 day_sessions.setdefault(dk, set()).add(session_id)
+            workdir = (sessions.get(session_id) or {}).get("cwd")
+            if isinstance(workdir, str) and workdir.startswith("/"):
+                bucket = day.setdefault("projects", {}).setdefault(
+                    workdir, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = inp + out + cr + cw + reason
+                bucket["tokens"] += total
+                bucket["cost"] += row_cost(row)
+                model_id = _model_identity_id(row.get("model")) or "unknown"
+                bucket["models"][model_id] = bucket["models"].get(model_id, 0) + total
+                if session_id and session_id not in bucket["sessions"]:
+                    bucket["sessions"].append(str(session_id))
 
         for dk, session_ids in day_sessions.items():
             days[dk]["sessions"] = len(session_ids)
@@ -8388,6 +8445,10 @@ def scan_qodercli(bounds, cache):
     return {"ranges": B, "model": fc.get("_model")}
 
 
+# 解析口径版本。加 1 可让旧缓存失效重扫（例如新增了按项目的用量拆分）。
+_HERMES_SCAN_VERSION = 2
+
+
 def scan_hermes(bounds, cache):
     import sqlite3 as _sq
     ledger_touch("hermes")
@@ -8409,9 +8470,10 @@ def scan_hermes(bounds, cache):
         if not sig:
             continue
         entry = fc.get(db_path)
-        if not entry or entry.get("sig") != sig:
+        if (not entry or entry.get("sig") != sig
+                or entry.get("version") != _HERMES_SCAN_VERSION):
             days = _scan_hermes_db(db_path, _sq)
-            fc[db_path] = {"sig": sig, "days": days}
+            fc[db_path] = {"sig": sig, "days": days, "version": _HERMES_SCAN_VERSION}
             changed = True
     for p in stale:
         fc.pop(p, None)
@@ -10057,6 +10119,17 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
     connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
+        # 会话自带工作目录，让 OpenCode / MiMoCode 参与项目足迹与回顾页。
+        session_projects = {}
+        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(session)")}
+        if {"id", "directory"} <= session_columns:
+            try:
+                for session_id, directory in connection.execute(
+                        "SELECT id, directory FROM session"):
+                    if isinstance(directory, str) and directory.startswith("/"):
+                        session_projects[session_id] = directory
+            except sqlite3.Error:
+                pass
         rows = connection.execute("SELECT id, session_id, time_created, data FROM message")
         for message_id, session_id, created_ms, raw in rows:
             try:
@@ -10081,6 +10154,20 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
                 target["hours"][hour] += amount
             if day.get("session"):
                 sessions.setdefault(day_key, set()).add(day["session"])
+            proj_path = session_projects.get(session_id)
+            if proj_path:
+                bucket = target.setdefault("projects", {}).setdefault(
+                    proj_path, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = day["in"] + day["out"] + day["cr"] + day["cw"] + day["reason"]
+                bucket["tokens"] += total
+                bucket["cost"] += day["cost"]
+                for model, usage in day["models"].items():
+                    amount = (usage["in"] + usage["out"] + usage["cr"]
+                              + usage["cw"] + usage["reason"])
+                    bucket["models"][model] = bucket["models"].get(model, 0) + amount
+                marker = day.get("session") or session_id
+                if marker and marker not in bucket["sessions"]:
+                    bucket["sessions"].append(str(marker))
     finally:
         connection.close()
     for day_key, ids in sessions.items():
@@ -10316,7 +10403,7 @@ def scan_zcode(bounds, cache):
 # 计量口径版本。改动解析口径时 +1：账本按 _cost_version 取新不取大，
 # 否则被高水位规则记下的旧数（例如兄弟节点翻倍那版）会一直压住修正后的值。
 # 同一个常量也用作扫描缓存的版本，两边一起失效。
-_DEVIN_COST_VERSION = 2
+_DEVIN_COST_VERSION = 3
 
 
 def _devin_cli_db_path():
@@ -10343,16 +10430,23 @@ def _scan_devin_cli_database(path):
         if "message_nodes" not in tables:
             return {}
 
-        # 会话表给出模型兜底：generation_model 缺失时用会话自己声明的模型。
-        session_models = {}
+        # 会话表给出模型兜底（generation_model 缺失时用会话声明的模型）
+        # 与项目路径（working_directory），后者让 Devin 参与项目足迹与回顾页。
+        session_models, session_projects = {}, {}
         if "sessions" in tables:
-            try:
-                for session_id, model in connection.execute(
-                        "SELECT id, model FROM sessions"):
-                    if isinstance(model, str) and model.strip():
-                        session_models[session_id] = model.strip()
-            except sqlite3.Error:
-                pass
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+            if "id" in columns:
+                directory = "working_directory" if "working_directory" in columns else "NULL"
+                model_col = "model" if "model" in columns else "NULL"
+                try:
+                    for session_id, model, workdir in connection.execute(
+                            f"SELECT id, {model_col}, {directory} FROM sessions"):
+                        if isinstance(model, str) and model.strip():
+                            session_models[session_id] = model.strip()
+                        if isinstance(workdir, str) and workdir.startswith("/"):
+                            session_projects[session_id] = workdir
+                except sqlite3.Error:
+                    pass
 
         # node_id 只在合并键的兜底分支里用到，老版本没有这一列也能读。
         columns = {row[1] for row in connection.execute(
@@ -10436,6 +10530,18 @@ def _scan_devin_cli_database(path):
             day["_cost_version"] = _DEVIN_COST_VERSION
             _add_token_usage(day, input_total, output_total, cache_read, cache_write,
                              0, cost, display_model)
+            proj_path = session_projects.get(session_id)
+            if proj_path:
+                by_project = day.setdefault("projects", {})
+                bucket = by_project.setdefault(
+                    proj_path, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                total = input_total + output_total + cache_read + cache_write
+                bucket["tokens"] += total
+                bucket["cost"] += cost
+                bucket["models"][display_model] = \
+                    bucket["models"].get(display_model, 0) + total
+                if session_id not in bucket["sessions"]:
+                    bucket["sessions"].append(str(session_id))
             day["hours"][created.hour] += input_total + output_total + cache_read + cache_write
             sessions.setdefault(day_key, set()).add(str(session_id or "unknown"))
     finally:
@@ -10516,6 +10622,10 @@ def _mimocode_db_paths():
     return []
 
 
+# 解析口径版本。加 1 可让旧缓存失效重扫（例如新增了按项目的用量拆分）。
+_MIMOCODE_SCAN_VERSION = 2
+
+
 def scan_mimocode(bounds, cache):
     ledger_touch("mimocode")
     fc = cache.setdefault("mimocode", {})
@@ -10531,9 +10641,10 @@ def scan_mimocode(bounds, cache):
     cache_key = "db:" + db_path
     signature = _sqlite_signature(db_path)
     entry = fc.get(cache_key)
-    if not entry or entry.get("sig") != signature or entry.get("version") != 1:
+    if (not entry or entry.get("sig") != signature
+            or entry.get("version") != _MIMOCODE_SCAN_VERSION):
         days, _ = _scan_opencode_database(db_path, estimate_missing_cost=True)
-        entry = {"sig": signature, "days": days, "version": 1}
+        entry = {"sig": signature, "days": days, "version": _MIMOCODE_SCAN_VERSION}
         fc.clear()
         fc[cache_key] = entry
         cache["_dirty"] = True
@@ -14328,6 +14439,14 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     # (天级整取整用;账本理论上 ≥ 实时,max 只是保险)。token 按白名单口径求和(含 cached/thoughts,
     # 见 _ledger_token_sum),cost 同理逐日取 max。被清理日志的历史天由账本兜底补回,
     # 让 total/active/streak/busiest/peak 与 peak_days 同口径,避免同页口径分裂。
+    # 每日项目与项目足迹同源：谁出现在项目足迹，谁就出现在回顾页，不会一边有
+    # 一边没有。账本归档的项目名在下面并入，负责日志被清理后的历史天。
+    for day_key, names in _project_day_names(cache).items():
+        if cutoff and day_key < cutoff:
+            continue
+        if names:
+            day_projs.setdefault(day_key, set()).update(names)
+
     ledger_day_tokens = {}
     ledger_day_cost = {}
     for tool, tool_days in _load_ledger().get("tools", {}).items():
@@ -14985,219 +15104,199 @@ def dashboard():
     print(json.dumps(build_dashboard(_arg_period()), ensure_ascii=False))
 
 
-def projects():
-    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。"""
-    compute()
-    cache = _load_scan_cache()
+# ---------- 项目维度：唯一数据源 ----------
+# 项目足迹页与 Wrapped 的每日项目都从 _project_contributions 派生。历史上两边
+# 各写各的，结果 pi 只出现在项目足迹、grok 只出现在项目足迹而不在回顾页，
+# WorkBuddy 的回顾页项目名还是会话时间戳目录而不是真实项目——同一份事实分两处
+# 维护必然分裂。这里合成一股流，两个页面消费同一个来源。
+#
+# 接入一个新 harness：让它的 scanner 在缓存条目上写 proj（项目绝对路径），
+# 再在 _PROJECT_SOURCES 加一行，两个页面同时生效，不必各改一遍。
+#
+# session 取值：
+#   "entry" —— 一个缓存条目就是一次会话，按条目计数；
+#   "sid"   —— 条目上的 sid 才是会话标识，跨条目去重（一次会话写多个文件）。
+# tokens 用哪个函数数：多数工具用 token_total，Muse Code 的推理并进输出，
+# 口径不同，所以按工具指定，避免统一成一个"差不多"的算法。
+_PROJECT_SOURCES = (
+    # tool_key,      显示名,            记成本, session, token 计数
+    ("claude",       "Claude",          True,  "entry", "token_total"),
+    ("codex",        "Codex",           True,  "entry", "token_total"),
+    ("pi",           "Pi",              True,  "entry", "token_total"),
+    ("prime_agent",  "Prime Agent",     True,  "entry", "token_total"),
+    # Kimi 的 wire 不持久化真实成本，卡片也刻意不显示，这里同样不记。
+    ("kimicode",     "Kimi Code",       False, "sid",   "token_total"),
+    ("musecode",     "Muse Code",       True,  "sid",   "_muse_token_total"),
+    ("cmdcode",      "Command Code",    True,  "sid",   "token_total"),
+)
 
-    proj_map = {}  # path → {sessions, tokens, cost, last_active, model_tok}
+# 第二种形状：一个库里装着多个项目（数据库型工具）。项目挂在「天」上：
+#   entry["days"][日期]["projects"][项目路径] = {tokens, cost, models, sessions}
+# 一文件一会话的工具用上面 _PROJECT_SOURCES 的形状，两种都走同一个贡献流。
+_PROJECT_DAY_SOURCES = (
+    # tool_key,  显示名
+    ("devin",    "Devin"),
+    ("hermes",   "Hermes"),
+    ("opencode", "OpenCode"),
+    ("mimocode", "MiMoCode"),
+)
 
-    # Claude sessions
-    for f, entry in cache.get("claude", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("claude")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = nice_model(mn)
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+# 缓存是 records 而非 days 的工具，各自的去重逻辑已在迭代器里。
+_PROJECT_RECORD_SOURCES = (
+    ("workbuddy",        "WorkBuddy",        "_iter_workbuddy_records",        None),
+    ("workbuddy_ai",     "WorkBuddy Intl.",  "_iter_workbuddy_records",        None),
+    ("codebuddy",        "CodeBuddy",        "_iter_workbuddy_records",        None),
+    ("deepseek_harness", "DeepSeek Harness", "_iter_deepseek_harness_records", "deepseek-v4-pro"),
+)
 
-    # Pi sessions
-    for f, entry in cache.get("pi", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("pi")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = f"{nice_model(mn)} (Pi)"
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
 
-    # Prime Agent sessions
-    for f, entry in cache.get("prime_agent", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("prime_agent")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok; p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]: p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = f"{nice_model(mn)} (Prime Agent)"
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+def _project_contribution(tool, label, path, day, tokens, cost, models, session,
+                          cost_cny=0.0):
+    return {"tool": tool, "label": label, "path": path, "day": day or "",
+            "tokens": int(tokens or 0), "cost": float(cost or 0.0),
+            "cost_cny": float(cost_cny or 0.0),
+            "models": models or {}, "session": session}
 
-    # WorkBuddy 国内版与国际版 sessions
-    for tool_key, suffix in (("workbuddy", "WorkBuddy"),
-                             ("workbuddy_ai", "WorkBuddy Intl."),
-                             ("codebuddy", "CodeBuddy")):
-        workbuddy_sessions = {}
-        for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
+
+def _project_contributions(cache):
+    """项目维度的原子贡献流，供项目足迹与 Wrapped 共用。
+
+    每条是「某工具在某项目某天产生了多少 token / 成本 / 哪些模型 / 属于哪次会话」。
+    """
+    for tool_key, label, with_cost, session_mode, counter_name in _PROJECT_SOURCES:
+        count = globals().get(counter_name, token_total)
+        tool_cache = cache.get(tool_key)
+        if not isinstance(tool_cache, dict):
+            continue
+        for entry_key, entry in tool_cache.items():
+            if not isinstance(entry, dict):
+                continue
             proj_path = entry.get("proj") or ""
             if not proj_path or proj_path == "?":
                 continue
-            p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                                 "last_active": "", "model_tok": {}, "tools": set()})
-            p["tools"].add(tool_key)
-            p["tokens"] += token_total(record)
-            p["cost"] += record.get("cost", 0)
-            dk = record.get("date", "")
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            model_name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
-            p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-            workbuddy_sessions.setdefault(proj_path, set()).add(
-                record.get("session") or entry.get("sid"))
-    for proj_path, session_ids in workbuddy_sessions.items():
-            proj_map[proj_path]["sessions"] += len(session_ids)
+            session = entry.get("sid") if session_mode == "sid" else entry_key
+            for day_key, day in (entry.get("days") or {}).items():
+                if not isinstance(day, dict):
+                    continue
+                models = {f"{nice_model(name)} ({label})": count(usage)
+                          for name, usage in (day.get("models") or {}).items()}
+                yield _project_contribution(
+                    tool_key, label, proj_path, day_key, count(day),
+                    day.get("cost", 0) if with_cost else 0.0, models, session)
 
-    # DeepSeek Harness sessions
-    deepseek_sessions = {}
-    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
+    for tool_key, label, iterator_name, default_model in _PROJECT_RECORD_SOURCES:
+        iterator = globals().get(iterator_name)
+        tool_cache = cache.get(tool_key)
+        if not callable(iterator) or not isinstance(tool_cache, dict):
             continue
+        for entry_path, entry, record in iterator(tool_cache):
+            proj_path = entry.get("proj") or ""
+            if not proj_path or proj_path == "?":
+                continue
+            model_name = record.get("model") or default_model or "unknown"
+            tokens = token_total(record)
+            yield _project_contribution(
+                tool_key, label, proj_path, record.get("date"), tokens,
+                record.get("cost", 0),
+                {f"{nice_model(model_name)} ({label})": tokens},
+                record.get("session") or entry.get("sid") or entry_path,
+                cost_cny=record.get("cost_cny", 0))
+
+    for tool_key, label in _PROJECT_DAY_SOURCES:
+        tool_cache = cache.get(tool_key)
+        if not isinstance(tool_cache, dict):
+            continue
+        for entry in tool_cache.values():
+            if not isinstance(entry, dict):
+                continue
+            for day_key, day in (entry.get("days") or {}).items():
+                if not isinstance(day, dict):
+                    continue
+                by_project = day.get("projects")
+                if not isinstance(by_project, dict):
+                    continue    # 名字列表是给账本归档用的，不是这里的按项目用量
+                for proj_path, usage in by_project.items():
+                    if not proj_path or not isinstance(usage, dict):
+                        continue
+                    models = {f"{nice_model(name)} ({label})": int(amount or 0)
+                              for name, amount in (usage.get("models") or {}).items()}
+                    session_ids = [sid for sid in (usage.get("sessions") or []) if sid]
+                    yield _project_contribution(
+                        tool_key, label, proj_path, day_key,
+                        usage.get("tokens", 0), usage.get("cost", 0), models,
+                        tuple(session_ids))
+
+    # Grok 的缓存已经是「按天按项目」的富结构，直接转成同一种贡献。
+    grok_cache = cache.get("grok")
+    if isinstance(grok_cache, dict):
+        for entry in grok_cache.values():
+            if not isinstance(entry, dict):
+                continue
+            proj_path = entry.get("project") or ""
+            if not proj_path:
+                continue
+            # 只带会话与日期，token 由下面按天的那份给出，避免重复计数。
+            yield _project_contribution(
+                "grok", "Grok Build", proj_path, entry.get("date"), 0, 0.0, {},
+                entry.get("sid"))
+    grok_days = cache.get(_GROK_DAYS_CACHE_KEY)
+    if isinstance(grok_days, dict):
+        for day_key, day in grok_days.items():
+            if not isinstance(day, dict):
+                continue
+            for proj_path, usage in (day.get("projects") or {}).items():
+                if not proj_path:
+                    continue
+                models = {f"{nice_model(name)} (Grok Build)": int(amount or 0)
+                          for name, amount in (usage.get("models") or {}).items()}
+                sessions = [sid for sid in (usage.get("sessions") or []) if sid]
+                yield _project_contribution(
+                    "grok", "Grok Build", proj_path, day_key,
+                    usage.get("tokens", 0), usage.get("cost", 0), models,
+                    sessions[0] if len(sessions) == 1 else tuple(sessions))
+
+
+def _project_day_names(cache):
+    """{日期: {项目名}}。Wrapped 的每日项目由此而来，与项目足迹同源。"""
+    names = {}
+    for hit in _project_contributions(cache):
+        if not hit["day"]:
+            continue
+        name = os.path.basename(hit["path"].rstrip("/")) or hit["path"]
+        names.setdefault(hit["day"], set()).add(name)
+    return names
+
+
+def projects():
+    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。
+
+    数据来自 _project_contributions —— 和 Wrapped 的每日项目同一个来源。
+    """
+    compute()
+    cache = _load_scan_cache()
+
+    proj_map = {}   # path → {sessions, tokens, cost, last_active, model_tok, tools}
+    sessions = {}   # path → {会话标识}
+    for hit in _project_contributions(cache):
+        proj_path = hit["path"]
         p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("deepseek_harness")
-        p["tokens"] += token_total(record)
-        p["cost"] += record.get("cost", 0)
-        p["cost_cny"] = p.get("cost_cny", 0) + record.get("cost_cny", 0)
-        dk = record.get("date", "")
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
-        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-        deepseek_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-    for proj_path, session_ids in deepseek_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Kimi Code sessions. protocol 1.5 writes one wire per Agent, so count the
-    # shared state.json session id once while summing every Agent's usage.
-    kimi_sessions = {}
-    for entry in cache.get("kimicode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("kimicode")
-        kimi_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += token_total(day)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Kimi Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
-    for proj_path, session_ids in kimi_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Muse Code sessions. one session.jsonl per session, count the stream id once.
-    muse_sessions = {}
-    for entry in cache.get("musecode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("musecode")
-        muse_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += _muse_token_total(day)
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Muse Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + _muse_token_total(usage)
-    for proj_path, session_ids in muse_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Command Code sessions. one transcript per session id, count the session id once.
-    cmdcode_sessions = {}
-    for entry in cache.get("cmdcode", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("cmdcode")
-        cmdcode_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += token_total(day)
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Command Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
-    for proj_path, session_ids in cmdcode_sessions.items():
-        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
-
-    # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
-    grok_project_sessions = {}
-    for entry in cache.get("grok", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        grok_path = entry.get("project") or ""
-        if not grok_path:
-            continue
-        p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("grok")
-        grok_project_sessions.setdefault(grok_path, set()).add(entry.get("sid"))
-        dk = entry.get("date") or ""
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-    for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
-        for grok_path, usage in day.get("projects", {}).items():
-            p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                                 "last_active": "", "model_tok": {}, "tools": set()})
-            p["tools"].add("grok")
-            p["tokens"] += int(usage.get("tokens", 0) or 0)
-            p["cost"] += float(usage.get("cost", 0) or 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            session_ids = {sid for sid in usage.get("sessions", []) if sid}
-            grok_project_sessions.setdefault(grok_path, set()).update(session_ids)
-            for model, amount in usage.get("models", {}).items():
-                name = f"{nice_model(model)} (Grok Build)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + int(amount or 0)
-    for grok_path, session_ids in grok_project_sessions.items():
-        proj_map[grok_path]["sessions"] += len({sid for sid in session_ids if sid})
+                                            "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add(hit["tool"])
+        p["tokens"] += hit["tokens"]
+        p["cost"] += hit["cost"]
+        if hit["cost_cny"]:
+            p["cost_cny"] = p.get("cost_cny", 0) + hit["cost_cny"]
+        if hit["day"] > p["last_active"]:
+            p["last_active"] = hit["day"]
+        for name, tokens in hit["models"].items():
+            p["model_tok"][name] = p["model_tok"].get(name, 0) + tokens
+        session = hit["session"]
+        if isinstance(session, tuple):
+            sessions.setdefault(proj_path, set()).update(session)
+        elif session:
+            sessions.setdefault(proj_path, set()).add(session)
+    for proj_path, session_ids in sessions.items():
+        proj_map[proj_path]["sessions"] += len(session_ids)
 
     # 检测本地 LISTEN 端口,匹配项目 cwd
     port_map = _detect_local_servers(set(proj_map.keys()))
