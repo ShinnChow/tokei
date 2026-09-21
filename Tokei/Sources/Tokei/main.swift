@@ -240,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
+    static let kimicodeColor = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -285,6 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()
+        ActivityReporter.shared.reportLaunchIfNeeded(appVersion: Updater.releaseTag)
         autoFetchPricing()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()
@@ -556,6 +558,10 @@ enum Icon {
 }
 
 if GrokBotQuotaBridge.runIfRequested() {
+    exit(0)
+}
+
+if ProviderCredentialStore.runIfRequested() {
     exit(0)
 }
 

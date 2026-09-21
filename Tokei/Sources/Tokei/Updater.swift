@@ -16,7 +16,8 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.40"
+    static let releaseTag = "v1.0.41"
+    static let isLocalBuild = Bundle.main.object(forInfoDictionaryKey: "TokeiLocalBuild") as? Bool ?? false
     static let automaticCheckInterval: TimeInterval = 6 * 3600
     @Published var state: State = .idle
 
@@ -38,6 +39,8 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
     static let shared = Updater()
 
     func checkForUpdate() {
+        // 本地验证包可能含有尚未发布的修复，不能被线上旧代码替换。
+        guard !Self.isLocalBuild else { return }
         guard state == .idle || state == .upToDate || {
             if case .failed = state { return true }; return false
         }() else { return }
@@ -106,6 +109,7 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
     }
 
     func performUpdate() {
+        guard !Self.isLocalBuild else { return }
         guard case .available(_, let url, let sha256) = state,
               UpdateSecurity.isAllowedDownloadSourceURL(url) else {
             state = .failed("更新地址不受信任")

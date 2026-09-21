@@ -18,6 +18,9 @@ final class DataLoader {
             let bundledScript = (bundled as NSString).appendingPathComponent("usage.30s.py")
             if FileManager.default.fileExists(atPath: bundledScript) {
                 syncToUserDir(from: bundled)
+                // App 与采集逻辑随同一个安装包运行。用户目录的脚本供独立 CLI 使用，
+                // 可能由其他版本安装包写入，不能用它替换当前 App 的采集逻辑。
+                return bundledScript
             }
         }
         return userScript

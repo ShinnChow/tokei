@@ -47,6 +47,7 @@ curl -sL https://raw.githubusercontent.com/<user>/tokei-sync/main/install.sh | b
 - OpenCode (`~/.local/share/opencode/`)
 - Qwen Code (`~/.qwen/`)
 - Kimi Code (`${KIMI_CODE_HOME:-~/.kimi-code}/`，兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/`)
+- Muse Code (`${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/`)
 
 ## 卸载
 

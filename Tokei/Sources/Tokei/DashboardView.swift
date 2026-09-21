@@ -460,6 +460,7 @@ struct DashboardView: View {
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
         case "kimicode": return Theme.kimicode
+        case "musecode": return Theme.musecode
         default: return Theme.claude
         }
     }
@@ -1216,6 +1217,8 @@ struct DashboardView: View {
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
         appendTokenModels(usage.kimicode.ranges.get(key).models, tool: "kimicode", suffix: "Kimi Code", to: &out)
+        appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code",
+                          reasonIncludedInOutput: true, to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -1223,9 +1226,11 @@ struct DashboardView: View {
         }
     }
 
-    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String, to out: inout [ModelCost]) {
+    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String,
+                                  reasonIncludedInOutput: Bool = false,
+                                  to out: inout [ModelCost]) {
         for model in models {
-            let tokens = tokenModelTotal(model)
+            let tokens = tokenModelTotal(model, reasonIncludedInOutput: reasonIncludedInOutput)
             if tokens > 0 || model.cost > 0 {
                 out.append(modelCost(name: "\(model.name) (\(suffix))", cost: model.cost, tool: tool,
                                      input: model.in, out: model.out, cr: model.cr, cw: model.cw,
@@ -1276,6 +1281,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
             + tokenUsageTotal(usage.kimicode.ranges.get(key))
+            + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -1294,10 +1300,14 @@ struct DashboardView: View {
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost
             + usage.kimicode.ranges.get(key).cost
+            + usage.musecode.ranges.get(key).cost
     }
 
-    static func tokenUsageTotal(_ r: TokenUsageRange) -> Int {
-        r.in + r.out + r.cr + r.cw + r.reason
+    static func tokenUsageTotal(
+        _ r: TokenUsageRange,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
     }
 
     static func hermesTotal(_ r: HermesRange) -> Int {
@@ -1305,11 +1315,14 @@ struct DashboardView: View {
     }
 
     static func openClawTotal(_ r: OpenClawRange) -> Int {
-        r.in + r.out + r.cr + r.cw
+        r.in + r.out + r.cr + r.cw + r.reason
     }
 
-    static func tokenModelTotal(_ m: TokenModelStat) -> Int {
-        m.in + m.out + m.cr + m.cw + m.reason
+    static func tokenModelTotal(
+        _ m: TokenModelStat,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
     }
 
     static func runScript(_ args: [String]) -> Data {

@@ -138,6 +138,10 @@ enum UsageShareImage {
         case "WorkBuddy Intl.": return Theme.workbuddyAI
         case "OpenCode": return Theme.opencode
         case "Qwen Code": return Theme.qwencode
+        case "Kimi Code": return Theme.kimicode
+        case "Muse Code": return Theme.musecode
+        case "Prime Agent": return Theme.primeAgent
+        case "DeepSeek Harness": return Theme.deepseekHarness
         default: return Theme.tTertiary
         }
     }
