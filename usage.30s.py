@@ -162,6 +162,24 @@ MIMOCODE_DB = os.path.abspath(os.path.expanduser(os.environ.get("TOKEI_MIMOCODE_
     if os.environ.get("TOKEI_MIMOCODE_DB") else ""
 OPENCLAW_STATE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("OPENCLAW_STATE_DIR", os.path.join(HOME, ".openclaw"))))
+# Devin（Cognition）。桌面端是改名后的 Windsurf 编辑器：bundle id 仍是
+# com.exafunction.windsurf，写出的键也仍叫 windsurf.*。Electron 的支持目录跟随
+# 产品名，所以改名前装过 Windsurf 的机器留下 Windsurf/，新装的是 Devin/。
+DEVIN_SUPPORT_DIRS = _path_candidates(
+    "TOKEI_DEVIN_SUPPORT",
+    os.path.join(HOME, "Library", "Application Support", "Devin"),
+    os.path.join(HOME, "Library", "Application Support", "Windsurf"),
+    os.path.join(APPDATA, "Devin"),
+    os.path.join(APPDATA, "Windsurf"),
+    os.path.join(HOME, ".config", "Devin"),
+    os.path.join(HOME, ".config", "Windsurf"))
+# Devin CLI 自己的会话库，和桌面端的套餐缓存互不相干。
+DEVIN_CLI_DB_PATHS = _path_candidates(
+    "TOKEI_DEVIN_CLI_DB",
+    os.path.join(HOME, ".local", "share", "devin", "cli", "sessions.db"),
+    os.path.join(HOME, "Library", "Application Support", "devin", "cli", "sessions.db"),
+    os.path.join(APPDATA, "devin", "cli", "sessions.db"),
+    os.path.join(LOCALAPPDATA, "devin", "cli", "sessions.db"))
 OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
 OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
@@ -1442,6 +1460,10 @@ def _empty_cmdcode():
 
 
 def _empty_zcode():
+    return _empty_opencode()
+
+
+def _empty_devin():
     return _empty_opencode()
 
 
@@ -5326,6 +5348,7 @@ _PROVIDER_QUOTA_ENV = {
     "sub2api": "TOKEI_SUB2API_QUOTA",
     "zai": "TOKEI_ZAI_QUOTA",
     "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
+    "devin": "TOKEI_DEVIN_QUOTA",
 }
 
 
@@ -5336,7 +5359,7 @@ def _provider_quota_enabled(provider):
         return False
     if env == "1":
         return True
-    default = provider == "antigravity"
+    default = provider in ("antigravity", "devin")
     return bool(_tokei_config().get(f"{provider}_quota_enabled", default))
 
 
@@ -7145,6 +7168,212 @@ def scan_antigravity_quota():
     return fetch_antigravity_quota() if _provider_quota_enabled("antigravity") else {}
 
 
+# ---------- Devin（桌面端保存的套餐）----------
+# Devin.app 是改名后的 Windsurf 编辑器，本质是一个 VS Code fork，因此它的
+# globalStorage 就是一个普通 SQLite 文件，账号最近一次读到的套餐是其中一行。
+# 不需要任何凭据、不联网、不碰 Keychain，也不需要完全磁盘访问权限。
+_DEVIN_PLAN_KEY_PATTERNS = (
+    "windsurf.reactSettings.cachedPlanInfoData%",
+    "windsurf.settings.cachedPlanInfo%",
+)
+# 这一行是「启动时」写入的，不是运行中持续刷新的。所以读数的落款是那次启动，
+# 超过这个时长就按快照展示（卡片上会写“额度数据已过期”）而不是当作实时值。
+_DEVIN_SNAPSHOT_FRESH = 10 * 60
+# 超过一天没重启过，这行数据不再展示：解法就是打开 Devin，那会写入新的一行。
+_DEVIN_SNAPSHOT_MAX_AGE = 24 * 60 * 60
+
+
+def _devin_support_dir():
+    """含 state.vscdb 的支持目录，取最新的一个。"""
+    best = None
+    for root in DEVIN_SUPPORT_DIRS:
+        if not os.path.isfile(os.path.join(root, "User", "globalStorage", "state.vscdb")):
+            continue
+        try:
+            stamp = os.path.getmtime(root)
+        except OSError:
+            stamp = 0.0
+        if best is None or stamp > best[0]:
+            best = (stamp, root)
+    return best[1] if best else None
+
+
+def _devin_launch_stamp(name):
+    """logs/ 下每次运行建一个目录，目录名就是启动时刻：20260914T092003（本地时区）。
+
+    用目录名而不是目录的修改时间：修改时间会往后跑——在已有文件里追加不动它，
+    但会话进行一小时后新建的日志文件会把它顶上去，顶上去多少分钟，卡片就把
+    这份自启动起就没变过的读数少算多少分钟。
+    """
+    if not isinstance(name, str) or len(name) != 15:
+        return None
+    try:
+        parsed = datetime.strptime(name, "%Y%m%dT%H%M%S")
+    except ValueError:
+        return None
+    if parsed.strftime("%Y%m%dT%H%M%S") != name:
+        return None
+    return parsed.astimezone()
+
+
+def _devin_last_launch(support):
+    logs = os.path.join(support, "logs")
+    try:
+        entries = os.listdir(logs)
+    except OSError:
+        return None
+    newest = None
+    for name in entries:
+        if not os.path.isdir(os.path.join(logs, name)):
+            continue
+        stamp = _devin_launch_stamp(name)
+        if stamp is not None and (newest is None or stamp > newest):
+            newest = stamp
+    return newest
+
+
+def _devin_plan(db_path):
+    """(套餐, 本机账号行数)。
+
+    一台机器上登录过两个账号就会有两行，而文件里没有任何字段说明哪个是当前的。
+    取 endTimestamp 最远的一行：还在订阅期内的套餐优先于已过期的。
+    """
+    import sqlite3 as _sq
+
+    rows = []
+    conn = None
+    try:
+        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1)
+        conn.execute("PRAGMA query_only=ON")
+        for pattern in _DEVIN_PLAN_KEY_PATTERNS:
+            found = list(conn.execute(
+                "SELECT key, value FROM ItemTable WHERE key LIKE ?", (pattern,)))
+            if found:
+                rows = found
+                break
+    except Exception:
+        return None, 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+    best = None
+    parsed_rows = 0
+    for _key, value in rows:
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                value = bytes(value).decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        try:
+            plan = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(plan, dict):
+            continue
+        parsed_rows += 1
+        end = _provider_number(plan.get("endTimestamp")) or 0.0
+        if best is None or end > best[0]:
+            best = (end, plan)
+    return (best[1] if best else None), parsed_rows
+
+
+def _devin_plan_number(plan, field):
+    """布尔值也是数字类型的一种，True 会被读成 1。hideDailyQuota 走到这里会
+    变成 1%，所以布尔一律不当数字。"""
+    value = plan.get(field)
+    return None if isinstance(value, bool) else _provider_number(value)
+
+
+def _normalize_devin_plan(plan, launched_at, now=None, accounts=1):
+    """一行缓存的套餐在 now 时刻意味着什么。
+
+    没有可信落款的快照不展示，而不是拿抓取时刻替它落款：数据库自身的修改时间
+    被文件里其它每一个键刷新着，早餐时读到的数会显示成一秒前的。
+    """
+    now = int(now if now is not None else datetime.now().timestamp())
+    launched = int(launched_at.timestamp()) if launched_at is not None else None
+    if launched is None or launched > now or now - launched > _DEVIN_SNAPSHOT_MAX_AGE:
+        return {}
+
+    windows = []
+    # Devin 自己同时给出两个百分比和两个重置时刻，所以 used = 100 - remaining，
+    # 窗口长度也用它真的给了的那个，没有一处是推算出来的。
+    for field, reset_field, hide_field, window_id, title, minutes in (
+        ("dailyRemainingPercent", "dailyResetAtUnix", "hideDailyQuota",
+         "devin-daily", "日额度", 1440),
+        ("weeklyRemainingPercent", "weeklyResetAtUnix", "hideWeeklyQuota",
+         "devin-weekly", "周额度", 10080),
+    ):
+        if plan.get(hide_field):
+            continue
+        remaining = _devin_plan_number(plan, field)
+        if remaining is None:
+            # 不报日额度的套餐就不画这个环，而不是画一个满环。
+            continue
+        reset = _provider_epoch(plan.get(reset_field))
+        # 重置时刻已经过去的窗口直接丢掉而不是继续挂着：那个数字属于一个
+        # 已经不存在的窗口。另一个窗口和余额（本来就没有重置）照常保留。
+        if reset is not None and reset <= now:
+            continue
+        windows.append(_provider_window(window_id, title, 100 - remaining, reset, minutes))
+
+    # 免费套餐给的是一池消息数。-1 是付费套餐表示「不适用」的写法，不是计数，
+    # 按计数读会画出「负一分之负一」，所以任一端为负都按没有这项处理。
+    total = _devin_plan_number(plan, "totalMessages")
+    remaining_messages = _devin_plan_number(plan, "remainingMessages")
+    if (total is not None and remaining_messages is not None
+            and total > 0 and remaining_messages >= 0):
+        windows.append(_provider_window(
+            "devin-messages", "消息额度",
+            (total - remaining_messages) / total * 100, None, None,
+            f"剩余 {int(remaining_messages):,} / {int(total):,} 条"))
+
+    details = []
+    # 字段名就写了是 micros：10,000,000 即十美元。
+    balance = _devin_plan_number(plan, "overageBalanceMicros")
+    if balance is not None:
+        details.append({"label": "超额余额", "value": _provider_money(balance / 1_000_000)})
+    if accounts > 1:
+        details.append({"label": "本机账号", "value": f"{accounts} 个",
+                        "secondary": "取订阅期最长的一个"})
+
+    if not windows and not details:
+        return {}
+
+    plan_name = plan.get("planName")
+    plan_name = plan_name.strip() if isinstance(plan_name, str) and plan_name.strip() else None
+    # 这一行自己带了人类可读的账号（实测形如 "someone@example.com - My Team"），
+    # 比键里那串 user-<32 hex> 有用得多；没有就留空，不拿那串 id 顶上。
+    account = plan.get("accountIdentityText")
+    account = account.strip() if isinstance(account, str) and account.strip() else None
+    return {
+        "available": True,
+        "plan": f"Devin {plan_name}" if plan_name else None,
+        "account": account,
+        "windows": windows,
+        "details": details,
+        "source": "devin-app-cache",
+        "updated": launched,
+        "stale": now - launched > _DEVIN_SNAPSHOT_FRESH,
+    }
+
+
+def fetch_devin_quota():
+    support = _devin_support_dir()
+    if not support:
+        return {}
+    plan, accounts = _devin_plan(
+        os.path.join(support, "User", "globalStorage", "state.vscdb"))
+    if not plan:
+        return {}
+    return _normalize_devin_plan(plan, _devin_last_launch(support), accounts=accounts)
+
+
+def scan_devin_quota():
+    return fetch_devin_quota() if _provider_quota_enabled("devin") else {}
+
+
 def scan_provider_quotas(errors=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7153,6 +7382,7 @@ def scan_provider_quotas(errors=None):
         "sub2api": scan_sub2api_quota,
         "zai": scan_zai_quota,
         "antigravity": scan_antigravity_quota,
+        "devin": scan_devin_quota,
     }
     result = {name: {} for name in (*all_scans, "cursor", "grok_bot")}
     scans = {name: scan for name, scan in all_scans.items()
@@ -10071,6 +10301,184 @@ def scan_zcode(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- Devin CLI ----------
+# SQLite: ~/.local/share/devin/cli/sessions.db。
+# message_nodes.chat_message 是整条消息的 JSON，assistant 那条在 metadata.metrics
+# 里带着自己的用量：
+#
+#   {"role":"assistant","metadata":{"generation_model":"…","created_at":…,
+#     "metrics":{"input_tokens":11486,"output_tokens":254,
+#                "cache_read_tokens":6450,"cache_creation_tokens":null}}}
+#
+# input_tokens 与两个缓存桶并列（Anthropic 的口径），不做相减。
+# 这和桌面端的套餐缓存是两个互不相干的库：一个是 CLI 自己的对话记录，
+# 一个是账号额度，彼此不知道对方的存在。
+# 计量口径版本。改动解析口径时 +1：账本按 _cost_version 取新不取大，
+# 否则被高水位规则记下的旧数（例如兄弟节点翻倍那版）会一直压住修正后的值。
+# 同一个常量也用作扫描缓存的版本，两边一起失效。
+_DEVIN_COST_VERSION = 2
+
+
+def _devin_cli_db_path():
+    return _first_existing_file(DEVIN_CLI_DB_PATHS)
+
+
+def _scan_devin_cli_database(path):
+    import sqlite3
+
+    def number(value):
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    days = {}
+    sessions = {}
+    seen = set()
+    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "message_nodes" not in tables:
+            return {}
+
+        # 会话表给出模型兜底：generation_model 缺失时用会话自己声明的模型。
+        session_models = {}
+        if "sessions" in tables:
+            try:
+                for session_id, model in connection.execute(
+                        "SELECT id, model FROM sessions"):
+                    if isinstance(model, str) and model.strip():
+                        session_models[session_id] = model.strip()
+            except sqlite3.Error:
+                pass
+
+        # node_id 只在合并键的兜底分支里用到，老版本没有这一列也能读。
+        columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(message_nodes)")}
+        if not {"session_id", "chat_message", "created_at"} <= columns:
+            return {}
+        node = "node_id" if "node_id" in columns else "rowid"
+        rows = connection.execute(f"""
+            SELECT session_id, {node}, chat_message, created_at
+            FROM message_nodes
+            ORDER BY created_at ASC, {node} ASC
+        """)
+        for session_id, node_id, message, created_at in rows:
+            if isinstance(message, (bytes, bytearray)):
+                try:
+                    message = bytes(message).decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            try:
+                root = json.loads(message)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(root, dict):
+                continue
+            metadata = root.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            metrics = metadata.get("metrics")
+            if not isinstance(metrics, dict):
+                continue
+
+            input_total = number(metrics.get("input_tokens"))
+            output_total = number(metrics.get("output_tokens"))
+            cache_read = number(metrics.get("cache_read_tokens"))
+            cache_write = number(metrics.get("cache_creation_tokens"))
+            if input_total + output_total + cache_read + cache_write <= 0:
+                continue
+
+            # 时刻优先取消息自己的 created_at（ISO 字符串，微秒精度，是这次回复
+            # 真正的时间）；行上的 created_at 只精确到秒，作兜底。缺时间戳的
+            # 消息跳过，不拿文件修改时间顶替。
+            stamp_source = metadata.get("created_at")
+            stamp = _provider_epoch(stamp_source)
+            if stamp is None:
+                stamp_source = None
+                stamp = _provider_epoch(created_at)
+            if stamp is None or stamp <= 0:
+                continue
+            try:
+                created = datetime.fromtimestamp(stamp).astimezone()
+            except (OSError, OverflowError, ValueError):
+                continue
+
+            model = metadata.get("generation_model")
+            model = model.strip() if isinstance(model, str) and model.strip() else None
+            model = model or session_models.get(session_id)
+
+            # message_nodes 是一片森林：同一次回复会被写进共用一个 parent 的
+            # 两个兄弟节点，metrics 与 metadata.created_at 完全一致。照单全收
+            # 会把用量翻一倍（实测如此），所以同一会话里「同一微秒时刻 + 同一
+            # 组 metrics + 同一模型」只计一次。两次不同的调用不会既同时刻又
+            # 同用量；而没有微秒落款可比时退回按节点计，宁可不合并也不丢数。
+            key = (session_id, stamp_source if stamp_source is not None else node_id,
+                   model, input_total, output_total, cache_read, cache_write)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            display_model = (_known_id_or_raw(model) or model) if model else "devin"
+            cost = 0.0
+            price_id = _pricing_id(model) if model else None
+            if price_id:
+                price = _raw_price(price_id)
+                cost = (input_total / 1e6 * price["in"]
+                        + output_total / 1e6 * price["out"]
+                        + cache_read / 1e6 * price["cache_read"]
+                        + cache_write / 1e6 * price["cache_write"])
+
+            day_key = created.date().isoformat()
+            day = days.setdefault(day_key, _empty_token_day())
+            day["_cost_version"] = _DEVIN_COST_VERSION
+            _add_token_usage(day, input_total, output_total, cache_read, cache_write,
+                             0, cost, display_model)
+            day["hours"][created.hour] += input_total + output_total + cache_read + cache_write
+            sessions.setdefault(day_key, set()).add(str(session_id or "unknown"))
+    finally:
+        connection.close()
+    for day_key, session_ids in sessions.items():
+        days[day_key]["sessions"] = sorted(session_ids)
+    return days
+
+
+def scan_devin(bounds, cache):
+    ledger_touch("devin")
+    fc = cache.setdefault("devin", {})
+    B = _empty_token_ranges()
+    db_path = _devin_cli_db_path()
+    if not db_path:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    db_path = os.path.realpath(db_path)
+    cache_key = "db:" + db_path
+    signature = _sqlite_signature(db_path)
+    entry = fc.get(cache_key)
+    if not entry or entry.get("sig") != signature \
+            or entry.get("version") != _DEVIN_COST_VERSION:
+        entry = {"sig": signature, "days": _scan_devin_cli_database(db_path),
+                 "version": _DEVIN_COST_VERSION}
+        fc.clear()
+        fc[cache_key] = entry
+        cache["_dirty"] = True
+
+    for day_key, day in ledger_reconcile("devin", entry.get("days", {})).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    return {"ranges": B}
+
+
 # ---------- MiMoCode ----------
 # MiMoCode uses the OpenCode message schema and XDG data-directory rules.
 def _mimocode_data_dirs():
@@ -11892,6 +12300,7 @@ def compute():
     qcli = _safe_scan("qodercli", lambda: scan_qodercli(bounds, cache), _empty_qodercli, errors)
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
+    dv = _safe_scan("devin", lambda: scan_devin(bounds, cache), _empty_devin, errors)
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
@@ -12054,6 +12463,7 @@ def compute():
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
     paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
+    dvranges = {k: token_usage_range(dv["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
@@ -12141,6 +12551,10 @@ def compute():
             "ranges": granges,
         },
         "antigravity": provider_quotas["antigravity"],
+        "devin": {
+            "ranges": dvranges,
+            "quota": provider_quotas["devin"],
+        },
         "cursor": provider_quotas["cursor"],
         "zed": provider_quotas["zed"],
         "sub2api": provider_quotas["sub2api"],
@@ -12235,7 +12649,7 @@ def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
                      "workbuddy_ai", "codebuddy",
-                     "deepseek_harness", "qwencode"):
+                     "deepseek_harness", "qwencode", "devin"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -12286,7 +12700,7 @@ def _recalc_costs(result):
                     cost = authoritative_cost or (
                         ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                         + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key in ("hermes", "zcode", "mimocode"):
+                elif tool_key in ("hermes", "zcode", "mimocode", "devin"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
@@ -12977,7 +13391,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
                        "gemini": 0.0, "grok": 0.0,
-                       "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
+                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "pi": 0.0,
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
@@ -13141,7 +13555,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
-    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode")):
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
+                             ("devin", "Devin")):
         for dk, day_data in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -13354,7 +13769,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
+        "mimocode", "devin", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
@@ -13407,7 +13822,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "gemini": round(v["gemini"], 2), "grok": round(v["grok"], 2),
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
-              "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
+              "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2),
+              "devin": round(v["devin"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
               "workbuddy_ai": round(v["workbuddy_ai"], 2),
               "codebuddy": round(v["codebuddy"], 2),
@@ -13423,7 +13839,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["musecode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
-                             + v["openclaw"], 2),
+                             + v["openclaw"] + v["devin"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "xr_in": v["xr_in"], "xr_out": v["xr_out"],
@@ -13686,8 +14102,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             name = f"{nice_model(model)} (OpenCode)"
             model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- ZCode / MiMoCode ---
-    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode")):
+    # --- ZCode / MiMoCode / Devin ---
+    for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
+                             ("devin", "Devin")):
         for dk, day in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue

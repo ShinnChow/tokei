@@ -31,6 +31,7 @@ struct PanelView: View {
     @State private var kimiCodeModelsOpen = false
     @State private var museCodeModelsOpen = false
     @State private var cmdCodeModelsOpen = false
+    @State private var devinModelsOpen = false
     @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
@@ -77,6 +78,7 @@ struct PanelView: View {
     @AppStorage("showKimiCode") private var showKimiCode = true
     @AppStorage("showMuseCode") private var showMuseCode = true
     @AppStorage("showCmdCode") private var showCmdCode = true
+    @AppStorage("showDevin") private var showDevin = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
     /// 默认关闭：显式授权后复用 Grok Bot 或 Cursor 登录态查询官方额度。
@@ -110,7 +112,8 @@ struct PanelView: View {
             codebuddy: showCodeBuddy,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
-            musecode: showMuseCode, cmdcode: showCmdCode
+            musecode: showMuseCode, cmdcode: showCmdCode,
+            devin: showDevin
         )
     }
 
@@ -121,7 +124,7 @@ struct PanelView: View {
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent].filter { $0 }.count
+         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent, showDevin].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -402,6 +405,7 @@ struct PanelView: View {
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         let mcr = u.musecode.ranges.get(sel), ccr = u.cmdcode.ranges.get(sel)
+        let dvr = u.devin.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
@@ -521,6 +525,11 @@ struct PanelView: View {
                              u.qwenwork.remaining != nil || !u.qwenwork.segments.isEmpty ||
                              u.qwenwork.shared != nil,
                          tint: Theme.qwenwork, content: AnyView(qwenWorkBlock(u.qwenwork))),
+            ToolCardItem(id: "devin", name: "Devin", visible: showDevin,
+                         active: dvr.sessions > 0 || u.devin.quota.available,
+                         tint: Theme.devin,
+                         presentation: dvr.sessions > 0 ? .standard : .compactStatus,
+                         content: AnyView(devinBlock(dvr, quota: u.devin.quota))),
             ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode,
                          active: kcr.sessions > 0 || u.kimicode.hasQuota || u.kimicode.hasStaleQuota,
                          tint: Theme.kimicode, content: AnyView(kimiCodeBlock(u.kimicode, kcr))),
@@ -912,6 +921,35 @@ struct PanelView: View {
                     thinDivider
                     providerQuotaContent(quota, tint: Theme.gemini)
                 }
+            }
+        }
+    }
+
+    /// Devin 的两个来源互不相干，卡片上也分开呈现：上半是 CLI 会话库里的
+    /// 本地 token，下半是桌面端启动时写下的套餐额度。任何一半有数据就画那一半。
+    func devinBlock(_ r: TokenUsageRange, quota: ProviderQuotaStat) -> some View {
+        let hasUsage = r.sessions > 0
+        return VStack(alignment: .leading, spacing: 11) {
+            cardHead("Devin", tint: Theme.devin, sessions: r.sessions, toolID: "devin")
+            if hasUsage {
+                CostHeadline(value: Fmt.human(r.totalTokens),
+                             caption: "\(sel.label) 总量", tint: Theme.devin)
+                metricGrid([.init("dollarsign.circle", "≈成本",
+                                  String(format: "$%.2f", r.cost))],
+                           hit: r.hit, extra: tokenUsageMetrics(r), tint: Theme.devin)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $devinModelsOpen, tint: Theme.devin)
+                }
+            }
+            if quota.available {
+                if hasUsage { thinDivider }
+                providerQuotaContent(quota, tint: Theme.devin)
+            } else if !hasUsage {
+                Text("请打开一次 Devin 桌面端并登录，它会把套餐额度写入本地；"
+                     + "Token 统计来自 Devin CLI 的会话库。")
+                    .font(.system(size: PanelFontSize.scaled(10)))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -2852,6 +2890,7 @@ struct PanelView: View {
                 settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
                 settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
                 settingsRow("Command Code", tint: Theme.cmdcode, isOn: $showCmdCode)
+                settingsRow("Devin", tint: Theme.devin, isOn: $showDevin)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -2859,6 +2898,10 @@ struct PanelView: View {
         }
         .onChange(of: showGemini) { enabled in
             Self.setProviderQuotaEnabled("antigravity", enabled)
+            store.refresh()
+        }
+        .onChange(of: showDevin) { enabled in
+            Self.setProviderQuotaEnabled("devin", enabled)
             store.refresh()
         }
         .onChange(of: showCursor) { enabled in
@@ -3256,6 +3299,7 @@ struct PanelView: View {
         let defaults = UserDefaults.standard
         let settings: [(String, String, Bool)] = [
             ("antigravity", "showGemini", true),
+            ("devin", "showDevin", true),
             ("cursor", "showCursor", false),
             ("grok_bot", "grokBotQuotaEnabled", false),
             ("zed", "showZed", false),
@@ -3911,7 +3955,8 @@ struct PanelView: View {
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "codebuddy",
                          "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent"]
+                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent",
+                         "devin"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")
