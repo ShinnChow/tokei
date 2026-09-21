@@ -4,6 +4,7 @@ import TokeiUpdateSecurity
 
 struct PanelView: View {
     @ObservedObject var store: Store
+    @ObservedObject var layout: PanelLayoutContext = PanelLayoutContext()
     var scrollable = true
     @State private var sel: RangeKey = .today
     @State private var claudeModelsOpen = false
@@ -26,6 +27,7 @@ struct PanelView: View {
     @State private var openCodeModelsOpen = false
     @State private var qwenCodeModelsOpen = false
     @State private var kimiCodeModelsOpen = false
+    @State private var museCodeModelsOpen = false
     @State private var cmdCodeModelsOpen = false
     @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
@@ -70,6 +72,7 @@ struct PanelView: View {
     @AppStorage("showQwenCode") private var showQwenCode = true
     @AppStorage("showQwenWork") private var showQwenWork = true
     @AppStorage("showKimiCode") private var showKimiCode = true
+    @AppStorage("showMuseCode") private var showMuseCode = true
     @AppStorage("showCmdCode") private var showCmdCode = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
@@ -79,6 +82,7 @@ struct PanelView: View {
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
+    @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude5h.defaultsKey) private var menuBarQuotaClaude5h = true
@@ -86,6 +90,8 @@ struct PanelView: View {
     @AppStorage(MenuBarQuotaSource.claudeFable.defaultsKey) private var menuBarQuotaClaudeFable = false
     @AppStorage(MenuBarQuotaSource.codex5h.defaultsKey) private var menuBarQuotaCodex5h = false
     @AppStorage(MenuBarQuotaSource.codexWeek.defaultsKey) private var menuBarQuotaCodexWeek = true
+    @AppStorage(MenuBarQuotaSource.kimi5h.defaultsKey) private var menuBarQuotaKimi5h = false
+    @AppStorage(MenuBarQuotaSource.kimiSubscription.defaultsKey) private var menuBarQuotaKimiSubscription = false
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
     @State private var copyFeedback = false
     @State private var copiedToolID: String?
@@ -100,7 +106,7 @@ struct PanelView: View {
             workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
-            cmdcode: showCmdCode
+            musecode: showMuseCode, cmdcode: showCmdCode
         )
     }
 
@@ -110,7 +116,7 @@ struct PanelView: View {
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showCmdCode, showPrimeAgent].filter { $0 }.count
+         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -122,7 +128,7 @@ struct PanelView: View {
     private var settingsMenuPickerWidth: CGFloat { settingsColumnWidth - 40 }
 
     private var maxPanelHeight: CGFloat {
-        (NSScreen.main?.visibleFrame.height ?? 900) - 40
+        layout.contentSize.height
     }
 
     private var projectPanelHeight: CGFloat {
@@ -143,27 +149,37 @@ struct PanelView: View {
         let w = (mode == .settings || mode == .quotaHistory)
             ? settingsPanelWidth
             : (mode == .cards ? panelWidth : max(panelWidth, 420))
-        if scrollable {
-            if mode == .projects {
-                projectPanelContent
-                    .frame(width: w, height: projectPanelHeight)
-                    .background(Theme.bg)
-                    .background(VisualEffect())
-                    .environment(\.colorScheme, .dark)
+        Group {
+            if scrollable {
+                if mode == .projects {
+                    projectPanelContent
+                        .frame(width: w, height: projectPanelHeight)
+                        .background(Theme.bg)
+                        .background(VisualEffect())
+                        .environment(\.colorScheme, .dark)
+                } else {
+                    ScrollView(.vertical, showsIndicators: false) { panelContent }
+                        .frame(width: w)
+                        .frame(maxHeight: maxPanelHeight)
+                        .background(Theme.bg)
+                        .background(VisualEffect())
+                        .environment(\.colorScheme, .dark)
+                }
             } else {
-                ScrollView(.vertical, showsIndicators: false) { panelContent }
-                    .frame(width: w)
-                    .frame(maxHeight: maxPanelHeight)
+                panelContent
+                    .frame(width: w, alignment: .top)
                     .background(Theme.bg)
                     .background(VisualEffect())
                     .environment(\.colorScheme, .dark)
             }
-        } else {
-            panelContent
-                .frame(width: w, alignment: .top)
-                .background(Theme.bg)
-                .background(VisualEffect())
-                .environment(\.colorScheme, .dark)
+        }
+        .frame(
+            width: scrollable ? layout.contentSize.width : nil,
+            height: scrollable ? layout.contentSize.height : nil,
+            alignment: .top
+        )
+        .background {
+            if scrollable { Theme.bg }
         }
     }
 
@@ -183,7 +199,7 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 13) {
             header
             if mode == .quotaHistory {
-                QuotaHistoryView(history: store.quotaHistory)
+                QuotaHistoryView(history: store.quotaHistory, onLoad: store.loadQuotaDetail)
             } else if mode == .dashboard {
                 DashboardView(store: store)
             } else if mode == .projects {
@@ -202,7 +218,7 @@ struct PanelView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Theme.claude)
                         Text(error)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: Theme.fontSize(12), weight: .medium))
                             .foregroundStyle(Theme.tSecondary)
                     } else {
                         ProgressView().controlSize(.small)
@@ -237,20 +253,20 @@ struct PanelView: View {
             } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "timer")
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.system(size: Theme.fontSize(16), weight: .bold))
                         .foregroundStyle(Theme.brand)
                         .overlay(alignment: .topTrailing) {
                             if let e = Self.festiveEmoji() {
-                                Text(e).font(.system(size: 11)).offset(x: 7, y: -7)
+                                Text(e).font(.system(size: Theme.fontSize(11))).offset(x: 7, y: -7)
                             }
                         }
                     VStack(alignment: .leading, spacing: 0) {
                         Text("Tokei")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                            .font(.system(size: Theme.fontSize(15), weight: .bold, design: .rounded))
                             .tracking(0.5)
                             .lineLimit(1)
                         Text("知度 · AI 用量")
-                            .font(.system(size: 9))
+                            .font(.system(size: Theme.fontSize(9)))
                             .foregroundStyle(Theme.tTertiary)
                             .lineLimit(1)
                     }
@@ -263,7 +279,7 @@ struct PanelView: View {
             updatePill
             if store.syncFailStreak >= 3 {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11))
+                    .font(.system(size: Theme.fontSize(11)))
                     .foregroundStyle(.orange)
                     .help("多设备同步已连续失败 \(store.syncFailStreak) 次：\(store.syncStatus)\n\(store.syncDetail)")
             }
@@ -272,13 +288,13 @@ struct PanelView: View {
                 deviceScopePicker
             }
             Text(store.lastUpdated)
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                 .foregroundStyle(Theme.tTertiary)
             Button {
                 withAnimation(.easeInOut(duration: 0.35)) { mode = mode == .projects ? .cards : .projects }
             } label: {
                 Image(systemName: "folder")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(mode == .projects ? Theme.claude : Theme.tTertiary)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -290,7 +306,7 @@ struct PanelView: View {
                 mode = mode == .quotaHistory ? .cards : .quotaHistory
             } label: {
                 Image(systemName: "chart.xyaxis.line")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(mode == .quotaHistory ? Theme.claude : Theme.tTertiary)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -302,7 +318,7 @@ struct PanelView: View {
                 withAnimation(.easeInOut(duration: 0.35)) { mode = mode == .dashboard ? .cards : .dashboard }
             } label: {
                 Image(systemName: "chart.bar")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(mode == .dashboard ? Theme.claude : Theme.tTertiary)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -314,7 +330,7 @@ struct PanelView: View {
                 withAnimation(.easeInOut(duration: 0.35)) { mode = mode == .settings ? .cards : .settings }
             } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(mode == .settings ? Theme.claude : Theme.tTertiary)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -379,7 +395,7 @@ struct PanelView: View {
         let cursorUsage = u.cursor.usage?.ranges.get(sel) ?? TokenUsageRange()
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
-        let ccr = u.cmdcode.ranges.get(sel)
+        let mcr = u.musecode.ranges.get(sel), ccr = u.cmdcode.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
@@ -408,7 +424,7 @@ struct PanelView: View {
                          tint: Theme.zed, presentation: .compactStatus,
                          content: AnyView(providerQuotaBlock(
                             "Zed", quota: u.zed, tint: Theme.zed,
-                            setupHint: "请先在 Zed 中登录 GitHub；Tokei 会无弹窗读取现有 Keychain 登录态。"))),
+                            setupHint: "请先在 Zed 中登录 GitHub，再到设置的「Provider 额度」中授权读取登录态。"))),
             ToolCardItem(id: "sub2api", name: "Sub2API", visible: showSub2API, active: showSub2API,
                          tint: Theme.sub2api, presentation: .compactStatus,
                          content: AnyView(providerQuotaBlock(
@@ -462,7 +478,7 @@ struct PanelView: View {
             ToolCardItem(id: "mimocode", name: "MiMoCode", visible: showMimoCode, active: mr.sessions > 0,
                          tint: Theme.mimocode, content: AnyView(tokenUsageBlock(title: "MiMoCode", mr, tint: Theme.mimocode, modelsOpen: $mimocodeModelsOpen, toolID: "mimocode"))),
             ToolCardItem(id: "openclaw", name: "OpenClaw", visible: showOpenClaw,
-                         active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw > 0,
+                         active: lr.tasks > 0 || lr.in + lr.out + lr.cr + lr.cw + lr.reason > 0,
                          tint: Theme.openclaw, content: AnyView(openclawBlock(lr, modelsOpen: $openClawModelsOpen))),
             ToolCardItem(id: "pi", name: "Pi", visible: showPi, active: pr.sessions > 0,
                          tint: Theme.pi, content: AnyView(tokenUsageBlock(title: "Pi Coding Agent", pr, tint: Theme.pi, modelsOpen: $piModelsOpen, toolID: "pi"))),
@@ -492,8 +508,11 @@ struct PanelView: View {
                              u.qwenwork.remaining != nil || !u.qwenwork.segments.isEmpty ||
                              u.qwenwork.shared != nil,
                          tint: Theme.qwenwork, content: AnyView(qwenWorkBlock(u.qwenwork))),
-            ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode, active: kcr.sessions > 0,
-                         tint: Theme.kimicode, content: AnyView(tokenUsageBlock(title: "Kimi Code", kcr, tint: Theme.kimicode, modelsOpen: $kimiCodeModelsOpen, showsCost: false, toolID: "kimicode"))),
+            ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode,
+                         active: kcr.sessions > 0 || u.kimicode.hasQuota || u.kimicode.hasStaleQuota,
+                         tint: Theme.kimicode, content: AnyView(kimiCodeBlock(u.kimicode, kcr))),
+            ToolCardItem(id: "musecode", name: "Muse Code", visible: showMuseCode, active: mcr.sessions > 0,
+                         tint: Theme.musecode, content: AnyView(tokenUsageBlock(title: "Muse Code", mcr, tint: Theme.musecode, modelsOpen: $museCodeModelsOpen, reasonIncludedInOutput: true, toolID: "musecode"))),
             ToolCardItem(id: "cmdcode", name: "Command Code", visible: showCmdCode, active: ccr.sessions > 0,
                          tint: Theme.cmdcode, content: AnyView(tokenUsageBlock(title: "Command Code", ccr, tint: Theme.cmdcode, modelsOpen: $cmdCodeModelsOpen, toolID: "cmdcode"))),
         ]
@@ -660,10 +679,10 @@ struct PanelView: View {
             }
             if let plan = x.plan {
                 HStack {
-                    Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                    Text("plan").font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tTertiary)
                     Spacer()
                     Text(plan)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.tSecondary)
                         .padding(.horizontal, 7).padding(.vertical, 2)
                         .background(Capsule().fill(Theme.codex.opacity(0.16)))
@@ -682,6 +701,69 @@ struct PanelView: View {
         }
     }
 
+    // MARK: - Kimi Code 卡片
+    // 额度来自官方 usages 接口,登录态由 Kimi Code CLI 自己刷新(有效期很短),
+    // 因此这里必须能表达"读数已过期",而不是把上一次的百分比一直显示下去。
+    @ViewBuilder
+    func kimiCodeBlock(_ x: KimiCodeStat, _ r: TokenUsageRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Kimi Code", tint: Theme.kimicode, sessions: r.sessions, toolID: "kimicode")
+            if r.sessions > 0 {
+                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason),
+                             caption: "\(sel.label) 总量", tint: Theme.kimicode)
+                metricGrid([], hit: r.hit, extra: tokenUsageMetrics(r), tint: Theme.kimicode)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $kimiCodeModelsOpen, tint: Theme.kimicode)
+                }
+            } else if x.hasQuota {
+                usageEmptyHint
+            } else {
+                emptyHint
+            }
+            if x.hasQuota || x.hasStaleQuota {
+                thinDivider
+            }
+            if let p5 = x.p5, x.p5_stale != true {
+                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.kimicode)
+            }
+            if let pw = x.pw, x.pw_stale != true {
+                // 接口只给了这一档的重置时刻,没有说周期是周还是月,所以标题不写周期名。
+                quotaRow(title: "订阅额度剩余", pct: 100 - pw, reset: x.rw, tint: Theme.kimicode)
+            }
+            if x.hasStaleQuota {
+                quotaStateNotice(
+                    title: "额度读数已过期",
+                    detail: "Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。",
+                    source: "api.kimi.com",
+                    updated: x.q_updated,
+                    tint: Theme.kimicode,
+                    warning: true
+                )
+            }
+            if let plan = x.plan, !plan.isEmpty {
+                HStack {
+                    Text("plan").font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tTertiary)
+                    Spacer()
+                    Text(plan.replacingOccurrences(of: "LEVEL_", with: ""))
+                        .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.tSecondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(Capsule().fill(Theme.kimicode.opacity(0.16)))
+                }
+            }
+            if r.sessions > 0 && !x.hasQuota && !x.hasStaleQuota {
+                thinDivider
+                quotaStateNotice(
+                    title: "暂未获取到额度数据",
+                    detail: "用量统计不受影响；登录 Kimi Code 后会自动展示官方额度。",
+                    source: "Kimi Code 本地登录态",
+                    updated: nil,
+                    tint: Theme.kimicode
+                )
+            }
+        }
+    }
+
     @ViewBuilder
     func codexResetCardsRow(_ cards: CodexResetCards) -> some View {
         let expirations = cards.expires.sorted()
@@ -692,22 +774,22 @@ struct PanelView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.clockwise.circle.fill")
-                    .font(.system(size: 10))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.codex)
                 Text("重置卡")
-                    .font(.system(size: 11))
+                    .font(.system(size: Theme.fontSize(11)))
                     .foregroundStyle(Theme.tSecondary)
                 Text("\(cards.count) 张")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
                 Spacer(minLength: 6)
                 if let nearest = expirations.first {
                     Text("最近 \(Fmt.beijingTime(nearest)) · 北京时间")
-                        .font(.system(size: 9.5, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Image(systemName: codexResetCardsOpen ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: Theme.fontSize(8), weight: .bold))
                     .foregroundStyle(Theme.tTertiary)
             }
             .contentShape(Rectangle())
@@ -719,26 +801,26 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Text("到期时间")
-                        .font(.system(size: 9.5, weight: .medium))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .medium))
                         .foregroundStyle(Theme.tTertiary)
                     Spacer()
                     Text("北京时间 UTC+8")
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 ForEach(Array(expirations.enumerated()), id: \.offset) { index, expiry in
                     HStack(spacing: 7) {
                         Text("\(index + 1)")
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .font(.system(size: Theme.fontSize(9), weight: .semibold, design: .monospaced))
                             .foregroundStyle(Theme.codex)
                             .frame(width: 16, height: 16)
                             .background(Circle().fill(Theme.codex.opacity(0.14)))
                         Text("完整重置")
-                            .font(.system(size: 10.5, weight: .medium))
+                            .font(.system(size: Theme.fontSize(10.5), weight: .medium))
                             .foregroundStyle(Theme.tSecondary)
                         Spacer()
                         Text(Fmt.beijingTime(expiry, full: true))
-                            .font(.system(size: 9.5, design: .monospaced))
+                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                             .foregroundStyle(Theme.tPrimary)
                     }
                 }
@@ -814,7 +896,7 @@ struct PanelView: View {
                 providerQuotaContent(quota, tint: tint)
             } else if !hasUsage {
                 Text(setupHint)
-                    .font(.system(size: 10))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -853,7 +935,7 @@ struct PanelView: View {
                 tint: tint
             )
             Text("账号级用量 · 单列统计，避免与本地工具日志重复计算")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
             if !top.isEmpty || !details.isEmpty {
                 metricGrid(top, hit: r.hit, extra: details, tint: tint)
@@ -878,7 +960,7 @@ struct PanelView: View {
                 }
                 if let account = quota.account, !account.isEmpty {
                     Text(account)
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -899,11 +981,11 @@ struct PanelView: View {
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(window.title)
-                        .font(.system(size: 11))
+                        .font(.system(size: Theme.fontSize(11)))
                         .foregroundStyle(Theme.tSecondary)
                     Spacer(minLength: 6)
                     Text(window.detail ?? "额度比例未知")
-                        .font(.system(size: 9.5, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                         .multilineTextAlignment(.trailing)
                 }
@@ -917,16 +999,16 @@ struct PanelView: View {
                     let detail = item.element
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(detail.label)
-                            .font(.system(size: 10))
+                            .font(.system(size: Theme.fontSize(10)))
                             .foregroundStyle(Theme.tTertiary)
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 1) {
                             Text(providerQuotaDetailValue(detail))
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                                 .foregroundStyle(Theme.tPrimary)
                             if let secondary = detail.secondary, !secondary.isEmpty {
                                 Text(secondary)
-                                    .font(.system(size: 8.5, design: .monospaced))
+                                    .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                                     .foregroundStyle(Theme.tTertiary)
                                     .multilineTextAlignment(.trailing)
                             }
@@ -948,9 +1030,9 @@ struct PanelView: View {
         } else if let updated = quota.updated {
             HStack(spacing: 5) {
                 Image(systemName: "clock")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                 Text("额度更新于 \(Fmt.reset(updated))")
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(9), design: .monospaced))
                 Spacer(minLength: 4)
             }
             .foregroundStyle(Theme.tTertiary)
@@ -959,7 +1041,7 @@ struct PanelView: View {
 
     func providerQuotaPill(_ text: String, tint: Color) -> some View {
         Text(text)
-            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+            .font(.system(size: Theme.fontSize(9.5), weight: .semibold, design: .monospaced))
             .foregroundStyle(Theme.tSecondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
@@ -989,7 +1071,7 @@ struct PanelView: View {
             if hasUsage {
                 if displayedRange != sel {
                     Text("\(sel.label)暂无活动，显示\(displayedRange.label)最近记录")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: Theme.fontSize(9.5)))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 providerTokenUsageContent(
@@ -1000,13 +1082,13 @@ struct PanelView: View {
                 )
                 if hasActivity {
                     Text("本地记录 · \(r.turns) 条消息 · \(r.calls) 次响应")
-                        .font(.system(size: 8.5))
+                        .font(.system(size: Theme.fontSize(8.5)))
                         .foregroundStyle(Theme.tTertiary)
                 }
             } else if hasActivity {
                 if displayedRange != sel {
                     Text("\(sel.label)暂无活动，显示\(displayedRange.label)最近记录")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: Theme.fontSize(9.5)))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 CostHeadline(
@@ -1028,7 +1110,7 @@ struct PanelView: View {
                     return items
                 }(), tint: Theme.grokBot)
                 Text("本地活动 · 授权后显示官方 Token、模型和成本")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                     .foregroundStyle(Theme.tTertiary)
             } else if !stat.quota.available {
                 emptyHint
@@ -1038,7 +1120,7 @@ struct PanelView: View {
                 providerQuotaContent(stat.quota, tint: Theme.grokBot)
             } else if grokBotQuotaEnabled {
                 Text("官方数据暂时不可用，Tokei 将自动重试")
-                    .font(.system(size: 9))
+                    .font(.system(size: Theme.fontSize(9)))
                     .foregroundStyle(Theme.tTertiary)
             }
         }
@@ -1106,7 +1188,7 @@ struct PanelView: View {
                         ? "来自 Grok Build 本地推理日志；成本按 API 价估算，订阅实付不按此。"
                         : "来自 Grok Build 本地推理日志；当前模型未匹配到公开价格。")
                      : "旧版日志未保存真实用量，当前仅展示上下文与执行指标。")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if !compactExpired && quotaState != .unavailable {
@@ -1139,10 +1221,10 @@ struct PanelView: View {
                 }
                 if let plan = g.plan, !plan.isEmpty {
                     HStack {
-                        Text("plan").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+                        Text("plan").font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tTertiary)
                         Spacer()
                         Text(plan)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                             .foregroundStyle(Theme.tSecondary)
                             .padding(.horizontal, 7).padding(.vertical, 2)
                             .background(Capsule().fill(Theme.grok.opacity(0.16)))
@@ -1177,9 +1259,9 @@ struct PanelView: View {
         let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
         return HStack(spacing: 5) {
             Image(systemName: "clock")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
             Text("额度来源 \(sourceLabel) · \(updated)")
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
         .foregroundStyle(Theme.tTertiary)
@@ -1225,13 +1307,13 @@ struct PanelView: View {
         VStack(spacing: 4) {
             HStack {
                 Text(name)
-                    .font(.system(size: 11))
+                    .font(.system(size: Theme.fontSize(11)))
                     .foregroundStyle(Theme.tSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
                 Spacer(minLength: 6)
                 Text(String(format: "占用 %.0f%%", usedPct))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
             }
             MiniBar(value: max(0, min(100, 100 - usedPct)), tint: tint.opacity(0.75))
@@ -1251,7 +1333,7 @@ struct PanelView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                         Text("官方额度状态：已用尽")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(10), weight: .semibold))
                     .foregroundStyle(Color.red.opacity(0.92))
                 }
 
@@ -1284,7 +1366,7 @@ struct PanelView: View {
                 if !quota.segments.isEmpty {
                     thinDivider
                     Text("个人积分明细")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: Theme.fontSize(10), weight: .semibold))
                         .foregroundStyle(Theme.tSecondary)
                     ForEach(Array(quota.segments.enumerated()), id: \.offset) { item in
                         qwenWorkSegmentRow(item.element)
@@ -1299,12 +1381,12 @@ struct PanelView: View {
                 qwenWorkQuotaStatus(quota)
             } else if qwenWorkQuotaEnabled {
                 Text("未读取到额度。请确认千问办公已登录并保持运行。")
-                    .font(.system(size: 10))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text("在设置的「隐私与额度」中开启查询后显示。")
-                    .font(.system(size: 10))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1318,13 +1400,13 @@ struct PanelView: View {
         return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(Self.qwenWorkSegmentLabel(segment))
-                    .font(.system(size: 11))
+                    .font(.system(size: Theme.fontSize(11)))
                     .foregroundStyle(Theme.tSecondary)
                     .lineLimit(1)
                 Spacer(minLength: 6)
                 if let remaining = segment.remaining {
                     Text("剩余 \(Fmt.credits(remaining)) \(Self.qwenWorkUnitLabel(segment.unit))")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(11), weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.tPrimary)
                 }
             }
@@ -1332,7 +1414,7 @@ struct PanelView: View {
             if let total = segment.total, total > 0 {
                 let used = segment.used.map(Fmt.credits) ?? "?"
                 Text("已用 \(used) / 总量 \(Fmt.credits(total))")
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(9), design: .monospaced))
                     .foregroundStyle(Theme.tTertiary)
             }
 
@@ -1340,7 +1422,7 @@ struct PanelView: View {
                 HStack(spacing: 6) {
                     MiniBar(value: remainingPct, tint: remainingPct <= 15 ? .red : Theme.qwenwork)
                     Text(String(format: "%.0f%%", remainingPct))
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold, design: .monospaced))
                         .foregroundStyle(remainingPct <= 15 ? Color.red : Theme.tSecondary)
                 }
             }
@@ -1361,29 +1443,29 @@ struct PanelView: View {
         return VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("团队共享资源包")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(10), weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 Spacer(minLength: 6)
                 if let remaining = shared.remaining {
                     Text("剩余 \(Fmt.credits(remaining)) \(Self.qwenWorkUnitLabel(shared.unit))")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(11), weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.tPrimary)
                 }
             }
             Text("共享包独立展示，不计入上方个人积分")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
             if let total = shared.total, total > 0 {
                 let used = shared.used.map(Fmt.credits) ?? "?"
                 Text("已用 \(used) / 总量 \(Fmt.credits(total))")
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(9), design: .monospaced))
                     .foregroundStyle(Theme.tTertiary)
             }
             if let remainingPct {
                 HStack(spacing: 6) {
                     MiniBar(value: remainingPct, tint: remainingPct <= 15 ? .red : Theme.qwenwork)
                     Text(String(format: "%.0f%%", remainingPct))
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold, design: .monospaced))
                         .foregroundStyle(remainingPct <= 15 ? Color.red : Theme.tSecondary)
                 }
             }
@@ -1396,9 +1478,9 @@ struct PanelView: View {
     func qwenWorkDateRow(_ label: String, epoch: Int) -> some View {
         HStack(spacing: 5) {
             Image(systemName: "calendar")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
             Text("\(label) · \(Fmt.reset(epoch))")
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
         .foregroundStyle(Theme.tTertiary)
@@ -1414,9 +1496,9 @@ struct PanelView: View {
         let updated = quota.updated.map { Fmt.reset($0) } ?? "更新时间未知"
         return HStack(spacing: 5) {
             Image(systemName: quota.stale ? "exclamationmark.triangle.fill" : "clock")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
             Text("\(quota.stale ? "缓存可能已过期" : sourceLabel) · \(updated)")
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
         .foregroundStyle(quota.stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
@@ -1596,7 +1678,7 @@ struct PanelView: View {
     func openclawBlock(_ r: OpenClawRange, modelsOpen: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead("OpenClaw", tint: Theme.openclaw, sessions: r.sessions, toolID: "openclaw")
-            if r.in + r.out + r.cr + r.cw > 0 {
+            if r.in + r.out + r.cr + r.cw + r.reason > 0 {
                 CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw), caption: "\(sel.label) 总量", tint: Theme.openclaw)
                 metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
                     hit: r.hit, extra: {
@@ -1605,33 +1687,35 @@ struct PanelView: View {
                         .init("arrow.up", "输出", Fmt.human(r.out)),
                         .init("bolt.fill", "缓存读", Fmt.human(r.cr)),
                     ]
+                    if r.reason > 0 { items.append(.init("brain", "推理", Fmt.human(r.reason))) }
                     if r.tasks > 0 { items.append(.init("checklist", "任务", "\(r.tasks)")) }
                     return items
                 }(), tint: Theme.openclaw)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: Theme.openclaw,
+                                         reasonIncludedInOutput: true)
                 }
             } else if r.tasks > 0 {
                 HStack(spacing: 16) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("任务").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                        Text("任务").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
                         Text("\(r.tasks)")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(.system(size: Theme.fontSize(16), weight: .bold, design: .rounded))
                             .foregroundStyle(Theme.tPrimary)
                     }
                     if r.completed > 0 {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("完成").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                            Text("完成").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
                             Text("\(r.completed)")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .font(.system(size: Theme.fontSize(16), weight: .bold, design: .rounded))
                                 .foregroundStyle(.green)
                         }
                     }
                     if r.failed > 0 {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("失败").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                            Text("失败").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
                             Text("\(r.failed)")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .font(.system(size: Theme.fontSize(16), weight: .bold, design: .rounded))
                                 .foregroundStyle(.red.opacity(0.8))
                         }
                     }
@@ -1647,15 +1731,18 @@ struct PanelView: View {
     @ViewBuilder
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
-                         showsCost: Bool = true, toolID: String? = nil) -> some View {
+                         showsCost: Bool = true, reasonIncludedInOutput: Bool = false,
+                         toolID: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 11) {
             cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if r.sessions > 0 {
-                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason), caption: "\(sel.label) 总量", tint: tint)
-                metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))] : [],
+                let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+                CostHeadline(value: Fmt.human(total), caption: "\(sel.label) 总量", tint: tint)
+                metricGrid(showsCost ? [.init("dollarsign.circle", "≈成本", nativeMoney(r.cost, r.cost_cny))] : [],
                     hit: r.hit, extra: tokenUsageMetrics(r, inclusiveIO: inclusiveIO), tint: tint)
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: modelsOpen, tint: tint,
+                                         reasonIncludedInOutput: reasonIncludedInOutput,
                                          inclusiveIO: inclusiveIO)
                 }
             } else {
@@ -1690,7 +1777,7 @@ struct PanelView: View {
         let inactive = cards.filter { $0.visible && !$0.active }.map(\.name)
         if !inactive.isEmpty {
             Text("未检测到本地数据: " + inactive.joined(separator: " · "))
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
                 .frame(maxWidth: .infinity)
         }
@@ -1698,13 +1785,13 @@ struct PanelView: View {
 
     var emptyHint: some View {
         Text("暂无数据")
-            .font(.system(size: 10))
+            .font(.system(size: Theme.fontSize(10)))
             .foregroundStyle(Theme.tTertiary)
     }
 
     var usageEmptyHint: some View {
         Text("\(sel.label)暂无用量，额度状态如下")
-            .font(.system(size: 10))
+            .font(.system(size: Theme.fontSize(10)))
             .foregroundStyle(Theme.tTertiary)
     }
 
@@ -1721,23 +1808,23 @@ struct PanelView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: warning ? "exclamationmark.triangle.fill" : "info.circle.fill")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(10), weight: .semibold))
                 Text(title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(11), weight: .semibold))
                 Spacer(minLength: 4)
             }
             .foregroundStyle(statusTint.opacity(0.95))
 
             Text(detail)
-                .font(.system(size: 9.5))
+                .font(.system(size: Theme.fontSize(9.5)))
                 .foregroundStyle(Theme.tSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 5) {
                 Image(systemName: "clock")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                 Text("\(source) · \(updatedLabel)")
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(9), design: .monospaced))
                 Spacer(minLength: 4)
             }
             .foregroundStyle(Theme.tTertiary)
@@ -1755,10 +1842,10 @@ struct PanelView: View {
 
     func modelBadge(_ model: String, tint: Color) -> some View {
         HStack {
-            Text("model").font(.system(size: 11)).foregroundStyle(Theme.tTertiary)
+            Text("model").font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tTertiary)
             Spacer()
             Text(model)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                 .foregroundStyle(Theme.tSecondary)
                 .padding(.horizontal, 7).padding(.vertical, 2)
                 .background(Capsule().fill(tint.opacity(0.16)))
@@ -1798,10 +1885,10 @@ struct PanelView: View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
-            Text(title).font(.system(size: 14, weight: .bold))
+            Text(title).font(.system(size: Theme.fontSize(14), weight: .bold))
             if sessions > 0 {
                 Text("\(sessions)")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .font(.system(size: Theme.fontSize(10), weight: .bold, design: .rounded))
                     .foregroundStyle(tint)
                     .padding(.horizontal, 5).padding(.vertical, 1.5)
                     .background(Capsule().fill(tint.opacity(0.12)))
@@ -1818,7 +1905,7 @@ struct PanelView: View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
-            Text(title).font(.system(size: 14, weight: .bold))
+            Text(title).font(.system(size: Theme.fontSize(14), weight: .bold))
             Spacer()
             if let toolID {
                 cardCopyButton(toolID: toolID, tint: tint)
@@ -1833,7 +1920,7 @@ struct PanelView: View {
             copySingleToolImage(id: toolID)
         } label: {
             Image(systemName: done ? "checkmark" : "photo.on.rectangle")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: Theme.fontSize(10), weight: .semibold))
                 .foregroundStyle(done ? tint : Theme.tTertiary)
                 .frame(width: 22, height: 22)
                 .background(Circle().fill(Color.primary.opacity(done ? 0.10 : 0.06)))
@@ -1871,18 +1958,18 @@ struct PanelView: View {
     func sessionRow(_ name: String, _ total: Int) -> some View {
         HStack {
             Image(systemName: "dot.radiowaves.left.and.right")
-                .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
-            Text("本会话 \(name)").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
+            Text("本会话 \(name)").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             Spacer()
             Text(Fmt.human(total))
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(.system(size: Theme.fontSize(10), weight: .medium, design: .monospaced))
                 .foregroundStyle(Theme.tSecondary)
         }
     }
 
     var disclaimer: some View {
         Text(mode == .settings ? "Made by lank" : "成本按 API 价估算,非订阅实付")
-            .font(.system(size: 9))
+            .font(.system(size: Theme.fontSize(9)))
             .foregroundStyle(Theme.tTertiary)
     }
 
@@ -1896,12 +1983,12 @@ struct PanelView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "chart.pie.fill")
-                    .font(.system(size: 9)).foregroundStyle(tint)
+                    .font(.system(size: Theme.fontSize(9))).foregroundStyle(tint)
                 Text("按模型 (\(models.count))")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(Theme.tSecondary)
                 Image(systemName: open.wrappedValue ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: Theme.fontSize(8), weight: .bold))
                     .foregroundStyle(Theme.tTertiary)
                 Spacer()
             }
@@ -1911,7 +1998,7 @@ struct PanelView: View {
         if open.wrappedValue {
             VStack(alignment: .leading, spacing: 6) {
                 Text("按模型 · \(periodLabel ?? sel.label)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(11), weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in
                     let total = tokenModelTotal(m, reasonIncludedInOutput: reasonIncludedInOutput)
@@ -1930,7 +2017,7 @@ struct PanelView: View {
                             HStack(alignment: .top, spacing: 7) {
                                 if hasBreakdown {
                                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                        .font(.system(size: 7, weight: .bold))
+                                        .font(.system(size: Theme.fontSize(7), weight: .bold))
                                         .foregroundStyle(Theme.tTertiary)
                                         .frame(width: 8, height: 16)
                                 } else {
@@ -1938,25 +2025,25 @@ struct PanelView: View {
                                 }
                                 Circle().fill(tint.opacity(0.7)).frame(width: 5, height: 5)
                                     .padding(.top, 5)
-                                Text(m.name).font(.system(size: 11.5)).foregroundStyle(Theme.tPrimary)
+                                Text(m.name).font(.system(size: Theme.fontSize(11.5))).foregroundStyle(Theme.tPrimary)
                                     .lineLimit(2)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .layoutPriority(1)
                                 Spacer(minLength: 6)
                                 HStack(spacing: 6) {
                                     Text(Fmt.human(total))
-                                        .font(.system(size: 9.5, design: .monospaced))
+                                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                                         .foregroundStyle(Theme.tTertiary)
                                     if hit > 0 {
                                         Text(String(format: "%.0f%%", hit))
-                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                                             .foregroundStyle(Theme.tTertiary)
                                             .padding(.horizontal, 4).padding(.vertical, 1)
                                             .background(Capsule().fill(Color.primary.opacity(0.06)))
                                     }
-                                    if m.cost > 0 {
-                                        Text(String(format: "$%.2f", m.cost))
-                                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                    if m.cost > 0 || (m.cost_cny ?? 0) > 0 {
+                                        Text(nativeMoney(m.cost, m.cost_cny))
+                                            .font(.system(size: Theme.fontSize(11.5), weight: .semibold, design: .monospaced))
                                             .foregroundStyle(Theme.tPrimary)
                                     }
                                 }
@@ -1994,12 +2081,12 @@ struct PanelView: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "chart.pie.fill")
-                    .font(.system(size: 9)).foregroundStyle(tint)
+                    .font(.system(size: Theme.fontSize(9))).foregroundStyle(tint)
                 Text("按模型 (\(models.count))")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(Theme.tSecondary)
                 Image(systemName: open.wrappedValue ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: Theme.fontSize(8), weight: .bold))
                     .foregroundStyle(Theme.tTertiary)
                 Spacer()
             }
@@ -2009,7 +2096,7 @@ struct PanelView: View {
         if open.wrappedValue {
             VStack(alignment: .leading, spacing: 6) {
                 Text("按模型 · \(periodLabel ?? sel.label)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(11), weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in
                     let isExpanded = expandedModels.contains(m.id)
@@ -2022,12 +2109,12 @@ struct PanelView: View {
                         } label: {
                             HStack(alignment: .top, spacing: 7) {
                                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 7, weight: .bold))
+                                    .font(.system(size: Theme.fontSize(7), weight: .bold))
                                     .foregroundStyle(Theme.tTertiary)
                                     .frame(width: 8, height: 16)
                                 Circle().fill(tint.opacity(0.7)).frame(width: 5, height: 5)
                                     .padding(.top, 5)
-                                Text(m.name).font(.system(size: 11.5)).foregroundStyle(Theme.tPrimary)
+                                Text(m.name).font(.system(size: Theme.fontSize(11.5))).foregroundStyle(Theme.tPrimary)
                                     .lineLimit(2)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .layoutPriority(1)
@@ -2035,18 +2122,18 @@ struct PanelView: View {
                                 HStack(spacing: 6) {
                                     if m.total > 0 {
                                         Text(Fmt.human(m.total))
-                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                                             .foregroundStyle(Theme.tTertiary)
                                     }
                                     if m.hit > 0 {
                                         Text(String(format: "%.0f%%", m.hit))
-                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                                             .foregroundStyle(Theme.tTertiary)
                                             .padding(.horizontal, 4).padding(.vertical, 1)
                                             .background(Capsule().fill(Color.primary.opacity(0.06)))
                                     }
                                     Text(String(format: "$%.2f", m.cost))
-                                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                        .font(.system(size: Theme.fontSize(11.5), weight: .semibold, design: .monospaced))
                                         .foregroundStyle(Theme.tPrimary)
                                 }
                                 .fixedSize(horizontal: true, vertical: false)
@@ -2176,20 +2263,20 @@ struct PanelView: View {
     func quotaRow(title: String, pct: Double, detail: String? = nil, reset: Int?, tint: Color) -> some View {
         VStack(spacing: 4) {
             HStack {
-                Text(title).font(.system(size: 11)).foregroundStyle(Theme.tSecondary)
+                Text(title).font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tSecondary)
                 if let d = detail {
                     Text(d)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(10), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Spacer()
                 Text(SubscriptionQuotaPresentation.remainingLabel(pct))
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
                     .foregroundStyle(pct <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.tPrimary))
                 // 无重置时间时不显示「· ?」，避免分产品行误导。
                 if reset != nil {
                     Text("· \(Fmt.reset(reset))")
-                        .font(.system(size: 9.5, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                 }
             }
@@ -2213,9 +2300,9 @@ struct PanelView: View {
         let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
         return HStack(spacing: 5) {
             Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
             Text("\(label) · \(updated)")
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
         .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
@@ -2226,9 +2313,9 @@ struct PanelView: View {
         let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
         return HStack(spacing: 5) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
             Text("额度数据已过期 · 更新于 \(updated)")
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
         .foregroundStyle(Color.orange.opacity(0.88))
@@ -2318,7 +2405,7 @@ struct PanelView: View {
                         updateRing
                     }
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: Theme.fontSize(10), weight: .bold))
                         .foregroundStyle(.white)
                 }
             }
@@ -2335,7 +2422,7 @@ struct PanelView: View {
                     .frame(width: 26, height: 26)
                     .rotationEffect(.degrees(-90))
                 Text("\(Int(p * 100))")
-                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(7), weight: .bold, design: .monospaced))
                     .foregroundStyle(Theme.tSecondary)
             }
         case .installing:
@@ -2348,13 +2435,13 @@ struct PanelView: View {
                     .frame(width: 26, height: 26)
                     .rotationEffect(.degrees(updateSpin ? 360 : 0))
                 Image(systemName: "square.and.arrow.up")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: Theme.fontSize(9), weight: .bold))
                     .foregroundStyle(Theme.claude)
             }
         case .failed:
             Button { updater.checkForUpdate() } label: {
                 Image(systemName: "exclamationmark.circle")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(.red)
                     .frame(width: 26, height: 26)
             }
@@ -2382,6 +2469,8 @@ struct PanelView: View {
     @State private var providerSettingsResult = ""
     @State private var grokBotAuthorizing = false
     @State private var grokBotAuthorizationResult = ""
+    @State private var zedAuthorizing = false
+    @State private var zedAuthorizationResult = ""
     @AppStorage("syncDir") private var syncDir = ""
     @AppStorage("deviceName") private var deviceName = ""
     @State private var configuredDeviceID: String?
@@ -2391,6 +2480,7 @@ struct PanelView: View {
     @AppStorage("sitReminderInterval") private var sitReminderInterval = 90
     @AppStorage(MenuBarStyle.defaultsKey) private var menuBarStyle = MenuBarStyle.system.rawValue
     @AppStorage(MenuBarDensity.defaultsKey) private var menuBarDensity = MenuBarDensity.full.rawValue
+    @AppStorage(PanelFontSize.defaultsKey) private var panelFontSize = PanelFontSize.small.rawValue
 
     var settingsContent: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2406,6 +2496,7 @@ struct PanelView: View {
                 .frame(width: settingsColumnWidth, alignment: .top)
 
                 VStack(alignment: .leading, spacing: 11) {
+                    settingsAppearanceSection
                     settingsMenuBarSection
                     settingsPrivacySection
                     settingsSystemSection
@@ -2462,6 +2553,8 @@ struct PanelView: View {
         case .claudeFable: return $menuBarQuotaClaudeFable
         case .codex5h: return $menuBarQuotaCodex5h
         case .codexWeek: return $menuBarQuotaCodexWeek
+        case .kimi5h: return $menuBarQuotaKimi5h
+        case .kimiSubscription: return $menuBarQuotaKimiSubscription
         case .grok: return $menuBarQuotaGrok
         }
     }
@@ -2494,6 +2587,22 @@ struct PanelView: View {
         return "双额度显示：\(shown)。"
     }
 
+    var settingsAppearanceSection: some View {
+        settingsSection("textformat.size", "界面") {
+            settingsStackedValue("字体大小") {
+                Picker("字体大小", selection: $panelFontSize) {
+                    ForEach(PanelFontSize.allCases) { size in
+                        Text(size.label).tag(size.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.mini)
+                .frame(width: settingsMenuPickerWidth)
+            }
+        }
+    }
+
     var settingsMenuBarSection: some View {
         settingsSection("menubar.rectangle", "菜单栏") {
             settingsStackedValue("样式") {
@@ -2505,7 +2614,7 @@ struct PanelView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .controlSize(.mini)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: Theme.fontSize(9), weight: .medium))
                 .frame(width: settingsMenuPickerWidth)
             }
 
@@ -2532,12 +2641,12 @@ struct PanelView: View {
             }
 
             Text(menuBarQuotaHint)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: Theme.fontSize(9), weight: .medium))
                 .foregroundStyle(Theme.tSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text("只影响状态栏剩余额度，与「显示卡片」无关。每项都是一个具体窗口：5h 是滚动的 5 小时窗口，周是本周配额。双额度按上面的顺序取前两项，单额度只显示剩得最少的那项。「符号」「圆点」两种样式会用沙漏标 5h、横块标周；其余样式只有数字，鼠标放到状态栏上能看到窗口全名。勾了但你的账号没有这个窗口、或者读数已过期，状态栏会跳过它。")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -2575,7 +2684,7 @@ struct PanelView: View {
             if loginItem.requiresApproval {
                 HStack(spacing: 7) {
                     Text("需要在系统设置中允许")
-                        .font(.system(size: 8.5))
+                        .font(.system(size: Theme.fontSize(8.5)))
                         .foregroundStyle(Theme.tTertiary)
                     Spacer()
                     settingsActionButton(icon: "gear", title: "打开设置") {
@@ -2584,7 +2693,7 @@ struct PanelView: View {
                 }
             } else if let error = loginItem.errorMessage {
                 Text(error)
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                     .foregroundStyle(.red.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -2620,6 +2729,7 @@ struct PanelView: View {
                 settingsRow("Qwen Code", tint: Theme.qwencode, isOn: $showQwenCode)
                 settingsRow("千问办公", tint: Theme.qwenwork, isOn: $showQwenWork)
                 settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
+                settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
                 settingsRow("Command Code", tint: Theme.cmdcode, isOn: $showCmdCode)
             }
         }
@@ -2650,15 +2760,34 @@ struct PanelView: View {
 
     var settingsProviderQuotaSection: some View {
         settingsSection("key.horizontal.fill", "Provider 额度") {
-            Text("Cursor 复用 Cursor.app 登录态，Zed 复用 Zed Keychain；两者无需在 Tokei 中保存密钥。显示对应卡片即允许查询。")
-                .font(.system(size: 8.5))
+            Text("Cursor 复用 Cursor.app 登录态；Zed 首次使用需允许 Tokei 读取其 Keychain 登录态。Tokei 不保存这些登录密钥。")
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if showZed {
+                HStack(spacing: 8) {
+                    settingsActionButton(
+                        icon: "key.fill",
+                        title: zedAuthorizing ? "等待授权…" : "授权 Zed"
+                    ) {
+                        authorizeZedQuota()
+                    }
+                    .disabled(zedAuthorizing)
+                    if zedAuthorizing { ProgressView().controlSize(.mini) }
+                    if !zedAuthorizationResult.isEmpty {
+                        Text(zedAuthorizationResult)
+                            .font(.system(size: Theme.fontSize(8.5)))
+                            .foregroundStyle(Theme.tTertiary)
+                            .lineLimit(2)
+                    }
+                }
+            }
 
             thinDivider
 
             Text("Sub2API")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: Theme.fontSize(10), weight: .semibold))
                 .foregroundStyle(Theme.sub2api)
             providerSettingsField(
                 label: "Base URL",
@@ -2683,11 +2812,11 @@ struct PanelView: View {
             thinDivider
 
             Text("z.ai / GLM")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: Theme.fontSize(10), weight: .semibold))
                 .foregroundStyle(Theme.zai)
             HStack(spacing: 8) {
                 Text("区域")
-                    .font(.system(size: 9.5))
+                    .font(.system(size: Theme.fontSize(9.5)))
                     .foregroundStyle(Theme.tTertiary)
                     .frame(width: 52, alignment: .leading)
                 Picker("z.ai 区域", selection: $zaiRegion) {
@@ -2720,7 +2849,7 @@ struct PanelView: View {
                 Spacer()
                 if !providerSettingsResult.isEmpty {
                     Text(providerSettingsResult)
-                        .font(.system(size: 8.5))
+                        .font(.system(size: Theme.fontSize(8.5)))
                         .foregroundStyle(providerSettingsResult == "已保存" ? Color.green : Color.orange)
                 }
             }
@@ -2736,7 +2865,7 @@ struct PanelView: View {
     ) -> some View {
         HStack(spacing: 8) {
             Text(label)
-                .font(.system(size: 9.5))
+                .font(.system(size: Theme.fontSize(9.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .frame(width: 52, alignment: .leading)
             Group {
@@ -2747,7 +2876,7 @@ struct PanelView: View {
                 }
             }
             .textFieldStyle(.plain)
-            .font(.system(size: 9.5, design: .monospaced))
+            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .background(
@@ -2800,6 +2929,42 @@ struct PanelView: View {
         store.refresh()
     }
 
+    private func authorizeZedQuota() {
+        guard !zedAuthorizing, let executable = Bundle.main.executableURL else { return }
+        zedAuthorizing = true
+        zedAuthorizationResult = ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            func run(_ argument: String) -> Bool {
+                let process = Process()
+                process.executableURL = executable
+                process.arguments = [argument]
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    return process.terminationStatus == 0
+                } catch {
+                    return false
+                }
+            }
+            let interactiveSucceeded = run("--zed-authorize")
+            let persistentSucceeded = interactiveSucceeded && run("--zed-verify")
+            DispatchQueue.main.async {
+                zedAuthorizing = false
+                if persistentSucceeded {
+                    zedAuthorizationResult = "授权成功，正在刷新 Zed 额度"
+                    store.refresh()
+                } else if interactiveSucceeded {
+                    zedAuthorizationResult = "仅允许了本次读取，请重新授权并选择“始终允许”"
+                } else {
+                    zedAuthorizationResult = "未授权，或 Zed 尚未登录"
+                }
+            }
+        }
+    }
+
     private static func validSub2APIBaseURL(_ value: String) -> Bool {
         guard let components = URLComponents(string: value),
               let scheme = components.scheme?.lowercased(),
@@ -2813,9 +2978,17 @@ struct PanelView: View {
 
     var settingsPrivacySection: some View {
         settingsSection("lock.shield", "隐私与额度") {
+            settingsToggleRow("应用活跃统计", isOn: $activityStatisticsEnabled)
+            Text("用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。")
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
             settingsToggleRow("Claude Code CLI 额度查询", isOn: $claudeCLIQuotaEnabled)
             Text("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -2823,7 +2996,7 @@ struct PanelView: View {
 
             settingsToggleRow("Grok 实时额度查询", isOn: $grokLiveQuotaEnabled)
             Text("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -2831,7 +3004,7 @@ struct PanelView: View {
 
             settingsToggleRow("Grok Bot 额度查询", isOn: $grokBotQuotaEnabled)
             Text("开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用时确认一次系统授权；专用只读助手会保留授权，Tokei 重启和升级无需重复确认。登录 Token 仅在助手进程内存中使用。")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             if grokBotQuotaEnabled {
@@ -2846,7 +3019,7 @@ struct PanelView: View {
                     if grokBotAuthorizing { ProgressView().controlSize(.mini) }
                     if !grokBotAuthorizationResult.isEmpty {
                         Text(grokBotAuthorizationResult)
-                            .font(.system(size: 8.5))
+                            .font(.system(size: Theme.fontSize(8.5)))
                             .foregroundStyle(Theme.tTertiary)
                             .lineLimit(2)
                     }
@@ -2857,9 +3030,12 @@ struct PanelView: View {
 
             settingsToggleRow("千问办公额度查询", isOn: $qwenWorkQuotaEnabled)
             Text("默认关闭。开启后，Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。Tokei 不读取或保存登录凭据，需保持千问办公已登录并运行。")
-                .font(.system(size: 8.5))
+                .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: activityStatisticsEnabled) { _ in
+            ActivityReporter.shared.preferencesChanged()
         }
         .onChange(of: claudeCLIQuotaEnabled) { _ in
             store.refresh()
@@ -2989,7 +3165,7 @@ struct PanelView: View {
 
             if !priceResult.isEmpty && !priceUpdating {
                 Text(priceResult)
-                    .font(.system(size: 9))
+                    .font(.system(size: Theme.fontSize(9)))
                     .foregroundStyle(Theme.tTertiary)
                     .lineLimit(2)
                     .onTapGesture { priceResult = "" }
@@ -3023,7 +3199,7 @@ struct PanelView: View {
                         NSPasteboard.general.setString(debugOutput, forType: .string)
                     } label: {
                         Image(systemName: "doc.on.doc")
-                            .font(.system(size: 10))
+                            .font(.system(size: Theme.fontSize(10)))
                             .foregroundStyle(Theme.tTertiary)
                             .frame(width: 22, height: 22)
                             .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -3040,9 +3216,9 @@ struct PanelView: View {
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: debugExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 8, weight: .semibold))
+                                .font(.system(size: Theme.fontSize(8), weight: .semibold))
                             Text(debugSummary)
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(9), design: .monospaced))
                                 .lineLimit(1)
                             Spacer()
                         }
@@ -3052,7 +3228,7 @@ struct PanelView: View {
 
                     if debugExpanded {
                         Text(debugOutput)
-                            .font(.system(size: 8.5, design: .monospaced))
+                            .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                             .foregroundStyle(Theme.tSecondary)
                             .lineLimit(16)
                             .fixedSize(horizontal: false, vertical: true)
@@ -3073,7 +3249,7 @@ struct PanelView: View {
 
             if sitReminderOn {
                 HStack {
-                    Text("间隔").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                    Text("间隔").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
                     Spacer()
                     Picker("", selection: $sitReminderInterval) {
                         Text("45m").tag(45); Text("60m").tag(60); Text("90m").tag(90)
@@ -3089,7 +3265,7 @@ struct PanelView: View {
                 }
 
                 Text("基于系统空闲判断连续用机时长,看视频或开会不操作会被当作离开。")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -3118,7 +3294,7 @@ struct PanelView: View {
             if store.syncEnabled {
                 settingsValueRow("设备名") {
                     TextField("hostname", text: $deviceName)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(10), design: .monospaced))
                         .textFieldStyle(.plain)
                         .frame(width: 110)
                         .multilineTextAlignment(.trailing)
@@ -3140,11 +3316,11 @@ struct PanelView: View {
 
                 settingsValueRow("目录") {
                     Text(syncDir.isEmpty ? "未设置" : (syncDir as NSString).lastPathComponent)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(10), design: .monospaced))
                         .foregroundStyle(syncDir.isEmpty ? Theme.tTertiary : Theme.tSecondary)
                         .lineLimit(1)
                     Button("选择") { pickSyncDir() }
-                        .font(.system(size: 10))
+                        .font(.system(size: Theme.fontSize(10)))
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.claude)
                         .disabled(store.syncing)
@@ -3162,7 +3338,7 @@ struct PanelView: View {
 
                     Spacer(minLength: 6)
                     Text("自动")
-                        .font(.system(size: 10))
+                        .font(.system(size: Theme.fontSize(10)))
                         .foregroundStyle(Theme.tTertiary)
                         .fixedSize(horizontal: true, vertical: false)
                     Toggle("", isOn: $autoSync)
@@ -3198,7 +3374,7 @@ struct PanelView: View {
                               : (store.syncSucceeded == true ? "checkmark.circle.fill" : "arrow.triangle.2.circlepath"))
                         Text(store.syncStatus)
                     }
-                    .font(.system(size: 8.5, weight: .medium))
+                    .font(.system(size: Theme.fontSize(8.5), weight: .medium))
                     .foregroundStyle(store.syncSucceeded == false ? Theme.claude : Theme.hermes)
                     .help(store.syncDetail)
                 }
@@ -3209,7 +3385,7 @@ struct PanelView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                         Text("有 \(store.peerLoadIssues.count) 个设备快照读取异常")
                     }
-                    .font(.system(size: 8.5, weight: .medium))
+                    .font(.system(size: Theme.fontSize(8.5), weight: .medium))
                     .foregroundStyle(Theme.claude)
                     .help(store.peerLoadIssues.map(\.summary).joined(separator: "\n"))
                 }
@@ -3224,29 +3400,29 @@ struct PanelView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 5) {
                             Image(systemName: "plus.circle")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: Theme.fontSize(10), weight: .semibold))
                                 .foregroundStyle(Theme.hermes)
                             Text("添加设备")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: Theme.fontSize(10), weight: .semibold))
                                 .foregroundStyle(Theme.tSecondary)
                         }
 
                         if syncDir.isEmpty {
                             Text("请先点击「选择」设置同步目录(需为 Git 仓库)")
-                                .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                                .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
                                 .fixedSize(horizontal: false, vertical: true)
                             copyBlock("读取 \(Self.skillPath) 并帮我创建 Tokei 私有数据仓库,配置多设备同步")
                         } else if hasRemote {
-                            Text("另一台 Mac").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.tSecondary)
+                            Text("另一台 Mac").font(.system(size: Theme.fontSize(9), weight: .medium)).foregroundStyle(Theme.tSecondary)
                             Text("安装 Tokei.app 后选择同一个数据仓库")
-                                .font(.system(size: 8.5)).foregroundStyle(Theme.tTertiary)
+                                .font(.system(size: Theme.fontSize(8.5))).foregroundStyle(Theme.tTertiary)
                                 .fixedSize(horizontal: false, vertical: true)
                             Rectangle().fill(Color.primary.opacity(0.04)).frame(height: 1)
-                            Text("远程 Linux").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.tSecondary)
+                            Text("远程 Linux").font(.system(size: Theme.fontSize(9), weight: .medium)).foregroundStyle(Theme.tSecondary)
                             copyBlock(linuxSetupCommand(remote: dataRepo))
                         } else {
                             Text("数据目录未关联 Git 仓库")
-                                .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                                .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
                             copyBlock("读取 \(Self.skillPath) 并帮我创建 Tokei 私有数据仓库,配置多设备同步")
                         }
                     }
@@ -3258,7 +3434,7 @@ struct PanelView: View {
     var settingsRemoteHintSection: some View {
         settingsSection("antenna.radiowaves.left.and.right", "远程采集") {
             Text("多台 Mac 或远程服务器的数据可通过私有 Git 仓库同步,每台设备独立采集、自动加和。")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             copyBlock("读取 \(Self.skillPath) 帮我配置 Tokei 多设备同步")
@@ -3269,28 +3445,28 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
                 Image(systemName: "desktopcomputer")
-                    .font(.system(size: 8)).foregroundStyle(.green)
+                    .font(.system(size: Theme.fontSize(8))).foregroundStyle(.green)
                 Text(deviceName.isEmpty ? "本机" : deviceName)
-                    .font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.tPrimary)
-                Text("(本机)").font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                    .font(.system(size: Theme.fontSize(10), weight: .medium)).foregroundStyle(Theme.tPrimary)
+                Text("(本机)").font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
             }
             if store.peers.isEmpty {
                 HStack(spacing: 5) {
                     Image(systemName: "clock")
-                        .font(.system(size: 8)).foregroundStyle(Theme.tTertiary)
+                        .font(.system(size: Theme.fontSize(8))).foregroundStyle(Theme.tTertiary)
                     Text("等待其他设备…")
-                        .font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                        .font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
                 }
             } else {
                 ForEach(store.peers) { p in
                     HStack(spacing: 5) {
                         Image(systemName: "laptopcomputer")
-                            .font(.system(size: 8)).foregroundStyle(Theme.codex)
+                            .font(.system(size: Theme.fontSize(8))).foregroundStyle(Theme.codex)
                         Text(p.deviceId)
-                            .font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.tPrimary)
+                            .font(.system(size: Theme.fontSize(10), weight: .medium)).foregroundStyle(Theme.tPrimary)
                         Spacer()
                         Text(Fmt.reset(Int(p.lastSync.timeIntervalSince1970)))
-                            .font(.system(size: 9, design: .monospaced)).foregroundStyle(Theme.tTertiary)
+                            .font(.system(size: Theme.fontSize(9), design: .monospaced)).foregroundStyle(Theme.tTertiary)
                     }
                 }
             }
@@ -3305,21 +3481,21 @@ struct PanelView: View {
             ZStack {
                 Circle().fill(Theme.claude.opacity(0.16))
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(13), weight: .semibold))
                     .foregroundStyle(Theme.claude)
             }
             .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("设置")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .font(.system(size: Theme.fontSize(15), weight: .bold, design: .rounded))
                         .foregroundStyle(Theme.tPrimary)
                     Text("\(Updater.releaseTag) · \(Self.buildVersion)")
-                        .font(.system(size: 8, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(8), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary.opacity(0.6))
                 }
                 Text("显示、同步和诊断")
-                    .font(.system(size: 9.5))
+                    .font(.system(size: Theme.fontSize(9.5)))
                     .foregroundStyle(Theme.tTertiary)
             }
             Spacer()
@@ -3333,10 +3509,15 @@ struct PanelView: View {
             }
             .buttonStyle(.plain)
             .tip("GitHub")
-            if case .idle = updater.state {
+            if Updater.isLocalBuild {
+                Text("本地验证版")
+                    .font(.system(size: Theme.fontSize(9)))
+                    .foregroundStyle(Theme.tTertiary)
+                    .tip("此版本包含尚未发布的改动，不检查线上更新")
+            } else if case .idle = updater.state {
                 Button { updater.checkForUpdate() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: Theme.fontSize(10), weight: .semibold))
                         .foregroundStyle(Theme.tTertiary)
                         .frame(width: 24, height: 24)
                         .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -3349,7 +3530,7 @@ struct PanelView: View {
                     .frame(width: 24, height: 24)
             } else if case .upToDate = updater.state {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 12))
+                    .font(.system(size: Theme.fontSize(12)))
                     .foregroundStyle(.green)
                     .frame(width: 24, height: 24)
             }
@@ -3358,7 +3539,7 @@ struct PanelView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { mode = .cards }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: Theme.fontSize(10), weight: .bold))
                     .foregroundStyle(Theme.tTertiary)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(Color.primary.opacity(0.06)))
@@ -3373,12 +3554,12 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: Theme.fontSize(10), weight: .bold))
                     .foregroundStyle(Theme.claude.opacity(0.95))
                     .frame(width: 20, height: 20)
                     .background(Circle().fill(Theme.claude.opacity(0.10)))
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(12), weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
             }
             VStack(spacing: 6) { content() }
@@ -3404,8 +3585,8 @@ struct PanelView: View {
     ) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 9))
-                Text(title).font(.system(size: 10, weight: .medium))
+                Image(systemName: icon).font(.system(size: Theme.fontSize(9)))
+                Text(title).font(.system(size: Theme.fontSize(10), weight: .medium))
             }
             .foregroundStyle(Theme.tPrimary)
             .padding(.horizontal, 10)
@@ -3419,7 +3600,7 @@ struct PanelView: View {
 
     func settingsToggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
         HStack {
-            Text(title).font(.system(size: 11)).foregroundStyle(Theme.tPrimary)
+            Text(title).font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tPrimary)
             Spacer()
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch)
@@ -3434,7 +3615,7 @@ struct PanelView: View {
 
     func settingsValueRow<C: View>(_ title: String, @ViewBuilder value: () -> C) -> some View {
         HStack(spacing: 8) {
-            Text(title).font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+            Text(title).font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             Spacer()
             value()
         }
@@ -3445,7 +3626,7 @@ struct PanelView: View {
     func settingsStackedValue<C: View>(_ title: String, @ViewBuilder value: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.system(size: 10))
+                .font(.system(size: Theme.fontSize(10)))
                 .foregroundStyle(Theme.tTertiary)
             value()
         }
@@ -3608,7 +3789,7 @@ struct PanelView: View {
                          "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork", "kimicode", "cmdcode", "prime_agent"]
+                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")
@@ -4184,7 +4365,7 @@ struct PanelView: View {
     func copyBlock(_ text: String) -> some View {
         HStack(alignment: .top) {
             Text(text)
-                .font(.system(size: 8, design: .monospaced))
+                .font(.system(size: Theme.fontSize(8), design: .monospaced))
                 .foregroundStyle(Theme.tSecondary)
                 .lineLimit(4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -4194,7 +4375,7 @@ struct PanelView: View {
                 NSPasteboard.general.setString(text, forType: .string)
             } label: {
                 Image(systemName: "doc.on.doc")
-                    .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                    .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
             }
             .buttonStyle(.plain)
         }
@@ -4220,7 +4401,7 @@ struct PanelView: View {
             Circle().fill(tint.gradient).frame(width: 6, height: 6)
                 .shadow(color: tint.opacity(0.4), radius: 2)
             Text(name)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: Theme.fontSize(11), weight: .medium))
                 .foregroundStyle(Theme.tPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)

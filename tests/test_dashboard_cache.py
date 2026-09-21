@@ -133,10 +133,10 @@ class DashboardCacheTests(unittest.TestCase):
                   "cost": 2.5, "hours": [0, 15] + [0] * 22,
                   "models": {"gpt-5.5": {
                       "in": 1, "out": 2, "cr": 3, "cw": 4, "reason": 5, "cost": 2.5}}}
-        openclaw = {"in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 0,
+        openclaw = {"in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6,
                     "cost": 3.5, "hours": [0, 0, 30] + [0] * 21,
                     "models": {"claude-sonnet-4.6": {
-                        "in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 0, "cost": 3.5}}}
+                        "in": 6, "out": 7, "cr": 8, "cw": 9, "reason": 6, "cost": 3.5}}}
         qoderwork = {"in": 19, "out": 11, "hours": [0, 0, 0, 0, 30] + [0] * 19}
         cache = {
             "v": USAGE._SCAN_CACHE_VERSION,
@@ -150,7 +150,7 @@ class DashboardCacheTests(unittest.TestCase):
                     "reason": 10, "cost": 0}},
                 "sessions": ["session-1"]}},
             "hermes": {"db": {"days": {today: hermes}}},
-            "openclaw": {"session": {"days": {today: openclaw}}},
+            "openclaw": {"_selected_days": {today: openclaw}},
             "qoder": {"db": {"model": "performance", "days": {today: qoderwork}}},
         }
 

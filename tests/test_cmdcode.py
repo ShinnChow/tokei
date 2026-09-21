@@ -79,23 +79,23 @@ class CommandCodeScanTests(unittest.TestCase):
                 self.scan(tmp, cache=cache)
 
         usage = result["ranges"]["all"]
-        self.assertEqual(usage["in"], 14000)
+        self.assertEqual(usage["in"], 30000)
         self.assertEqual(usage["out"], 700)
         self.assertEqual(usage["cr"], 16000)
         self.assertEqual(usage["cw"], 150)
-        self.assertEqual(USAGE.token_total(usage), 30850)
+        self.assertEqual(USAGE.token_total(usage), 46850)
         self.assertEqual(usage["sessions"], {sid})
         self.assertAlmostEqual(usage["cost"], 0.015, places=9)
         models = usage["models"]
         self.assertEqual(set(models), {"meta/muse-spark-1.3-contributor"})
-        self.assertEqual(models["meta/muse-spark-1.3-contributor"]["in"], 14000)
+        self.assertEqual(models["meta/muse-spark-1.3-contributor"]["in"], 30000)
         self.assertAlmostEqual(models["meta/muse-spark-1.3-contributor"]["cost"], 0.015, places=9)
         entry = cache["cmdcode"][str(session_file)]
         self.assertEqual(entry["sid"], sid)
         self.assertEqual(entry["proj"], project)
         self.assertEqual(entry["parser_version"], USAGE._CMDCODE_PARSER_VERSION)
         self.assertEqual(entry["days"][now.date().isoformat()]["hours"][now.hour],
-                         30850)
+                         46850)
 
     def test_missing_source_clears_stale_cache(self):
         stale = {
@@ -127,10 +127,101 @@ class CommandCodeScanTests(unittest.TestCase):
             result, cache = self.scan(tmp)
 
         usage = result["ranges"]["all"]
-        self.assertEqual(usage["in"], 1500)
+        self.assertEqual(usage["in"], 2000)
         self.assertEqual(usage["cr"], 500)
         self.assertEqual(usage["sessions"], {sid})
         self.assertEqual(cache["cmdcode"][str(session_file)]["proj"], "/tmp/zulu-project")
+
+    def test_sidecars_are_not_read_as_transcripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "projects" / "slug"
+            project.mkdir(parents=True)
+            transcript = project / "session-1.jsonl"
+            sidecars = [
+                project / "session-1.checkpoints.jsonl",
+                project / "session-1.prompts.jsonl",
+                project / "hooks-audit-session-1.jsonl",
+            ]
+            transcript.write_text("{}\n")
+            for path in sidecars:
+                path.write_text("{}\n")
+            with mock.patch.object(USAGE, "CMDCODE_DIR", tmp):
+                self.assertEqual(USAGE._cmdcode_session_files(), [str(transcript)])
+
+    def test_cloned_transcript_events_are_counted_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session_file, _, _, sid = self.create_session(tmp)
+            clone = session_file.with_name("sess-clone.jsonl")
+            clone.write_text(session_file.read_text().replace(sid, "sess-clone", 1))
+            result, cache = self.scan(tmp)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(USAGE.token_total(usage), 46850)
+        self.assertEqual(len(usage["sessions"]), 1)
+        self.assertEqual(len(cache["cmdcode"]), 2)
+
+    def test_flat_messages_and_model_changes_are_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "projects" / "slug" / "legacy.jsonl"
+            path.parent.mkdir(parents=True)
+            timestamp = datetime.now().astimezone().replace(microsecond=0).isoformat()
+            records = [
+                {"type": "session", "sessionId": "legacy-session", "cwd": "/tmp/legacy"},
+                {"type": "model_change", "model": "deepseek/deepseek-chat", "timestamp": timestamp},
+                {"role": "assistant", "id": "legacy-message", "sessionId": "legacy-session",
+                 "timestamp": timestamp, "usage": usage_record(10, 2, 3, 4, 0.1)},
+            ]
+            path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            result, cache = self.scan(tmp)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(USAGE.token_total(usage), 19)
+        self.assertEqual(usage["sessions"], {"legacy-session"})
+        self.assertEqual(set(usage["models"]), {"deepseek/deepseek-chat"})
+        self.assertEqual(cache["cmdcode"][str(path)]["proj"], "/tmp/legacy")
+
+    def test_cost_only_is_kept_and_non_finite_cost_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "projects" / "slug" / "costs.jsonl"
+            path.parent.mkdir(parents=True)
+            timestamp = datetime.now().astimezone().replace(microsecond=0).isoformat()
+            records = [
+                {"type": "session", "id": "costs", "cwd": "/tmp/costs"},
+                assistant_record("cost-only", "model-a", usage_record(0, 0, 0, 0, 0.25), timestamp),
+                assistant_record("nan", "model-a", usage_record(1, 0, 0, 0, "NaN"), timestamp),
+                assistant_record("infinite", "model-a", usage_record(1, 0, 0, 0, "Infinity"), timestamp),
+            ]
+            path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+            result, _ = self.scan(tmp)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 2)
+        self.assertAlmostEqual(usage["cost"], 0.25, places=9)
+        self.assertTrue(usage["cost"] < 1)
+
+    def test_ledger_retains_cmdcode_cost_after_source_deletion(self):
+        original_ledger = USAGE._LEDGER_CACHE.copy()
+        try:
+            USAGE._LEDGER_CACHE.update({
+                "data": {"v": USAGE._LEDGER_VERSION, "tools": {}}, "dirty": False,
+            })
+            with tempfile.TemporaryDirectory() as tmp:
+                session_file, now, _, _ = self.create_session(tmp)
+                _, cache = self.scan(tmp)
+                session_file.unlink()
+                result, cache = self.scan(tmp, cache=cache)
+                daily = USAGE.build_daily_costs(refresh=False, _cache=cache)
+
+            day = now.date().isoformat()
+            self.assertAlmostEqual(result["ranges"]["all"]["cost"], 0.015, places=9)
+            self.assertEqual(
+                next(item for item in daily["daily"] if item["date"] == day)["cmdcode"],
+                round(0.015, 2),
+            )
+        finally:
+            USAGE._LEDGER_CACHE.clear()
+            USAGE._LEDGER_CACHE.update(original_ledger)
 
 
 if __name__ == "__main__":

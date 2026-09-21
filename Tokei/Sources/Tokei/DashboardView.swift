@@ -11,6 +11,8 @@ struct DailyCost: Codable, Identifiable {
     var workbuddy_ai: Double?
     var deepseek_harness: Double?
     var qwencode: Double?
+    var cny_by_tool: [String: Double]? = nil
+    var cost_cny: Double? = nil
     var total: Double
     var c_in: Int = 0
     var c_out: Int = 0
@@ -57,6 +59,7 @@ struct DailyCost: Codable, Identifiable {
 
 struct ModelCost: Codable, Identifiable {
     var name: String
+    var cost_cny: Double? = nil
     var cost: Double
     var tool: String
     var `in`: Int?
@@ -71,9 +74,10 @@ struct ModelCost: Codable, Identifiable {
 
     init(name: String, cost: Double, tool: String, input: Int? = nil, out: Int? = nil,
          cr: Int? = nil, cw: Int? = nil, reason: Int? = nil, tokens: Int? = nil,
-         cost_per_k: Double = 0, out_ratio: Double = 0) {
+         cost_per_k: Double = 0, out_ratio: Double = 0, cost_cny: Double? = nil) {
         self.name = name
         self.cost = cost
+        self.cost_cny = cost_cny
         self.tool = tool
         self.in = input
         self.out = out
@@ -255,9 +259,9 @@ struct DashboardView: View {
     private func providerQuotaSection(_ items: [DashboardProviderQuotaItem]) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Text("账号额度")
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: Theme.fontSize(13), weight: .bold))
             Text("额度来自本机账号登录态；账号用量单独展示，不并入本地工具总计")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(items) { item in
                 providerQuotaCard(item)
@@ -271,11 +275,11 @@ struct DashboardView: View {
             HStack(spacing: 6) {
                 Circle().fill(item.tint.gradient).frame(width: 7, height: 7)
                 Text(item.title)
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: Theme.fontSize(11.5), weight: .semibold))
                     .foregroundStyle(Theme.tPrimary)
                 if let plan = item.quota.plan, !plan.isEmpty {
                     Text(plan)
-                        .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(8.5), weight: .semibold, design: .monospaced))
                         .foregroundStyle(Theme.tSecondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -284,7 +288,7 @@ struct DashboardView: View {
                 Spacer(minLength: 6)
                 if let account = item.quota.account, !account.isEmpty {
                     Text(account)
-                        .font(.system(size: 8.5, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                         .foregroundStyle(Theme.tTertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -294,11 +298,11 @@ struct DashboardView: View {
             if let usage = item.usage, usage.totalTokens > 0 {
                 HStack(spacing: 6) {
                     Text("\(wrappedPeriod.label)账号 Token")
-                        .font(.system(size: 9.5))
+                        .font(.system(size: Theme.fontSize(9.5)))
                         .foregroundStyle(Theme.tTertiary)
                     Spacer()
                     Text("\(Fmt.human(usage.totalTokens)) · \(usage.models.count) 个模型")
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold, design: .monospaced))
                         .foregroundStyle(item.tint)
                 }
             }
@@ -312,11 +316,11 @@ struct DashboardView: View {
                     ForEach(Array(item.quota.details.prefix(6).enumerated()), id: \.offset) { entry in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(entry.element.label)
-                                .font(.system(size: 9))
+                                .font(.system(size: Theme.fontSize(9)))
                                 .foregroundStyle(Theme.tTertiary)
                             Spacer(minLength: 6)
                             Text(entry.element.value)
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(9), weight: .semibold, design: .monospaced))
                                 .foregroundStyle(Theme.tSecondary)
                                 .lineLimit(1)
                         }
@@ -326,11 +330,11 @@ struct DashboardView: View {
 
             HStack(spacing: 5) {
                 Image(systemName: item.quota.stale ? "exclamationmark.triangle" : "clock")
-                    .font(.system(size: 8.5))
+                    .font(.system(size: Theme.fontSize(8.5)))
                 Text(item.quota.stale
                      ? "额度数据已过期"
                      : (item.quota.updated.map { "更新于 \(Fmt.reset($0))" } ?? "尚无更新时间"))
-                    .font(.system(size: 8.5, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                 Spacer()
             }
             .foregroundStyle(item.quota.stale ? Color.orange : Theme.tTertiary)
@@ -353,11 +357,11 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(window.title)
-                        .font(.system(size: 10))
+                        .font(.system(size: Theme.fontSize(10)))
                         .foregroundStyle(Theme.tSecondary)
                     Spacer(minLength: 6)
                     Text(String(format: "%.0f%% 剩余", remaining))
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold, design: .monospaced))
                         .foregroundStyle(tint)
                 }
                 MiniBar(value: remaining, tint: tint)
@@ -365,14 +369,14 @@ struct DashboardView: View {
                     HStack(spacing: 6) {
                         if let detail = window.detail, !detail.isEmpty {
                             Text(detail)
-                                .font(.system(size: 8.5, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                                 .foregroundStyle(Theme.tTertiary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 4)
                         if let reset = window.reset {
                             Text("重置 \(Fmt.reset(reset))")
-                                .font(.system(size: 8.5, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                                 .foregroundStyle(Theme.tTertiary)
                         }
                     }
@@ -381,11 +385,11 @@ struct DashboardView: View {
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(window.title)
-                    .font(.system(size: 10))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tSecondary)
                 Spacer(minLength: 6)
                 Text(window.detail ?? "额度比例未知")
-                    .font(.system(size: 8.5, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(8.5), design: .monospaced))
                     .foregroundStyle(Theme.tTertiary)
                     .multilineTextAlignment(.trailing)
                     .lineLimit(2)
@@ -402,11 +406,11 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("模型用量").font(.system(size: 13, weight: .bold))
+            Text("模型用量").font(.system(size: Theme.fontSize(13), weight: .bold))
             ForEach(top) { m in
                 StatBar(name: m.name,
                         tokens: m.tokens ?? ((m.in ?? 0) + (m.out ?? 0)),
-                        cost: m.cost, maxTokens: maxTokens,
+                        cost_cny: m.cost_cny, cost: m.cost, maxTokens: maxTokens,
                         tint: modelTint(m.tool))
             }
         }
@@ -417,9 +421,9 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("账号 Provider 模型").font(.system(size: 13, weight: .bold))
+            Text("账号 Provider 模型").font(.system(size: Theme.fontSize(13), weight: .bold))
             Text("账号级统计单独展示，不并入本地工具总计")
-                .font(.system(size: 9))
+                .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(top) { model in
                 StatBar(
@@ -456,6 +460,7 @@ struct DashboardView: View {
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
         case "kimicode": return Theme.kimicode
+        case "musecode": return Theme.musecode
         case "cmdcode": return Theme.cmdcode
         default: return Theme.claude
         }
@@ -469,23 +474,23 @@ struct DashboardView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { hideProjects.toggle() }
             } label: {
                 HStack(spacing: 5) {
-                    Text("项目排行").font(.system(size: 13, weight: .bold))
+                    Text("项目排行").font(.system(size: Theme.fontSize(13), weight: .bold))
                         .foregroundStyle(Theme.tPrimary)
                     Image(systemName: hideProjects ? "eye.slash.fill" : "eye")
-                        .font(.system(size: 9)).foregroundStyle(Theme.tTertiary)
+                        .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
                     Spacer()
                     Image(systemName: hideProjects ? "chevron.down" : "chevron.up")
-                        .font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.tTertiary)
+                        .font(.system(size: Theme.fontSize(9), weight: .bold)).foregroundStyle(Theme.tTertiary)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             if hideProjects {
                 Text("已隐藏 \(projects.count) 个项目")
-                    .font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+                    .font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             } else {
                 ForEach(projects) { p in
-                    StatBar(name: p.name, tokens: p.tokens, cost: p.cost,
+                    StatBar(name: p.name, tokens: p.tokens, cost_cny: p.cost_cny, cost: p.cost,
                             maxTokens: maxTok, tint: Theme.claude)
                 }
             }
@@ -501,7 +506,7 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("活跃热力")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: Theme.fontSize(13), weight: .bold))
                 Spacer()
                 Picker("", selection: $heatRange) {
                     Text("周").tag(0); Text("月").tag(1); Text("年").tag(2)
@@ -520,122 +525,52 @@ struct DashboardView: View {
     }
 
     func heatDetail(_ d: DailyCost) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let workbuddyAITokens = optionalTokenTotal(d.wa_in, d.wa_out, d.wa_cr, d.wa_cw)
+        let deepseekTokens = optionalTokenTotal(d.d_in, d.d_out, d.d_cr, d.d_cw, d.d_reason)
+        let grokTokens = optionalTokenTotal(d.g_in, d.g_out, d.g_cr, d.g_reason)
+
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(d.date).font(.system(size: 13, weight: .bold, design: .monospaced))
+                Text(d.date).font(.system(size: Theme.fontSize(13), weight: .bold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
                 Spacer()
-                Text(String(format: "$%.2f", d.total))
-                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Text(nativeMoney(d.total, d.cost_cny))
+                    .font(.system(size: Theme.fontSize(15), weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Button { selectedCell = nil } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                    Image(systemName: "xmark.circle.fill").font(.system(size: Theme.fontSize(12)))
                         .foregroundStyle(Theme.tTertiary)
                 }
                 .buttonStyle(.plain)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 12)],
                       alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.claude).frame(width: 6, height: 6)
-                        Text("Claude").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.claude)
-                    }
-                    Text("\(Fmt.human(d.c_in + d.c_out + d.c_cr + d.c_cw)) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.claude))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
+                heatProviderMetric("Claude", tint: Theme.claude,
+                                   tokens: d.c_in + d.c_out + d.c_cr + d.c_cw, cost: d.claude)
+                heatProviderMetric("Codex", tint: Theme.codex,
+                                   tokens: d.x_in + d.x_out, cost: d.codex)
+                heatProviderMetric("Pi", tint: Theme.pi,
+                                   tokens: d.p_in + d.p_out + d.p_cr + d.p_cw + d.p_reason, cost: d.pi)
+                heatProviderMetric("Prime Agent", tint: Theme.primeAgent,
+                                   tokens: d.pa_in + d.pa_out + d.pa_cr + d.pa_cw + d.pa_reason,
+                                   cost: d.prime_agent ?? 0)
+                heatProviderMetric("WorkBuddy", tint: Theme.workbuddy,
+                                   tokens: (d.w_in ?? 0) + (d.w_out ?? 0) + (d.w_cr ?? 0) + (d.w_cw ?? 0),
+                                   cost: d.workbuddy ?? 0)
+                if workbuddyAITokens > 0 {
+                    heatProviderMetric("WorkBuddy Intl.", tint: Theme.workbuddyAI,
+                                       tokens: workbuddyAITokens, cost: d.workbuddy_ai ?? 0)
                 }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.codex).frame(width: 6, height: 6)
-                        Text("Codex").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.codex)
-                    }
-                    Text("\(Fmt.human(d.x_in + d.x_out)) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.codex))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
+                if deepseekTokens > 0 {
+                    heatProviderMetric("DeepSeek Harness", tint: Theme.deepseekHarness,
+                                       tokens: deepseekTokens, cost: d.deepseek_harness ?? 0, cny: d.cny_by_tool?["deepseek_harness"])
                 }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.pi).frame(width: 6, height: 6)
-                        Text("Pi").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.pi)
-                    }
-                    Text("\(Fmt.human(d.p_in + d.p_out + d.p_cr + d.p_cw + d.p_reason)) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.pi))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.primeAgent).frame(width: 6, height: 6)
-                        Text("Prime Agent").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.primeAgent)
-                    }
-                    Text("\(Fmt.human((d.pa_in) + d.pa_out + d.pa_cr + d.pa_cw + d.pa_reason)) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.prime_agent ?? 0))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.workbuddy).frame(width: 6, height: 6)
-                        Text("WorkBuddy").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.workbuddy)
-                    }
-                    Text("\(Fmt.human((d.w_in ?? 0) + (d.w_out ?? 0) + (d.w_cr ?? 0) + (d.w_cw ?? 0))) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.workbuddy ?? 0))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
-                }
-                if (d.wa_in ?? 0) + (d.wa_out ?? 0) + (d.wa_cr ?? 0) + (d.wa_cw ?? 0) > 0 {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Circle().fill(Theme.workbuddyAI).frame(width: 6, height: 6)
-                            Text("WorkBuddy Intl.").font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Theme.workbuddyAI)
-                        }
-                        Text("\(Fmt.human((d.wa_in ?? 0) + (d.wa_out ?? 0) + (d.wa_cr ?? 0) + (d.wa_cw ?? 0))) tok")
-                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                        Text(String(format: "$%.2f", d.workbuddy_ai ?? 0))
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.tSecondary)
-                    }
-                }
-                if (d.d_in ?? 0) + (d.d_out ?? 0) + (d.d_cr ?? 0) + (d.d_cw ?? 0) + (d.d_reason ?? 0) > 0 {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Circle().fill(Theme.deepseekHarness).frame(width: 6, height: 6)
-                            Text("DeepSeek Harness").font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Theme.deepseekHarness)
-                        }
-                        Text("\(Fmt.human((d.d_in ?? 0) + (d.d_out ?? 0) + (d.d_cr ?? 0) + (d.d_cw ?? 0) + (d.d_reason ?? 0))) tok")
-                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                        Text(String(format: "$%.2f", d.deepseek_harness ?? 0))
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.tSecondary)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 4) {
-                        Circle().fill(Theme.qwencode).frame(width: 6, height: 6)
-                        Text("Qwen Code").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.qwencode)
-                    }
-                    Text("\(Fmt.human((d.q_in ?? 0) + (d.q_out ?? 0) + (d.q_cr ?? 0) + (d.q_reason ?? 0))) tok")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                    Text(String(format: "$%.2f", d.qwencode ?? 0))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.tSecondary)
-                }
-                if (d.g_in ?? 0) + (d.g_out ?? 0) + (d.g_cr ?? 0) + (d.g_reason ?? 0) > 0 {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Circle().fill(Theme.grok).frame(width: 6, height: 6)
-                            Text("Grok Build").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.grok)
-                        }
-                        Text("\(Fmt.human((d.g_in ?? 0) + (d.g_out ?? 0) + (d.g_cr ?? 0) + (d.g_reason ?? 0))) tok")
-                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.tTertiary)
-                        Text(String(format: "$%.2f", d.grok ?? 0))
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(Theme.tSecondary)
-                    }
+                heatProviderMetric("Qwen Code", tint: Theme.qwencode,
+                                   tokens: (d.q_in ?? 0) + (d.q_out ?? 0) + (d.q_cr ?? 0) + (d.q_reason ?? 0),
+                                   cost: d.qwencode ?? 0)
+                if grokTokens > 0 {
+                    heatProviderMetric("Grok Build", tint: Theme.grok,
+                                       tokens: grokTokens, cost: d.grok ?? 0)
                 }
             }
         }
@@ -646,20 +581,41 @@ struct DashboardView: View {
                 .strokeBorder(Theme.claude.opacity(0.2), lineWidth: 0.5)))
     }
 
+    private func heatProviderMetric(_ name: String, tint: Color, tokens: Int, cost: Double, cny: Double? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Circle().fill(tint).frame(width: 6, height: 6)
+                Text(name)
+                    .font(.system(size: Theme.fontSize(11), weight: .medium))
+                    .foregroundStyle(tint)
+            }
+            Text("\(Fmt.human(tokens)) tok")
+                .font(.system(size: Theme.fontSize(11), design: .monospaced))
+                .foregroundStyle(Theme.tTertiary)
+            Text(nativeMoney(cost, cny))
+                .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.tSecondary)
+        }
+    }
+
+    private func optionalTokenTotal(_ values: Int?...) -> Int {
+        values.reduce(0) { total, value in total + (value ?? 0) }
+    }
+
     var weekStrip: some View {
         let cal = Calendar.current
         let today = Date()
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
         let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
-        let costMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, $0.total) })
-        let maxCost = daily.map(\.total).max() ?? 1
+        let activityMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, Double($0.tokens)) })
+        let maxActivity = daily.map { Double($0.tokens) }.max() ?? 1
 
         return HStack(alignment: .top, spacing: 4) {
             VStack(spacing: 2) {
                 ForEach(0..<7, id: \.self) { r in
                     Text(dayLabels[r])
-                        .font(.system(size: 8, weight: .medium))
+                        .font(.system(size: Theme.fontSize(8), weight: .medium))
                         .foregroundStyle(Theme.tTertiary)
                         .frame(width: 14, height: 20)
                 }
@@ -669,10 +625,11 @@ struct DashboardView: View {
                     ForEach(0..<7, id: \.self) { i in
                         let realD = cal.date(byAdding: .day, value: -(6 - i), to: today)!
                         let ds = fmt.string(from: realD)
-                        let cost = costMap[ds] ?? 0
+                        let activity = activityMap[ds] ?? 0
+                        let cost = daily.first { $0.date == ds }?.total ?? 0
                         HStack(spacing: 6) {
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                .fill(heatColor(cost: cost, max: maxCost))
+                                .fill(heatColor(activity: activity, max: maxActivity))
                                 .frame(width: 20, height: 20)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 3, style: .continuous)
@@ -684,12 +641,12 @@ struct DashboardView: View {
                                     }
                                 }
                             Text(String(ds.suffix(5)))
-                                .font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: Theme.fontSize(9), design: .monospaced))
                                 .foregroundStyle(Theme.tTertiary)
                                 .frame(width: 38, alignment: .leading)
-                            if cost > 0 {
-                                Text(String(format: "$%.0f", cost))
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            if cost > 0 || (daily.first { $0.date == ds }?.cost_cny ?? 0) > 0 {
+                                Text(nativeMoney(cost, daily.first { $0.date == ds }?.cost_cny))
+                                    .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                                     .foregroundStyle(Theme.tSecondary)
                             }
                         }
@@ -704,15 +661,15 @@ struct DashboardView: View {
         let today = Date()
         let totalDays: Int = heatRange == 1 ? 35 : 371
         let startDate = cal.date(byAdding: .day, value: -(totalDays - 1), to: today)!
-        let costMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, $0.total) })
-        let maxCost = daily.map(\.total).max() ?? 1
+        let activityMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, Double($0.tokens)) })
+        let maxActivity = daily.map { Double($0.tokens) }.max() ?? 1
 
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
         let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
 
         struct Cell: Identifiable {
-            var id: Int; var row: Int; var col: Int; var cost: Double; var dateStr: String
+            var id: Int; var row: Int; var col: Int; var activity: Double; var dateStr: String
         }
 
         var cells: [Cell] = []
@@ -723,7 +680,7 @@ struct DashboardView: View {
             let offset = startWeekday + i
             let row = offset % 7
             let col = offset / 7
-            cells.append(Cell(id: i, row: row, col: col, cost: costMap[ds] ?? 0, dateStr: ds))
+            cells.append(Cell(id: i, row: row, col: col, activity: activityMap[ds] ?? 0, dateStr: ds))
         }
         let cols = (cells.last?.col ?? 0) + 1
         let cellSize: CGFloat = heatRange == 1 ? 20 : 12
@@ -747,9 +704,9 @@ struct DashboardView: View {
                                 ForEach(0..<7, id: \.self) { r in
                                     let cell = cells.first { $0.row == r && $0.col == c }
                                     let ds = cell?.dateStr ?? ""
-                                    let cost = cell?.cost ?? 0
+                                    let activity = cell?.activity ?? 0
                                     RoundedRectangle(cornerRadius: radius, style: .continuous)
-                                        .fill(heatColor(cost: cost, max: maxCost))
+                                        .fill(heatColor(activity: activity, max: maxActivity))
                                         .frame(width: cellSize, height: cellSize)
                                     .overlay(
                                         RoundedRectangle(cornerRadius: radius, style: .continuous)
@@ -789,9 +746,9 @@ struct DashboardView: View {
         Color(red: 0.98, green: 0.72, blue: 0.35),       // L4: 金黄
     ]
 
-    func heatColor(cost: Double, max: Double) -> Color {
-        if cost <= 0 { return Color.primary.opacity(0.04) }
-        let ratio = min(cost / max, 1.0)
+    func heatColor(activity: Double, max: Double) -> Color {
+        if activity <= 0 || max <= 0 { return Color.primary.opacity(0.04) }
+        let ratio = min(activity / max, 1.0)
         if ratio < 0.15 { return Self.heatColors[1] }
         if ratio < 0.35 { return Self.heatColors[2] }
         if ratio < 0.60 { return Self.heatColors[3] }
@@ -801,13 +758,13 @@ struct DashboardView: View {
     var heatmapLegend: some View {
         HStack(spacing: 5) {
             Spacer()
-            Text("少").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+            Text("少").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             ForEach(0..<5, id: \.self) { i in
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .fill(i == 0 ? Color.primary.opacity(0.04) : Self.heatColors[i])
                     .frame(width: 12, height: 12)
             }
-            Text("多").font(.system(size: 10)).foregroundStyle(Theme.tTertiary)
+            Text("多").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
         }
     }
 
@@ -989,6 +946,7 @@ struct DashboardView: View {
         var data = fallback ?? WrappedData()
         data.total_tokens = totalTokens
         data.total_cost = totalCost
+        data.cost_cny = (usage.deepseekHarness.ranges.get(key).cost_cny ?? 0) + (usage.opencode.ranges.get(key).cost_cny ?? 0)
         data.top_model = WrappedModel(name: top?.name ?? "-", tokens: top?.tokens ?? 0)
         data.period = period.rawValue
         if data.first_day.isEmpty {
@@ -1069,6 +1027,8 @@ struct DashboardView: View {
                   workbuddy_ai: (lhs.workbuddy_ai ?? 0) + (rhs.workbuddy_ai ?? 0),
                   deepseek_harness: (lhs.deepseek_harness ?? 0) + (rhs.deepseek_harness ?? 0),
                   qwencode: (lhs.qwencode ?? 0) + (rhs.qwencode ?? 0),
+                  cny_by_tool: (lhs.cny_by_tool ?? [:]).merging(rhs.cny_by_tool ?? [:], uniquingKeysWith: +),
+                  cost_cny: (lhs.cost_cny ?? 0) + (rhs.cost_cny ?? 0),
                   total: lhs.total + rhs.total,
                   c_in: lhs.c_in + rhs.c_in,
                   c_out: lhs.c_out + rhs.c_out,
@@ -1128,6 +1088,7 @@ struct DashboardView: View {
             if var existing = byName[project.name] {
                 existing.tokens += project.tokens
                 existing.cost += project.cost
+                existing.cost_cny = (existing.cost_cny ?? 0) + (project.cost_cny ?? 0)
                 byName[project.name] = existing
             } else {
                 byName[project.name] = project
@@ -1257,6 +1218,8 @@ struct DashboardView: View {
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
         appendTokenModels(usage.kimicode.ranges.get(key).models, tool: "kimicode", suffix: "Kimi Code", to: &out)
+        appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code",
+                          reasonIncludedInOutput: true, to: &out)
         appendTokenModels(usage.cmdcode.ranges.get(key).models, tool: "cmdcode", suffix: "Command Code", to: &out)
 
         return out.sorted {
@@ -1265,19 +1228,21 @@ struct DashboardView: View {
         }
     }
 
-    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String, to out: inout [ModelCost]) {
+    static func appendTokenModels(_ models: [TokenModelStat], tool: String, suffix: String,
+                                  reasonIncludedInOutput: Bool = false,
+                                  to out: inout [ModelCost]) {
         for model in models {
-            let tokens = tokenModelTotal(model)
+            let tokens = tokenModelTotal(model, reasonIncludedInOutput: reasonIncludedInOutput)
             if tokens > 0 || model.cost > 0 {
                 out.append(modelCost(name: "\(model.name) (\(suffix))", cost: model.cost, tool: tool,
                                      input: model.in, out: model.out, cr: model.cr, cw: model.cw,
-                                     reason: model.reason, tokens: tokens))
+                                     reason: model.reason, tokens: tokens, cost_cny: model.cost_cny))
             }
         }
     }
 
     static func modelCost(name: String, cost: Double, tool: String, input: Int? = nil, out: Int? = nil,
-                          cr: Int? = nil, cw: Int? = nil, reason: Int? = nil, tokens: Int? = nil) -> ModelCost {
+                          cr: Int? = nil, cw: Int? = nil, reason: Int? = nil, tokens: Int? = nil, cost_cny: Double? = nil) -> ModelCost {
         let inputTokens = input ?? 0
         let outputTokens = out ?? 0
         let cacheReadTokens = cr ?? 0
@@ -1289,7 +1254,7 @@ struct DashboardView: View {
         let outRatio = total > 0 ? Double(outputTokens) / Double(total) * 100 : 0
         return ModelCost(name: name, cost: cost, tool: tool, input: input, out: out,
                          cr: cr, cw: cw, reason: reason, tokens: total,
-                         cost_per_k: costPerK, out_ratio: outRatio)
+                         cost_per_k: costPerK, out_ratio: outRatio, cost_cny: cost_cny)
     }
 
     static func usageTotalTokens(_ usage: Usage, _ key: RangeKey) -> Int {
@@ -1318,6 +1283,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
             + tokenUsageTotal(usage.kimicode.ranges.get(key))
+            + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
             + tokenUsageTotal(usage.cmdcode.ranges.get(key))
     }
 
@@ -1337,11 +1303,15 @@ struct DashboardView: View {
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost
             + usage.kimicode.ranges.get(key).cost
+            + usage.musecode.ranges.get(key).cost
             + usage.cmdcode.ranges.get(key).cost
     }
 
-    static func tokenUsageTotal(_ r: TokenUsageRange) -> Int {
-        r.in + r.out + r.cr + r.cw + r.reason
+    static func tokenUsageTotal(
+        _ r: TokenUsageRange,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
     }
 
     static func hermesTotal(_ r: HermesRange) -> Int {
@@ -1349,11 +1319,14 @@ struct DashboardView: View {
     }
 
     static func openClawTotal(_ r: OpenClawRange) -> Int {
-        r.in + r.out + r.cr + r.cw
+        r.in + r.out + r.cr + r.cw + r.reason
     }
 
-    static func tokenModelTotal(_ m: TokenModelStat) -> Int {
-        m.in + m.out + m.cr + m.cw + m.reason
+    static func tokenModelTotal(
+        _ m: TokenModelStat,
+        reasonIncludedInOutput: Bool = false
+    ) -> Int {
+        m.in + m.out + m.cr + m.cw + (reasonIncludedInOutput ? 0 : m.reason)
     }
 
     static func runScript(_ args: [String]) -> Data {

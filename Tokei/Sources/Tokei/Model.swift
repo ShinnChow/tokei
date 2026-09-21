@@ -546,6 +546,7 @@ struct TokenModelStat: Codable, Identifiable {
     var cr: Int = 0
     var cw: Int = 0
     var reason: Int = 0
+    var cost_cny: Double? = nil
     var cost: Double
     var pin: Double = 0
     var pout: Double = 0
@@ -562,13 +563,14 @@ struct TokenModelStat: Codable, Identifiable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
     }
 
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
-        case name, tokens, `in`, out, cr, cw, reason, cost, pin, pout
+        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout
     }
 }
 struct HermesRanges: Codable {
@@ -602,6 +604,7 @@ struct OpenClawRange: Codable {
     var out: Int
     var cr: Int
     var cw: Int
+    var reason: Int = 0
     var cost: Double
     var sessions: Int
     var models: [TokenModelStat]
@@ -616,6 +619,7 @@ struct OpenClawRange: Codable {
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
         cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
+        reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
@@ -651,6 +655,7 @@ struct TokenUsageRange: Codable {
     var cr: Int
     var cw: Int
     var reason: Int
+    var cost_cny: Double? = nil
     var cost: Double
     var requests: Int
     var sessions: Int = 0
@@ -693,6 +698,7 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
@@ -724,6 +730,23 @@ struct TokenUsageRanges: Codable {
     }
 }
 struct TokenUsageStat: Codable { var ranges: TokenUsageRanges }
+
+/// Kimi Code 既有本地 token 统计,也有官方额度(5h 滚动窗口 + 订阅周期)。
+/// 订阅窗口的周期长度接口没有给,因此只透传它返回的重置时刻,不替它命名周期。
+struct KimiCodeStat: Codable {
+    var ranges: TokenUsageRanges
+    var p5: Double? = nil
+    var pw: Double? = nil
+    var r5: Int? = nil
+    var rw: Int? = nil
+    var q_updated: Int? = nil
+    var p5_stale: Bool? = nil
+    var pw_stale: Bool? = nil
+    var plan: String? = nil
+
+    var hasQuota: Bool { p5 != nil || pw != nil }
+    var hasStaleQuota: Bool { p5_stale == true || pw_stale == true }
+}
 
 /// A single quota bucket reported by the QwenWork desktop app.
 /// `total == 0` does not imply that the bucket is empty: some plans expose
@@ -910,7 +933,8 @@ struct Usage: Codable {
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
-    var kimicode: TokenUsageStat
+    var kimicode: KimiCodeStat
+    var musecode: TokenUsageStat
     var cmdcode: TokenUsageStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
@@ -923,7 +947,7 @@ struct Usage: Codable {
         case qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, musecode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -951,7 +975,8 @@ struct Usage: Codable {
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
-        kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
+        kimicode = try c.decodeIfPresent(KimiCodeStat.self, forKey: .kimicode) ?? KimiCodeStat(ranges: .empty)
+        musecode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .musecode) ?? TokenUsageStat(ranges: .empty)
         cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
@@ -1040,4 +1065,12 @@ enum Fmt {
         if days <= 30 { return "\(days / 7)周前" }
         return "\(days / 30)月前"
     }
+}
+
+/// Cost fields retain native currencies; no exchange-rate conversion or mixed sum.
+func nativeMoney(_ usd: Double, _ cny: Double? = nil) -> String {
+    var parts: [String] = []
+    if usd > 0 || (cny ?? 0) <= 0 { parts.append(String(format: "$%.2f", usd)) }
+    if let cny, cny > 0 { parts.append(String(format: "¥%.2f", cny)) }
+    return parts.joined(separator: " + ")
 }

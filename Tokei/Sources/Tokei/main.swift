@@ -34,6 +34,7 @@ final class Store: ObservableObject {
     private var refreshInFlight = false
     private var refreshPending = false
     private var dashboardPrewarmStarted = false
+    private var quotaDetailPrewarmPending = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -59,7 +60,8 @@ final class Store: ObservableObject {
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
-    func refresh() {
+    func refresh(prewarmQuotaDetail: Bool = false) {
+        quotaDetailPrewarmPending = quotaDetailPrewarmPending || prewarmQuotaDetail
         if refreshInFlight {
             refreshPending = true
             return
@@ -68,12 +70,21 @@ final class Store: ObservableObject {
         performRefresh()
     }
 
+    func loadQuotaDetail() {
+        if refreshInFlight {
+            quotaDetailPrewarmPending = true
+        } else {
+            QuotaDetailRepository.shared.load(force: true)
+        }
+    }
+
     private func performRefresh() {
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
                 let hadPendingRefresh = self.refreshPending
-                if self.usage == nil && self.retryCount < 3 {
+                let willRetry = self.usage == nil && self.retryCount < 3
+                if willRetry {
                     self.retryCount += 1
                     self.lastUpdated = "加载中…(\(self.retryCount))"
                     if !hadPendingRefresh {
@@ -87,6 +98,7 @@ final class Store: ObservableObject {
                     self.lastUpdated = "缓存数据 · 等待刷新"
                 }
                 (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
+                if !willRetry { self.prewarmQuotaDetailIfReady() }
                 self.finishRefresh()
                 return
             }
@@ -121,8 +133,15 @@ final class Store: ObservableObject {
                 self.dashboardPrewarmStarted = true
                 DashboardRepository.shared.load(.all, force: true)
             }
+            self.prewarmQuotaDetailIfReady()
             self.finishRefresh()
         }
+    }
+
+    private func prewarmQuotaDetailIfReady() {
+        guard quotaDetailPrewarmPending, !refreshPending, popoverVisible else { return }
+        quotaDetailPrewarmPending = false
+        QuotaDetailRepository.shared.load(force: true)
     }
 
     private func finishRefresh() {
@@ -143,7 +162,7 @@ final class Store: ObservableObject {
         }
         let codexModels = codexRange.models.reduce(into: [String: Int]()) { totals, model in
             totals[model.name, default: 0] +=
-                model.in + model.out + model.cr + model.cw + model.reason
+                model.in + model.out + model.cr + model.cw
         }
         quotaHistory.record(QuotaCapture(
             claudeFiveHourRemaining: usage.claude.q5_stale == true
@@ -222,6 +241,7 @@ final class Store: ObservableObject {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let store = Store()
+    let panelLayout = PanelLayoutContext()
     var statusItem: NSStatusItem!
     var popover = NSPopover()
     lazy var statusMenu: NSMenu = {
@@ -233,11 +253,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }()
     var timer: Timer?
     var globalMouseMonitor: Any?
+    weak var popoverAnchorButton: NSStatusBarButton?
 
     // 菜单栏额度颜色(与面板 Theme.claude/codex/grok 一致)。
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
+    static let kimicodeColor = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -248,11 +270,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         updateStatusTitle()
 
-        let host = NSHostingController(rootView: PanelView(store: store))
-        host.sizingOptions = .preferredContentSize
+        let host = NSHostingController(rootView: PanelView(
+            store: store,
+            layout: panelLayout
+        ))
+        // 页面切换只改变固定画布内部内容，禁止 preferredContentSize 驱动
+        // NSPopover 在全屏 Space 中重新选择屏幕和锚点。
+        host.sizingOptions = []
         popover.contentViewController = host
+        popover.contentSize = panelLayout.contentSize
         popover.behavior = .applicationDefined
-        popover.animates = true
+        // SwiftUI 页面切换本身已有动画。禁用 NSPopover 的尺寸动画，避免 AppKit
+        // 在外接显示器的全屏 Space 中按错误屏幕重新计算锚点。
+        popover.animates = false
         popover.delegate = self
 
         // 启动时先把 Qoder IDE / Grok / 千问办公额度开关落盘到 config.json,
@@ -275,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()
+        ActivityReporter.shared.reportLaunchIfNeeded(appVersion: Updater.releaseTag)
         autoFetchPricing()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()
@@ -431,7 +462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             NSMenu.popUpContextMenu(statusMenu, with: event, for: sender)
             return
         }
-        togglePopover()
+        popoverAnchorButton = sender
+        togglePopover(anchorButton: sender)
     }
 
     @objc func quitApp() {
@@ -440,15 +472,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc func togglePopover() {
         guard let b = statusItem.button else { return }
+        popoverAnchorButton = b
+        togglePopover(anchorButton: b)
+    }
+
+    private func togglePopover(anchorButton b: NSStatusBarButton) {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            store.refresh()
-            // 轨迹页的额度明细要跑 1~3 秒,面板一开就预热,免得切过去干等。
-            QuotaDetailRepository.shared.load()
+            store.refresh(prewarmQuotaDetail: true)
+            updatePanelLayout(for: b)
+            popover.contentSize = panelLayout.contentSize
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    private func updatePanelLayout(for button: NSStatusBarButton) {
+        panelLayout.update(
+            anchorVisibleFrame: button.window?.screen?.visibleFrame,
+            fallbackVisibleFrame: NSScreen.screens.first?.visibleFrame
+        )
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -531,6 +575,10 @@ enum Icon {
 }
 
 if GrokBotQuotaBridge.runIfRequested() {
+    exit(0)
+}
+
+if ProviderCredentialStore.runIfRequested() {
     exit(0)
 }
 

@@ -22,6 +22,7 @@ struct UsageToolVisibility: Equatable {
     var opencode = true
     var qwencode = true
     var kimicode = true
+    var musecode = true
     var cmdcode = true
 
     static let allVisible = UsageToolVisibility()
@@ -33,6 +34,7 @@ enum UsageSummaryBuilder {
     struct Line: Equatable, Identifiable {
         var id: String
         var name: String
+        var cost_cny: Double? = nil
         var cost: Double?
         /// Primary total tokens shown as headline (same basis as cards when possible).
         var tokens: Int?
@@ -59,6 +61,7 @@ enum UsageSummaryBuilder {
     }
 
     struct Totals: Equatable {
+        var cost_cny: Double = 0
         var cost: Double
         var tokens: Int
         var sessions: Int
@@ -73,6 +76,7 @@ enum UsageSummaryBuilder {
 
     static func totals(for lines: [Line]) -> Totals {
         Totals(
+            cost_cny: lines.compactMap(\.cost_cny).reduce(0, +),
             cost: lines.compactMap(\.cost).reduce(0, +),
             tokens: lines.compactMap(\.tokens).reduce(0, +),
             sessions: lines.compactMap(\.sessions).reduce(0, +),
@@ -103,7 +107,7 @@ enum UsageSummaryBuilder {
             }
             let t = totals(for: lines)
             var totalParts: [String] = []
-            if t.cost > 0 { totalParts.append(String(format: "$%.2f", t.cost)) }
+            if t.cost > 0 || t.cost_cny > 0 { totalParts.append(nativeMoney(t.cost, t.cost_cny)) }
             if t.tokens > 0 { totalParts.append("\(Fmt.human(t.tokens)) tok") }
             if t.sessions > 0 { totalParts.append("\(t.sessions) 会话") }
             if t.tools > 0 { totalParts.append("\(t.tools) 工具") }
@@ -277,10 +281,11 @@ enum UsageSummaryBuilder {
             let r = usage.openclaw.ranges.get(range)
             let line = Line(
                 id: "openclaw", name: "OpenClaw", cost: r.cost,
-                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions,
+                tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions,
                 calls: r.tasks > 0 ? r.tasks : nil,
                 input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil, extra: nil
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -313,6 +318,10 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "kimicode", name: "Kimi Code",
                             range: usage.kimicode.ranges.get(range), includesCost: false)
         }
+        if visibility.musecode {
+            appendTokenTool(&lines, id: "musecode", name: "Muse Code",
+                            range: usage.musecode.ranges.get(range), reasonIncludedInOutput: true)
+        }
         if visibility.cmdcode {
             appendTokenTool(&lines, id: "cmdcode", name: "Command Code",
                             range: usage.cmdcode.ranges.get(range))
@@ -332,11 +341,13 @@ enum UsageSummaryBuilder {
 
     private static func appendTokenTool(
         _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange,
-        includesCost: Bool = true
+        includesCost: Bool = true, reasonIncludedInOutput: Bool = false
     ) {
+        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
         let line = Line(
-            id: id, name: name, cost: includesCost ? r.cost : nil,
-            tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+            id: id, name: name, cost_cny: includesCost ? r.cost_cny : nil,
+            cost: includesCost ? r.cost : nil,
+            tokens: total, sessions: r.sessions, calls: nil,
             input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
             reason: r.reason > 0 ? r.reason : nil,
             hit: r.hit > 0 ? r.hit : nil, extra: nil
@@ -346,8 +357,8 @@ enum UsageSummaryBuilder {
 
     private static func formatLine(_ line: Line) -> String {
         var parts: [String] = []
-        if let cost = line.cost, cost > 0 {
-            parts.append(String(format: "$%.2f", cost))
+        if (line.cost ?? 0) > 0 || (line.cost_cny ?? 0) > 0 {
+            parts.append(nativeMoney(line.cost ?? 0, line.cost_cny))
         }
         if let tokens = line.tokens, tokens > 0 {
             parts.append("\(Fmt.human(tokens)) tok")
