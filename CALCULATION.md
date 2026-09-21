@@ -383,6 +383,21 @@ CodeBuddy 的 `Credit` 是产品原生消耗单位，不等同于美元。Tokei 
 
 兼容 Codex 新旧返回结构:旧结构通常是 primary=5h、secondary=周;新结构可能只有 primary=周。
 
+### Codex Luna Reserve(第二缸油)
+
+OpenAI 给 Codex 的 fallback 额度:常规高级模型额度见底后,会话切到 `gpt-reserve`,
+单独计量、单独重置,不占用主额度。日志特征:
+
+- 用量:`turn_context`/`session_meta` 的 `payload.model` 为 `gpt-reserve`;
+  同一文件可先走主额度后切 Reserve,因此事件级以 `token_count` 的
+  `rate_limits` 为准(`limit_name=gpt-reserve` 或 `limit_id=base_model_inference`,
+  主额度是 `limit_id=codex`)
+- 额度:`limit_name=gpt-reserve` 的 `primary`(周窗口)的已用百分比与重置时间,
+  与主额度独立展示
+- 成本:Reserve 按 Luna 级别计价(`openai/gpt-5.6-luna` $0.20/$1.20),
+  不吃 `gpt-5.5` 兜底;展示名为 `Luna Reserve` 而非裸 `GPT`
+- 主用量/Daily/回顾/项目足迹均扣除 Reserve 部分,互不重叠
+
 重置卡使用当前 Codex 登录态只读查询
 `/backend-api/wham/rate-limit-reset-credits`。本地仅缓存可用数量和到期时间，不保存卡片
 ID、邀请信息或个人资料；每天最多自动查询一次，最近一张卡到期后立即更新，失败后

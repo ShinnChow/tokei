@@ -640,6 +640,9 @@ def nice_model(m: str) -> str:
             mt = re.search(r"(\d+)-(\d+)", s)
             return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
     if "gpt" in s:
+        # Luna Reserve 的内部标识,展示为 Luna Reserve 而不是裸 GPT。
+        if re.search(r"(?:^|[-_/ ])reserve(?:$|[-_/ ])", s):
+            return "Luna Reserve"
         mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
         version = mt.group(1) if mt else ""
         variant_labels = []
@@ -747,7 +750,43 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 6
+_CODEX_PARSER_VERSION = 7
+_CODEX_ACCOUNTING_VERSION = 7
+
+
+# ---------- Codex Luna Reserve ----------
+# Luna Reserve 是 OpenAI 给 Codex 的第二缸油:常规高级模型额度见底后,
+# 会话切到 gpt-reserve(单独计量、单独重置),用完不影响主额度读数。
+# 日志特征:turn_context/session_meta 的 payload.model 为 "gpt-reserve",
+# token_count 事件的 rate_limits.limit_name 为 "gpt-reserve",
+# limit_id 为 "base_model_inference"(主额度是 "codex")。
+_CODEX_RESERVE_MODEL = "gpt-reserve"
+_CODEX_RESERVE_LIMIT_NAMES = frozenset({"gpt-reserve"})
+_CODEX_RESERVE_LIMIT_IDS = frozenset({"base_model_inference"})
+# Reserve 按 Luna 级别计价(官方 API 价 $0.20/$1.20,见 pricing.json)。
+_CODEX_RESERVE_PRICE_MODEL = "openai/gpt-5.6-luna"
+
+
+def _codex_is_reserve_model(model):
+    if not isinstance(model, str):
+        return False
+    m = model.strip().lower()
+    if m == _CODEX_RESERVE_MODEL:
+        return True
+    # _known_id_or_raw 之后可能是 openai/gpt-reserve。
+    return m.rsplit("/", 1)[-1] == _CODEX_RESERVE_MODEL
+
+
+def _codex_is_reserve_limits(rl):
+    if not isinstance(rl, dict):
+        return False
+    name = rl.get("limit_name")
+    if isinstance(name, str) and name.strip().lower() in _CODEX_RESERVE_LIMIT_NAMES:
+        return True
+    limit_id = rl.get("limit_id")
+    return isinstance(limit_id, str) and limit_id.strip() in _CODEX_RESERVE_LIMIT_IDS
+
+
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
@@ -948,7 +987,12 @@ def ledger_flush():
             stored = fresh["tools"].setdefault(tool, {})
             for dk, day in days.items():
                 kept = stored.get(dk)
-                if day.get("_sources") is not None:
+                if (tool == "codex" and kept
+                        and _ledger_record_version(day) > _ledger_record_version(kept)):
+                    # Reserve attribution upgrades may lower Codex totals. Replace the
+                    # old mixed day before source merging can recreate its remainder.
+                    stored[dk] = day
+                elif day.get("_sources") is not None:
                     stored[dk] = _ledger_merge_sources(kept, day["_sources"], tool)
                     for key in ("projects", "sessions"):
                         if isinstance(day.get(key), list):
@@ -1025,7 +1069,7 @@ _LEDGER_TOKEN_FIELDS = ("in", "out", "cr", "cw", "reason", "thoughts")
 def _ledger_token_sum(day, tool=None):
     tok = 0
     for field in _LEDGER_TOKEN_FIELDS:
-        if tool in ("codex", "openclaw", "musecode") and field == "reason":
+        if tool in ("codex", "codex_reserve", "openclaw", "musecode") and field == "reason":
             continue
         value = day.get(field)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -1095,7 +1139,11 @@ def _ledger_merge_sources(kept, current, tool=None):
         # the whole old total plus all currently visible sessions.
         sources["legacy"] = _ledger_values(kept, live, subtract=True)
     for source, snapshot in current.items():
-        if _ledger_source_preferred(snapshot, sources.get(source)):
+        authoritative_codex_source = (
+            tool in ("codex", "codex_reserve")
+            and snapshot.get("_accounting_version", 0) >= _CODEX_ACCOUNTING_VERSION
+        )
+        if authoritative_codex_source or _ledger_source_preferred(snapshot, sources.get(source)):
             sources[source] = snapshot
     # A fully reconstructed token remainder has no remaining token-priced cost.
     # This also repairs orphan USD from an earlier aggregate-to-CNY migration.
@@ -1135,7 +1183,10 @@ def _ledger_file_sources(file_cache, identity_field=None, accounting_version=1):
 
 def _ledger_add_record_source(sources, identity, day_key, record, hour=None):
     days = sources.setdefault(str(identity), {})
-    contribution = {field: record.get(field, 0) for field in (*TOKEN_FIELDS, "cost", "cost_cny")}
+    contribution = {
+        field: record.get(field, 0)
+        for field in (*TOKEN_FIELDS, "cost", "cost_cny", "credits")
+    }
     if record.get("models"):
         contribution["models"] = record["models"]
     elif record.get("model"):
@@ -1290,9 +1341,11 @@ def _empty_claude():
 
 
 def _empty_codex():
-    ranges = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
-                  "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
-    return {"ranges": ranges, "limits": None, "plan": None,
+    def _blank():
+        return {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
+                    "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
+    return {"ranges": _blank(), "reserve_ranges": _blank(),
+            "reserve_quota": None, "limits": None, "plan": None,
             "limits_updated": None, "limits_consumed": None}
 
 
@@ -2579,7 +2632,11 @@ def _codex_migrate_event_cache(file_cache):
 
 
 def _codex_estimated_cost(model, inp, cached, out):
-    price_model = model if _has_known_price(model) else "openai/gpt-5.5"
+    if _codex_is_reserve_model(model):
+        # Reserve 单独计量,按 Luna 级别计价,不吃 gpt-5.5 兜底。
+        price_model = _CODEX_RESERVE_PRICE_MODEL
+    else:
+        price_model = model if _has_known_price(model) else "openai/gpt-5.5"
     base = _raw_price(price_model)
     high_context = inp > 272_000
     input_price = base["in"] * (2 if high_context else 1)
@@ -2667,13 +2724,18 @@ def _reprice_codex_event_caches(file_cache, changed_models, multipliers=None):
     return changed
 
 
+def _codex_day():
+    return {"in": 0, "cached": 0, "out": 0, "reason": 0,
+            "cost": 0.0, "models": {}, "hours": [0] * 24,
+            "model_hours": {}}
+
+
 def _codex_add_event(days, event):
     dk = event[1]
     li, lc, lo, lr, _ = event[6:11]
     model = event[11] if len(event) > 11 else None
     cost = _codex_estimated_cost(model, li, lc, lo)
-    day = days.setdefault(dk, {"in": 0, "cached": 0, "out": 0,
-                               "reason": 0, "cost": 0.0, "models": {}, "hours": [0] * 24})
+    day = days.setdefault(dk, _codex_day())
     day["in"] += li
     day["cached"] += lc
     day["out"] += lo
@@ -2682,22 +2744,241 @@ def _codex_add_event(days, event):
     _add_model_usage(day["models"], model, max(li - lc, 0), lo, lc, 0, lr, cost)
     try:
         hour = datetime.fromisoformat(event[0]).astimezone().hour
-        day["hours"][hour] += li + lo
+        amount = li + lo
+        day["hours"][hour] += amount
+        model_hours = day.setdefault("model_hours", {}).setdefault(model, [0] * 24)
+        model_hours[hour] += amount
     except (TypeError, ValueError):
         pass
 
 
-def _codex_accounted_days(cache):
-    """Use the same retained day/model/hour counters as the Codex main card."""
+def _codex_day_has_usage(day):
+    return bool(day.get("models")) or any(day.get(key, 0) for key in (
+        "in", "cached", "out", "reason", "cost"))
+
+
+def _codex_split_day(day):
+    """Split one parsed Codex day without losing event-level hour attribution."""
+    main, reserve = _codex_day(), _codex_day()
+    models = day.get("models") or {}
+    if not models:
+        for key in ("in", "cached", "out", "reason", "cost"):
+            main[key] = day.get(key, 0)
+        main["hours"] = list((day.get("hours") or [0] * 24)[:24])
+        main["hours"] += [0] * (24 - len(main["hours"]))
+        return main, reserve
+
+    model_hours = day.get("model_hours") or {}
+    for model, usage in models.items():
+        target = reserve if _codex_is_reserve_model(model) else main
+        li = usage.get("in", 0)
+        lc = usage.get("cr", 0)
+        lo = usage.get("out", 0)
+        lr = usage.get("reason", 0)
+        cost = usage.get("cost", 0)
+        target["in"] += li + lc
+        target["cached"] += lc
+        target["out"] += lo
+        target["reason"] += lr
+        target["cost"] += cost
+        _add_model_usage(target["models"], model, li, lo, lc,
+                         usage.get("cw", 0), lr, cost)
+        allocated = model_hours.get(model)
+        if isinstance(allocated, list):
+            for hour, amount in enumerate(allocated[:24]):
+                target["hours"][hour] += amount
+
+    # v7 writes model_hours for mixed days. A day whose models all belong to one
+    # bucket remains unambiguous even when loaded from an older split ledger.
+    if not model_hours:
+        has_reserve = any(_codex_is_reserve_model(model) for model in models)
+        has_main = any(not _codex_is_reserve_model(model) for model in models)
+        if has_reserve != has_main:
+            target = reserve if has_reserve else main
+            target["hours"] = list((day.get("hours") or [0] * 24)[:24])
+            target["hours"] += [0] * (24 - len(target["hours"]))
+    return main, reserve
+
+
+def _codex_split_sources(file_cache):
+    main_days, reserve_days = {}, {}
+    main_sources, reserve_sources = {}, {}
+    main_sessions, reserve_sessions = {}, {}
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        identity = str(entry.get("session_id") or path)
+        for dk, day in (entry.get("days") or {}).items():
+            main, reserve = _codex_split_day(day)
+            has_main = _codex_day_has_usage(main)
+            has_reserve = _codex_day_has_usage(reserve)
+            if has_main:
+                main_days[dk] = _ledger_values(main_days.get(dk, {}), main)
+                main_sessions.setdefault(dk, set()).add(identity)
+            if has_reserve:
+                reserve_days[dk] = _ledger_values(reserve_days.get(dk, {}), reserve)
+                reserve_sessions.setdefault(dk, set()).add(identity)
+            if has_main:
+                source_days = main_sources.setdefault(identity, {})
+                source_days[dk] = _ledger_values(source_days.get(dk, {}), main)
+                source_days[dk]["_accounting_version"] = _CODEX_ACCOUNTING_VERSION
+                source_days[dk]["_ledger_version"] = _CODEX_ACCOUNTING_VERSION
+            if has_reserve:
+                source_days = reserve_sources.setdefault(identity, {})
+                source_days[dk] = _ledger_values(source_days.get(dk, {}), reserve)
+                source_days[dk]["_accounting_version"] = _CODEX_ACCOUNTING_VERSION
+                source_days[dk]["_ledger_version"] = _CODEX_ACCOUNTING_VERSION
+    return main_days, reserve_days, main_sources, reserve_sources, main_sessions, reserve_sessions
+
+
+def _codex_migrate_mixed_ledger(main_sources, reserve_sources):
+    """Replace pre-split Codex source snapshots using the reconstructed v7 split."""
+    stored = _load_ledger().setdefault("tools", {}).setdefault("codex", {})
+    main_by_day, reserve_by_day = {}, {}
+    for target, sources in ((main_by_day, main_sources), (reserve_by_day, reserve_sources)):
+        for identity, days in sources.items():
+            source_id = hashlib.sha256(str(identity).encode()).hexdigest()
+            for dk, day in days.items():
+                target.setdefault(dk, {})[source_id] = day
+
+    changed = False
+    for dk, reserve_current in reserve_by_day.items():
+        kept = stored.get(dk)
+        if not isinstance(kept, dict):
+            continue
+        main_current = main_by_day.get(dk, {})
+        if "_sources" not in kept:
+            actual = {}
+            for source_id in main_current.keys() | reserve_current.keys():
+                actual = _ledger_values(actual, main_current.get(source_id, {}))
+                actual = _ledger_values(actual, reserve_current.get(source_id, {}))
+            legacy = _codex_legacy_day(_ledger_values(kept, actual, subtract=True))
+            legacy["_accounting_version"] = _CODEX_ACCOUNTING_VERSION
+            legacy["_ledger_version"] = _CODEX_ACCOUNTING_VERSION
+            sources = {"legacy": legacy} if _codex_day_has_usage(legacy) else {}
+        else:
+            sources = dict(kept.get("_sources") or {})
+
+        for source_id, reserve_snapshot in reserve_current.items():
+            replacement = main_current.get(source_id)
+            if replacement is None:
+                replacement = {"_accounting_version": _CODEX_ACCOUNTING_VERSION,
+                               "_ledger_version": _CODEX_ACCOUNTING_VERSION}
+            # The current v7 event cache is authoritative for this visible source.
+            # Replace even at the same accounting version so an incremental
+            # response-first backfill can move usage out of the main ledger.
+            if sources.get(source_id) != replacement:
+                sources[source_id] = replacement
+
+        result = {}
+        for snapshot in sources.values():
+            result = _ledger_values(result, snapshot)
+        result["_sources"] = sources
+        result["_ledger_version"] = _CODEX_ACCOUNTING_VERSION
+        if kept != result:
+            stored[dk] = result
+            changed = True
+    if changed:
+        _LEDGER_CACHE["dirty"] = True
+
+
+def _codex_accounted_days(cache, reserve=False):
+    """Use the retained main or Reserve day/model/hour counters."""
     live = {}
     for entry in cache.get("codex", {}).values():
-        if isinstance(entry, dict):
-            for dk, day in entry.get("days", {}).items():
-                live[dk] = _ledger_values(live.get(dk, {}), day)
-    for dk, kept in _load_ledger().get("tools", {}).get("codex", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in (entry.get("days") or {}).items():
+            main, reserve_day = _codex_split_day(day)
+            selected = reserve_day if reserve else main
+            if _codex_day_has_usage(selected):
+                live[dk] = _ledger_values(live.get(dk, {}), selected)
+    tool = "codex_reserve" if reserve else "codex"
+    for dk, kept in _load_ledger().get("tools", {}).get(tool, {}).items():
         if dk not in live or _ledger_day_total(kept) >= _ledger_day_total(live[dk]):
             live[dk] = kept
     return live
+
+
+def _codex_reclassify_reserve_event(event):
+    if not isinstance(event, list) or len(event) < 12:
+        return False
+    li, lc, lo = event[6], event[7], event[8]
+    cost = _codex_estimated_cost(_CODEX_RESERVE_MODEL, li, lc, lo)
+    if event[11] == _CODEX_RESERVE_MODEL and event[10] == cost:
+        return False
+    event[10] = cost
+    event[11] = _CODEX_RESERVE_MODEL
+    return True
+
+
+def _codex_backfill_reserve_mirror(file_path, events, entry, mirror):
+    """Route a response already emitted before its Reserve legacy mirror."""
+    candidates = events
+    cached = False
+    if not candidates and isinstance(entry, dict):
+        try:
+            candidates = list(_iter_codex_cached_events(file_path))
+            cached = True
+        except OSError:
+            return False
+    for event in reversed(candidates):
+        if len(event) > 9 and list(event[6:10]) == mirror:
+            changed = _codex_reclassify_reserve_event(event)
+            if changed and cached:
+                entry["event_cache_size"] = _codex_write_event_cache(file_path, candidates)
+            return changed
+    return False
+
+
+def _codex_link_segment_mirrors(file_cache):
+    """Give dual-written events one response ID across resumed thread segments."""
+    groups = {}
+    for path, entry in file_cache.items():
+        if isinstance(entry, dict):
+            groups.setdefault(entry.get("session_id") or path, []).append(path)
+
+    changed_paths = set()
+    for paths in groups.values():
+        if len(paths) < 2:
+            continue
+        loaded = {}
+        identified = {}
+        try:
+            for path in paths:
+                events = list(_iter_codex_cached_events(path))
+                loaded[path] = events
+                for event in events:
+                    key = _codex_event_key(event)
+                    response_id = event[12] if len(event) > 12 else None
+                    if key is not None and response_id:
+                        identified.setdefault(key, (response_id, event, path))
+        except OSError:
+            continue
+
+        for path, events in loaded.items():
+            for event in events:
+                key = _codex_event_key(event)
+                response_id = event[12] if len(event) > 12 else None
+                match = identified.get(key)
+                if key is None or response_id or match is None:
+                    continue
+                matched_id, response_event, response_path = match
+                while len(event) <= 12:
+                    event.append(None)
+                event[12] = matched_id
+                changed_paths.add(path)
+                if (_codex_is_reserve_model(event[11])
+                        or _codex_is_reserve_model(response_event[11])):
+                    if _codex_reclassify_reserve_event(event):
+                        changed_paths.add(path)
+                    if _codex_reclassify_reserve_event(response_event):
+                        changed_paths.add(response_path)
+
+        for path in changed_paths.intersection(paths):
+            entry = file_cache[path]
+            entry["event_cache_size"] = _codex_write_event_cache(path, loaded[path])
+    return changed_paths
 
 
 def _codex_prefix_match_count(child_events, parent_events):
@@ -3180,12 +3461,14 @@ def scan_codex(bounds, cache):
             cache["_dirty"] = True
         if (not entry or entry.get("sig") != sig
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
+                or entry.get("accounting_version") != _CODEX_ACCOUNTING_VERSION
                 or not event_cache_ready):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
             if (isinstance(entry, dict)
-                    and entry.get("parser_version") == _CODEX_PARSER_VERSION):
+                    and entry.get("parser_version") == _CODEX_PARSER_VERSION
+                    and entry.get("accounting_version") == _CODEX_ACCOUNTING_VERSION):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
                         and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
@@ -3197,6 +3480,7 @@ def scan_codex(bounds, cache):
                 session_id, forked_from_id = _codex_session_meta(f)
                 file_limits = None; file_limits_ts = None; file_plan = None
                 file_g_limits = None; file_g_ts = None; file_g_plan = None
+                file_r_limits = None; file_r_ts = None
                 file_last_total = None
                 prev_total_key = None
                 file_model = None
@@ -3212,6 +3496,7 @@ def scan_codex(bounds, cache):
                 file_plan = entry.get("plan")
                 file_g_limits = entry.get("g_limits"); file_g_ts = entry.get("g_ts")
                 file_g_plan = entry.get("g_plan")
+                file_r_limits = entry.get("reserve_limits"); file_r_ts = entry.get("reserve_limits_ts")
                 file_last_total = entry.get("last_total")
                 previous = entry.get("prev_total_key")
                 prev_total_key = tuple(previous) if isinstance(previous, (list, tuple)) else None
@@ -3299,6 +3584,9 @@ def scan_codex(bounds, cache):
                         if mirror in pending_responses:
                             duplicate_total = True
                             pending_responses.remove(mirror)
+                            if _codex_is_reserve_limits(payload.get("rate_limits")):
+                                if _codex_backfill_reserve_mirror(f, events, entry, mirror):
+                                    dedupe_paths.add(f)
                     rl = (o.get("payload") or {}).get("rate_limits")
                     if ts and rl:
                         ts_iso = ts.isoformat()
@@ -3310,6 +3598,10 @@ def scan_codex(bounds, cache):
                             file_limits_ts = ts_iso
                             file_limits = rl
                             file_plan = rl.get("plan_type")
+                        # Reserve 是第二缸油:额度独立展示,不混入主额度读数。
+                        if _codex_is_reserve_limits(rl) and (file_r_ts is None or ts_iso > file_r_ts):
+                            file_r_ts = ts_iso
+                            file_r_limits = rl
                     # Codex may emit the same cumulative snapshot twice; in that case
                     # last_token_usage is repeated too, so counting it again overstates usage.
                     if ts and last and not duplicate_total:
@@ -3321,6 +3613,9 @@ def scan_codex(bounds, cache):
                         # 无模型字段(老版本 CLI 日志/截断会话)标为 unknown,不冒充 gpt-5.5;
                         # 计费仍按 gpt-5.5 保守估算(下行 price_model 兜底)
                         model = _known_id_or_raw(file_model) or "unknown"
+                        # 同一文件可先走主额度后切 Reserve:事件级额度优先于文件级模型。
+                        if _codex_is_reserve_limits(rl):
+                            model = _CODEX_RESERVE_MODEL
                         cost = _codex_estimated_cost(model, li, lc, lo)
                         totals = total_key if total_key is not None else (None, None, None, None)
                         # timestamp, local day, cumulative usage, incremental usage, cost
@@ -3371,8 +3666,10 @@ def scan_codex(bounds, cache):
                 "session_id": session_id, "forked_from_id": forked_from_id,
                 "limits": file_limits, "limits_ts": file_limits_ts, "plan": file_plan,
                 "g_limits": file_g_limits, "g_ts": file_g_ts, "g_plan": file_g_plan,
+                "reserve_limits": file_r_limits, "reserve_limits_ts": file_r_ts,
                 "last_total": file_last_total, "prev_total_key": prev_total_key,
                 "active_model": file_model, "parser_version": _CODEX_PARSER_VERSION,
+                "accounting_version": _CODEX_ACCOUNTING_VERSION,
                 "response_ids": sorted(response_ids), "pending_responses": pending_responses,
                 "last_legacy_snapshot": last_legacy_snapshot,
                 "file_id": file_id, "parsed_size": complete_offset,
@@ -3394,6 +3691,11 @@ def scan_codex(bounds, cache):
     for p in stale:
         fc.pop(p, None)
         _codex_remove_event_cache(p)
+        cache["_dirty"] = True
+
+    linked_paths = _codex_link_segment_mirrors(fc)
+    if linked_paths:
+        dedupe_paths.update(linked_paths)
         cache["_dirty"] = True
 
     # A session can briefly exist in active and archived directories together.
@@ -3465,45 +3767,46 @@ def scan_codex(bounds, cache):
         if d >= year_d: ks.append("year")
         return ks
 
-    live_days = {}
-    for f, entry in canonical_fc.items():
-        for dk, day in entry.get("days", {}).items():
-            d = date.fromisoformat(dk)
-            agg = live_days.setdefault(
-                dk, {"in": 0, "cached": 0, "out": 0, "reason": 0,
-                     "cost": 0.0, "models": {}, "hours": [0] * 24})
-            agg["in"] += day["in"]; agg["cached"] += day["cached"]
-            agg["out"] += day["out"]; agg["reason"] += day["reason"]
-            agg["cost"] += day["cost"]
-            for model, usage in day.get("models", {}).items():
-                _add_model_usage(agg["models"], model, usage.get("in", 0), usage.get("out", 0),
-                                 usage.get("cr", 0), usage.get("cw", 0),
-                                 usage.get("reason", 0), usage.get("cost", 0))
-            for hour, amount in enumerate((day.get("hours") or [])[:24]):
-                agg["hours"][hour] += amount
-            # 会话数只能来自现存日志(被清日志无从归属)
-            for k in _codex_range_keys(d):
-                B[k]["sessions"].add(f)
+    (live_days, live_reserve_days, main_sources, reserve_sources,
+     main_sessions, reserve_sessions) = _codex_split_sources(canonical_fc)
+    _codex_migrate_mixed_ledger(main_sources, reserve_sources)
 
-    merged_days = ledger_reconcile("codex", live_days,
-                                  _ledger_file_sources(canonical_fc, "session_id", _CODEX_PARSER_VERSION))
-    for dk, day in merged_days.items():
-        try:
-            d = date.fromisoformat(dk)
-        except ValueError:
-            continue
-        for k in _codex_range_keys(d):
-            b = B[k]
-            b["in"] += day.get("in", 0); b["cached"] += day.get("cached", 0)
-            b["out"] += day.get("out", 0); b["reason"] += day.get("reason", 0)
-            b["cost"] += day.get("cost", 0.0)
-            for model, usage in (day.get("models") or {}).items():
-                _add_model_usage(b["models"], model, usage.get("in", 0), usage.get("out", 0),
-                                 usage.get("cr", 0), usage.get("cw", 0),
-                                 usage.get("reason", 0), usage.get("cost", 0))
+    merged_days = ledger_reconcile("codex", live_days, main_sources)
+    merged_reserve_days = ledger_reconcile(
+        "codex_reserve", live_reserve_days, reserve_sources)
+
+    def _assemble_codex_ranges(target, days, sessions):
+        for dk, day in days.items():
+            try:
+                d = date.fromisoformat(dk)
+            except ValueError:
+                continue
+            for key in _codex_range_keys(d):
+                bucket = target[key]
+                bucket["in"] += day.get("in", 0)
+                bucket["cached"] += day.get("cached", 0)
+                bucket["out"] += day.get("out", 0)
+                bucket["reason"] += day.get("reason", 0)
+                bucket["cost"] += day.get("cost", 0.0)
+                bucket["sessions"].update(sessions.get(dk, ()))
+                for model, usage in (day.get("models") or {}).items():
+                    _add_model_usage(
+                        bucket["models"], model, usage.get("in", 0),
+                        usage.get("out", 0), usage.get("cr", 0),
+                        usage.get("cw", 0), usage.get("reason", 0),
+                        usage.get("cost", 0))
+
+    _assemble_codex_ranges(B, merged_days, main_sessions)
+
+    # Reserve is independently attributed down to source, session, day and hour.
+    RB = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0.0,
+              "sessions": set(), "models": {}}
+          for k in RANGE_KEYS}
+    _assemble_codex_ranges(RB, merged_reserve_days, reserve_sessions)
 
     # Find latest limits across all cached files
     latest_limits = None; latest_ts = None; plan_type = None
+    reserve_limits = None; reserve_ts = None
     g_limits = None; g_ts = None
     for entry in fc.values():
         if entry.get("limits_ts"):
@@ -3511,13 +3814,18 @@ def scan_codex(bounds, cache):
                 latest_ts = entry["limits_ts"]
                 latest_limits = entry["limits"]
                 plan_type = entry["plan"]
+        if entry.get("reserve_limits_ts"):
+            if reserve_ts is None or entry["reserve_limits_ts"] > reserve_ts:
+                reserve_ts = entry["reserve_limits_ts"]
+                reserve_limits = entry["reserve_limits"]
         if entry.get("g_ts"):
             if g_ts is None or entry["g_ts"] > g_ts:
                 g_ts = entry["g_ts"]
                 g_limits = entry["g_limits"]
 
     selected_limits_ts = latest_ts
-    if latest_limits is None and g_limits is not None:
+    if (latest_limits is None and g_limits is not None
+            and not _codex_is_reserve_limits(g_limits)):
         latest_limits = g_limits
         plan_type = (g_limits or {}).get("plan_type")
         selected_limits_ts = g_ts
@@ -3545,6 +3853,7 @@ def scan_codex(bounds, cache):
     # and stale limits from older sessions must not be shown.
     if _codex_is_custom_provider():
         latest_limits = None
+        reserve_limits = None
         plan_type = None
 
     cur_total = None
@@ -3553,8 +3862,28 @@ def scan_codex(bounds, cache):
         if entry:
             cur_total = entry.get("last_total")
 
+    reserve_quota = None
+    if reserve_limits:
+        r_primary = (reserve_limits.get("primary") or {})
+        is_week = r_primary.get("window_minutes") == 7 * 24 * 60
+        pct_key, reset_key = ("pw", "rw") if is_week else ("p5", "r5")
+        initial = _codex_quota_values(reserve_limits, now_epoch=0)
+        consumed = _codex_used_since(merged_reserve_days, initial[reset_key])
+        normalized = _codex_quota_values(
+            reserve_limits, consumed={pct_key: consumed})
+        reserve_quota = {
+            "used_percent": normalized[pct_key],
+            "resets_at": normalized[reset_key],
+            "window_minutes": r_primary.get("window_minutes"),
+            "plan": reserve_limits.get("plan_type"),
+            "updated": _iso_to_epoch(reserve_ts),
+            "stale": normalized[f"{pct_key}_stale"],
+        }
+
     return {
         "ranges": B,
+        "reserve_ranges": RB,
+        "reserve_quota": reserve_quota,
         "cur_total": cur_total,
         "limits": latest_limits,
         "plan": plan_type,
@@ -8776,6 +9105,10 @@ def _workbuddy_usage_record(item, model_id_first=False):
     raw = provider.get("rawUsage") or {}
     sources = [x for x in (message_usage, normalized, raw) if isinstance(x, dict) and x]
 
+    credits = max(
+        (_workbuddy_float(source, "credit", "credits") or 0.0 for source in sources),
+        default=0.0,
+    )
     selected = None
     input_total = output = 0
     for source in sources:
@@ -8787,7 +9120,9 @@ def _workbuddy_usage_record(item, model_id_first=False):
             output = out or 0
             break
     if selected is None:
-        return None
+        if credits <= 0:
+            return None
+        selected = sources[0]
 
     cache_read_candidates = []
     cache_write_candidates = []
@@ -8812,10 +9147,6 @@ def _workbuddy_usage_record(item, model_id_first=False):
 
     cache_read = max(cache_read_candidates, default=0)
     cache_write = max(cache_write_candidates, default=0)
-    credits = max(
-        (_workbuddy_float(source, "credit", "credits") or 0.0 for source in sources),
-        default=0.0,
-    )
     inclusive_input = any(total == input_total + output for total in total_candidates)
     if inclusive_input:
         cache_read = min(cache_read, input_total)
@@ -8893,11 +9224,10 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
     ledger_touch(tool_key)
     fc = cache.setdefault(tool_key, {})
     B = _empty_token_ranges()
-    if not os.path.isdir(root):
-        return {"ranges": B}
-
-    files = set(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
+    files = (set(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
+             if os.path.isdir(root) else set())
     stale = set(fc.keys())
+    changed = False
     for path in sorted(files):
         stale.discard(path)
         try:
@@ -8929,7 +9259,11 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                         continue
                     record_session = str(item.get("sessionId") or session_id)
                     dedup_id = record.get("message_id") or record["item_id"]
-                    if dedup_id:
+                    if tool_key == "codebuddy" and record.get("message_id"):
+                        record["dedup"] = "codebuddy:" + hashlib.sha256(
+                            record["message_id"].encode("utf-8")
+                        ).hexdigest()
+                    elif dedup_id:
                         record["dedup"] = json.dumps(
                             [record_session, dedup_id, record["ts_key"]], separators=(",", ":"))
                     else:
@@ -8941,9 +9275,11 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
             continue
         fc[path] = {"sig": sig, "parser": _WORKBUDDY_PARSER_VERSION,
                     "records": records, "proj": project, "sid": str(session_id)}
+        changed = True
 
     for path in stale:
         fc.pop(path, None)
+        changed = True
 
     days = {}
     ledger_sources = {}
@@ -8979,6 +9315,8 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
             continue
         for range_key in classify_date(day_date, bounds):
             _merge_token_day(B[range_key], day)
+    if changed:
+        cache["_dirty"] = True
     return {"ranges": B}
 
 
@@ -11593,10 +11931,11 @@ def compute():
                 "sessions": len(b["sessions"])}
 
     def codex_range(b):
-        hit = (b["cached"] / b["in"] * 100) if b["in"] else 0.0
-        return {"hit": hit, "in": b["in"] - b["cached"], "cached": b["cached"],
-                "out": b["out"], "reason": b["reason"], "cost": b["cost"],
-                "sessions": len(b["sessions"]), "models": _format_token_models(b.get("models", {}))}
+        b = b or {}
+        hit = (b.get("cached", 0) / b["in"] * 100) if b.get("in") else 0.0
+        return {"hit": hit, "in": b.get("in", 0) - b.get("cached", 0), "cached": b.get("cached", 0),
+                "out": b.get("out", 0), "reason": b.get("reason", 0), "cost": b.get("cost", 0.0),
+                "sessions": len(b.get("sessions", set())), "models": _format_token_models(b.get("models", {}))}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
@@ -11656,6 +11995,8 @@ def compute():
 
     cranges = {k: claude_range(cc["ranges"][k]) for k in RANGE_KEYS}
     xranges = {k: codex_range(cx["ranges"][k]) for k in RANGE_KEYS}
+    xreserveranges = {k: codex_range(cx.get("reserve_ranges", {}).get(k, {}))
+                      for k in RANGE_KEYS}
     granges = {k: gemini_range(gm["ranges"][k]) for k in RANGE_KEYS}
     kranges = {k: grok_range(gk["ranges"][k]) for k in RANGE_KEYS}
     qwranges = {k: qoderwork_range(qd["ranges"][k]) for k in RANGE_KEYS}
@@ -11783,6 +12124,8 @@ def compute():
         },
         "codex": {
             "ranges": xranges,
+            "reserve_ranges": xreserveranges,
+            "reserve_quota": cx.get("reserve_quota"),
             "p5": p5, "pw": pw, "r5": r5, "rw": rw,
             "q_updated": cx.get("limits_updated"),
             "p5_stale": quota["p5_stale"], "pw_stale": quota["pw_stale"],
@@ -12627,7 +12970,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         per_tool = live_tool_tokens.setdefault(dk, {})
         per_tool[tool] = per_tool.get(tool, 0) + amount
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
+                       "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
@@ -12637,6 +12981,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
+                       "xr_in": 0, "xr_out": 0, "xr_cached": 0, "xr_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
                         "pa_in": 0, "pa_out": 0, "pa_cr": 0, "pa_cw": 0, "pa_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
@@ -12671,15 +13016,36 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             continue
         d = days.setdefault(dk, _empty())
         d["codex"] += day.get("cost", 0)
-        d["x_in"] += day.get("in", 0); d["x_out"] += day.get("out", 0)
-        d["x_cached"] += day.get("cached", 0); d["x_reason"] += day.get("reason", 0)
-        _add_day_tokens(d, dk, "codex",
-                        day.get("in", 0) + day.get("out", 0))
+        d["x_in"] += day.get("in", 0)
+        d["x_out"] += day.get("out", 0)
+        d["x_cached"] += day.get("cached", 0)
+        d["x_reason"] += day.get("reason", 0)
+        _add_day_tokens(d, dk, "codex", day.get("in", 0) + day.get("out", 0))
         for mn, mv in day.get("models", {}).items():
             name = f"{nice_model(mn)} (Codex)"
             model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
                                               "cr": 0, "cw": 0, "reason": 0,
                                               "tool": "codex"})
+            model["cost"] += mv.get("cost", 0)
+            for key in TOKEN_FIELDS:
+                model[key] += mv.get(key, 0)
+
+    for dk, day in _codex_accounted_days(cache, reserve=True).items():
+        if cutoff and dk < cutoff:
+            continue
+        d = days.setdefault(dk, _empty())
+        d["codex_reserve"] += day.get("cost", 0)
+        d["xr_in"] += day.get("in", 0)
+        d["xr_out"] += day.get("out", 0)
+        d["xr_cached"] += day.get("cached", 0)
+        d["xr_reason"] += day.get("reason", 0)
+        _add_day_tokens(
+            d, dk, "codex_reserve", day.get("in", 0) + day.get("out", 0))
+        for mn, mv in day.get("models", {}).items():
+            name = f"{nice_model(mn)} (Codex Reserve)"
+            model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
+                                              "cr": 0, "cw": 0, "reason": 0,
+                                              "tool": "codex_reserve"})
             model["cost"] += mv.get("cost", 0)
             for key in TOKEN_FIELDS:
                 model[key] += mv.get(key, 0)
@@ -12982,7 +13348,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # tokens 列只补"账本白名单token(_ledger_token_sum) 超出该工具当日实时token"的差额。
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
-        "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
+        "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
         "mimocode", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
@@ -12998,7 +13364,10 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             cost = day.get("cost")
             ledger_cost = (float(cost) if isinstance(cost, (int, float))
                            and not isinstance(cost, bool) else 0.0)
-            if ledger_tok <= 0 and ledger_cost <= 0:
+            credit_value = day.get("credits")
+            ledger_credits = (float(credit_value) if isinstance(credit_value, (int, float))
+                              and not isinstance(credit_value, bool) else 0.0)
+            if ledger_tok <= 0 and ledger_cost <= 0 and ledger_credits <= 0:
                 continue
             d = days.setdefault(dk, _empty())
             live_tok = live_tool_tokens.get(dk, {}).get(tool, 0)
@@ -13006,6 +13375,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 d["tokens"] += ledger_tok - live_tok
             if column and ledger_cost > d[column]:
                 d[column] = ledger_cost
+            if tool == "codebuddy" and ledger_credits > d["cb_credits"]:
+                d["cb_credits"] = ledger_credits
 
     codex_total = sum(d["codex"] for d in days.values())
     codex_in = sum(d["x_in"] for d in days.values())
@@ -13014,8 +13385,20 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     if codex_total > 0 and not any(v.get("tool") == "codex" for v in models.values()):
         models["GPT-5.5 (Codex)"] = {"cost": round(codex_total, 2), "in": codex_in, "out": codex_out,
                                       "reason": codex_reason, "tool": "codex"}
+    reserve_total = sum(d["codex_reserve"] for d in days.values())
+    if reserve_total > 0 and not any(
+            v.get("tool") == "codex_reserve" for v in models.values()):
+        models["Luna Reserve (Codex Reserve)"] = {
+            "cost": round(reserve_total, 2),
+            "in": sum(d["xr_in"] - d["xr_cached"] for d in days.values()),
+            "out": sum(d["xr_out"] for d in days.values()),
+            "cr": sum(d["xr_cached"] for d in days.values()),
+            "reason": sum(d["xr_reason"] for d in days.values()),
+            "tool": "codex_reserve",
+        }
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
+              "codex_reserve": round(v["codex_reserve"], 2),
               "gemini": round(v["gemini"], 2), "grok": round(v["grok"], 2),
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
@@ -13029,7 +13412,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "musecode": round(v["musecode"], 2),
               "cmdcode": round(v["cmdcode"], 2),
               "prime_agent": round(v["prime_agent"], 2),
-              "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
+              "total": round(v["claude"] + v["codex"] + v["codex_reserve"]
+                             + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"] + v["workbuddy_ai"]
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
@@ -13037,6 +13421,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                              + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
+              "xr_in": v["xr_in"], "xr_out": v["xr_out"],
+              "xr_cached": v["xr_cached"], "xr_reason": v["xr_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
                "pa_in": v["pa_in"], "pa_out": v["pa_out"], "pa_cr": v["pa_cr"], "pa_cw": v["pa_cw"], "pa_reason": v["pa_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
@@ -13051,7 +13437,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
              for dk, v in sorted(days.items())]
 
     def model_tokens(v):
-        if v.get("tool") == "codex":
+        if v.get("tool") in ("codex", "codex_reserve"):
             return v["in"] + v.get("cr", 0) + v["out"]  # out 已含 reasoning
         if v.get("tool") == "openclaw":
             return _openclaw_token_total(v)
@@ -13207,22 +13593,21 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 nm = nice_model(mn)
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- Codex (in includes cached; out includes reasoning) ---
-    for dk, day in _codex_accounted_days(cache).items():
-        if cutoff and dk < cutoff:
-            continue
-        tok = day.get("in", 0) + day.get("out", 0)
-        day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
-        weekday[date.fromisoformat(dk).weekday()] += tok
-        for hour, amount in enumerate(day.get("hours", [])):
-            hours[hour] += amount
-            if amount:
-                all_day_hours.add(f"{dk}:{hour}")
-        for model, usage in day.get("models", {}).items():
-            name = f"{nice_model(model)} (Codex)"
-            model_tokens = usage.get("in", 0) + usage.get("cr", 0) + usage.get("out", 0)
-            model_tok[name] = model_tok.get(name, 0) + model_tokens
+    # --- Codex + Luna Reserve (in includes cached; out includes reasoning) ---
+    for reserve, suffix in ((False, "Codex"), (True, "Codex Reserve")):
+        for dk, day in _codex_accounted_days(cache, reserve=reserve).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = day.get("in", 0) + day.get("out", 0)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            for model, usage in day.get("models", {}).items():
+                name = f"{nice_model(model)} ({suffix})"
+                model_tokens = (usage.get("in", 0) + usage.get("cr", 0)
+                                + usage.get("out", 0))
+                model_tok[name] = model_tok.get(name, 0) + model_tokens
 
     # --- Gemini (input 含 cached，thoughts 按输出 token 计入) ---
     for dk, day in cache.get(_GEMINI_DAYS_CACHE_KEY, {}).items():

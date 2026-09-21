@@ -150,6 +150,8 @@ struct CodexRanges: Codable {
 
 struct CodexStat: Codable {
     var ranges: CodexRanges
+    var reserveRanges: CodexRanges?
+    var reserveQuota: CodexReserveQuota?
     var p5: Double?
     var pw: Double?
     var r5: Int?
@@ -159,12 +161,35 @@ struct CodexStat: Codable {
     var pw_stale: Bool?
     var plan: String?
     var reset_cards: CodexResetCards?
+
+    enum CodingKeys: String, CodingKey {
+        case ranges
+        case reserveRanges = "reserve_ranges"
+        case reserveQuota = "reserve_quota"
+        case p5, pw, r5, rw, q_updated, p5_stale, pw_stale, plan, reset_cards
+    }
 }
 
 struct CodexResetCards: Codable {
     var count: Int
     var expires: [Int]
     var updated: Int?
+}
+
+struct CodexReserveQuota: Codable {
+    var usedPercent: Double?
+    var resetsAt: Int?
+    var windowMinutes: Int?
+    var plan: String?
+    var updated: Int?
+    var stale: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case resetsAt = "resets_at"
+        case windowMinutes = "window_minutes"
+        case plan, updated, stale
+    }
 }
 
 struct GeminiModelStat: Codable, Identifiable {

@@ -172,12 +172,22 @@ enum UsageSummaryBuilder {
             let r = usage.codex.ranges.get(range)
             let line = Line(
                 id: "codex", name: "Codex", cost: r.cost,
-                tokens: r.in + r.cached + r.out, sessions: r.sessions, calls: nil,
+                tokens: r.tokens, sessions: r.sessions, calls: nil,
                 input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
                 reason: r.reason > 0 ? r.reason : nil,
                 hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
+            if let r = usage.codex.reserveRanges?.get(range) {
+                let reserve = Line(
+                    id: "codex_reserve", name: "Luna Reserve", cost: r.cost,
+                    tokens: r.tokens, sessions: r.sessions, calls: nil,
+                    input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
+                    reason: r.reason > 0 ? r.reason : nil,
+                    hit: r.hit > 0 ? r.hit : nil, extra: nil
+                )
+                if !reserve.isEmpty { lines.append(reserve) }
+            }
         }
         if visibility.gemini {
             let r = usage.gemini.ranges.get(range)

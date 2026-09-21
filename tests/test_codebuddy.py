@@ -145,6 +145,90 @@ class CodeBuddyUsageTests(unittest.TestCase):
         model = next(item for item in dashboard["models"] if item["tool"] == "codebuddy")
         self.assertAlmostEqual(model["credits"], 1.25)
 
+    def test_credit_only_event_is_preserved(self):
+        item = codebuddy_item(
+            "credit-only", "generation-credit", "2026-09-17T12:00:00+08:00",
+            0, 0, credits=0.75,
+        )
+
+        record = USAGE._workbuddy_usage_record(item, model_id_first=True)
+
+        self.assertIsNotNone(record)
+        self.assertEqual(USAGE.token_total(record), 0)
+        self.assertAlmostEqual(record["credits"], 0.75)
+
+    def test_same_generation_across_cloned_sessions_is_counted_once(self):
+        first = codebuddy_item(
+            "entry-1", "generation-cloned", "2026-09-17T12:00:00+08:00",
+            100, 20, cached=40, credits=1.25, session_id="session-a",
+        )
+        replay = codebuddy_item(
+            "entry-2", "generation-cloned", "2026-09-17T12:00:01+08:00",
+            100, 20, cached=40, credits=1.25, session_id="session-b",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, item in (("a", first), ("b", replay)):
+                path = root / name / "session.jsonl"
+                path.parent.mkdir()
+                path.write_text(json.dumps(item) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            with mock.patch.object(USAGE, "CODEBUDDY_DIR", str(root)), \
+                 mock.patch.object(USAGE, "ledger_touch"), \
+                 mock.patch.object(
+                     USAGE, "ledger_reconcile",
+                     side_effect=lambda _tool, days, _source_days=None: days,
+                 ):
+                result = USAGE.scan_codebuddy(USAGE.range_bounds(), cache)
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(USAGE.token_total(usage), 120)
+        self.assertAlmostEqual(usage["credits"], 1.25)
+        self.assertEqual(len(usage["sessions"]), 1)
+
+    def test_ledger_retains_tokens_and_credits_after_root_removal(self):
+        original_ledger = USAGE._LEDGER_CACHE.copy()
+        try:
+            USAGE._LEDGER_CACHE.update({
+                "data": {"v": USAGE._LEDGER_VERSION, "tools": {}}, "dirty": False,
+            })
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "projects"
+                path = root / "project" / "session.jsonl"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(codebuddy_item(
+                    "entry-1", "generation-1", "2026-09-17T12:00:00+08:00",
+                    100, 20, cached=40, credits=1.25,
+                )) + "\n", encoding="utf-8")
+                cache = {"v": USAGE._SCAN_CACHE_VERSION}
+                with mock.patch.object(USAGE, "CODEBUDDY_DIR", str(root)):
+                    USAGE.scan_codebuddy(USAGE.range_bounds(), cache)
+                    path.unlink()
+                    path.parent.rmdir()
+                    root.rmdir()
+                    result = USAGE.scan_codebuddy(USAGE.range_bounds(), cache)
+                    dashboard = USAGE.build_daily_costs("all", refresh=False, _cache=cache)
+
+            usage = result["ranges"]["all"]
+            self.assertEqual(USAGE.token_total(usage), 120)
+            self.assertAlmostEqual(usage["credits"], 1.25)
+            row = next(item for item in dashboard["daily"] if item["date"] == "2026-09-17")
+            self.assertAlmostEqual(row["cb_credits"], 1.25)
+            self.assertEqual(cache["codebuddy"], {})
+        finally:
+            USAGE._LEDGER_CACHE.clear()
+            USAGE._LEDGER_CACHE.update(original_ledger)
+
+    def test_card_remains_active_for_ledger_only_tokens(self):
+        source = (Path(__file__).resolve().parents[1] / "Tokei" / "Sources" / "Tokei"
+                  / "PanelView.swift").read_text()
+        start = source.index('ToolCardItem(id: "codebuddy"')
+        end = source.index('ToolCardItem(id: "deepseek_harness"', start)
+        card = source[start:end]
+
+        self.assertIn("cbr.totalTokens > 0", card)
+
 
 if __name__ == "__main__":
     unittest.main()
