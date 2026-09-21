@@ -4,6 +4,7 @@ struct DailyCost: Codable, Identifiable {
     var date: String
     var claude: Double
     var codex: Double
+    var codex_reserve: Double? = nil
     var grok: Double?
     var pi: Double = 0
     var prime_agent: Double?
@@ -22,6 +23,10 @@ struct DailyCost: Codable, Identifiable {
     var x_out: Int = 0
     var x_cached: Int = 0
     var x_reason: Int = 0
+    var xr_in: Int? = nil
+    var xr_out: Int? = nil
+    var xr_cached: Int? = nil
+    var xr_reason: Int? = nil
     var p_in: Int = 0
     var p_out: Int = 0
     var p_cr: Int = 0
@@ -123,6 +128,11 @@ struct HeatDetailCard: View {
                              tokens: day.c_in + day.c_out + day.c_cr + day.c_cw, cost: day.claude)
                 HeatToolCell(name: "Codex", tint: Theme.codex,
                              tokens: day.x_in + day.x_out, cost: day.codex)
+                let reserveTokens = (day.xr_in ?? 0) + (day.xr_out ?? 0)
+                if reserveTokens > 0 || (day.codex_reserve ?? 0) > 0 {
+                    HeatToolCell(name: "Luna Reserve", tint: Theme.codex,
+                                 tokens: reserveTokens, cost: day.codex_reserve ?? 0)
+                }
                 HeatToolCell(name: "Pi", tint: Theme.pi,
                              tokens: day.p_in + day.p_out + day.p_cr + day.p_cw + day.p_reason,
                              cost: day.pi)
@@ -539,6 +549,7 @@ struct DashboardView: View {
     func modelTint(_ tool: String) -> Color {
         switch tool {
         case "codex": return Theme.codex
+        case "codex_reserve": return Theme.codex
         case "gemini": return Theme.gemini
         case "cursor": return Theme.cursor
         case "zai": return Theme.zai
@@ -560,6 +571,7 @@ struct DashboardView: View {
         case "qwencode": return Theme.qwencode
         case "kimicode": return Theme.kimicode
         case "musecode": return Theme.musecode
+        case "cmdcode": return Theme.cmdcode
         default: return Theme.claude
         }
     }
@@ -1045,6 +1057,7 @@ struct DashboardView: View {
         DailyCost(date: lhs.date,
                   claude: lhs.claude + rhs.claude,
                   codex: lhs.codex + rhs.codex,
+                  codex_reserve: (lhs.codex_reserve ?? 0) + (rhs.codex_reserve ?? 0),
                   grok: (lhs.grok ?? 0) + (rhs.grok ?? 0),
                   pi: lhs.pi + rhs.pi,
                   workbuddy: (lhs.workbuddy ?? 0) + (rhs.workbuddy ?? 0),
@@ -1062,6 +1075,10 @@ struct DashboardView: View {
                   x_out: lhs.x_out + rhs.x_out,
                   x_cached: lhs.x_cached + rhs.x_cached,
                   x_reason: lhs.x_reason + rhs.x_reason,
+                  xr_in: (lhs.xr_in ?? 0) + (rhs.xr_in ?? 0),
+                  xr_out: (lhs.xr_out ?? 0) + (rhs.xr_out ?? 0),
+                  xr_cached: (lhs.xr_cached ?? 0) + (rhs.xr_cached ?? 0),
+                  xr_reason: (lhs.xr_reason ?? 0) + (rhs.xr_reason ?? 0),
                   p_in: lhs.p_in + rhs.p_in,
                   p_out: lhs.p_out + rhs.p_out,
                   p_cr: lhs.p_cr + rhs.p_cr,
@@ -1185,6 +1202,24 @@ struct DashboardView: View {
                                  reason: codex.reason, tokens: codexTokens))
         }
 
+        if let reserve = usage.codex.reserveRanges?.get(key) {
+            let reserveTokens = reserve.in + reserve.cached + reserve.out
+            if !reserve.models.isEmpty {
+                for model in reserve.models {
+                    let tokens = model.in + model.cr + model.cw + model.out
+                    if tokens > 0 || model.cost > 0 {
+                        out.append(modelCost(name: "\(model.name) (Codex Reserve)", cost: model.cost, tool: "codex_reserve",
+                                             input: model.in, out: model.out, cr: model.cr, cw: model.cw,
+                                             reason: model.reason, tokens: tokens))
+                    }
+                }
+            } else if reserveTokens > 0 || reserve.cost > 0 {
+                out.append(modelCost(name: "Luna Reserve (Codex Reserve)", cost: reserve.cost, tool: "codex_reserve",
+                                     input: reserve.in + reserve.cached, out: reserve.out,
+                                     reason: reserve.reason, tokens: reserveTokens))
+            }
+        }
+
         let gemini = usage.gemini.ranges.get(key)
         for model in gemini.models {
             let tokens = model.in + model.out + model.cached + model.thoughts
@@ -1244,6 +1279,7 @@ struct DashboardView: View {
         appendTokenModels(usage.kimicode.ranges.get(key).models, tool: "kimicode", suffix: "Kimi Code", to: &out)
         appendTokenModels(usage.musecode.ranges.get(key).models, tool: "musecode", suffix: "Muse Code",
                           reasonIncludedInOutput: true, to: &out)
+        appendTokenModels(usage.cmdcode.ranges.get(key).models, tool: "cmdcode", suffix: "Command Code", to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -1283,13 +1319,15 @@ struct DashboardView: View {
     static func usageTotalTokens(_ usage: Usage, _ key: RangeKey) -> Int {
         let claude = usage.claude.ranges.get(key)
         let codex = usage.codex.ranges.get(key)
+        let reserve = usage.codex.reserveRanges?.get(key) ?? CodexRange()
         let gemini = usage.gemini.ranges.get(key)
         let grok = usage.grok.ranges.get(key)
         let qoderwork = usage.qoderwork.ranges.get(key)
         let qoder = usage.qoder.ranges.get(key)
         let qodercli = usage.qodercli.ranges.get(key)
         return claude.in + claude.out + claude.cr + claude.cw
-            + codex.in + codex.cached + codex.out
+            + codex.tokens
+            + reserve.tokens
             + gemini.in + gemini.cached + gemini.out + gemini.thoughts
             + (grok.usage_available ? grok.tokens : 0)
             + qoderwork.in + qoderwork.out
@@ -1307,11 +1345,13 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
             + tokenUsageTotal(usage.kimicode.ranges.get(key))
             + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
+            + tokenUsageTotal(usage.cmdcode.ranges.get(key))
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
         usage.claude.ranges.get(key).cost
             + usage.codex.ranges.get(key).cost
+            + (usage.codex.reserveRanges?.get(key).cost ?? 0)
             + usage.gemini.ranges.get(key).cost
             + usage.hermes.ranges.get(key).cost
             + usage.zcode.ranges.get(key).cost
@@ -1326,6 +1366,7 @@ struct DashboardView: View {
             + usage.qwencode.ranges.get(key).cost
             + usage.kimicode.ranges.get(key).cost
             + usage.musecode.ranges.get(key).cost
+            + usage.cmdcode.ranges.get(key).cost
     }
 
     static func tokenUsageTotal(

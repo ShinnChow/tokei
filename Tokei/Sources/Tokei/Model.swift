@@ -150,6 +150,8 @@ struct CodexRanges: Codable {
 
 struct CodexStat: Codable {
     var ranges: CodexRanges
+    var reserveRanges: CodexRanges?
+    var reserveQuota: CodexReserveQuota?
     var p5: Double?
     var pw: Double?
     var r5: Int?
@@ -159,12 +161,35 @@ struct CodexStat: Codable {
     var pw_stale: Bool?
     var plan: String?
     var reset_cards: CodexResetCards?
+
+    enum CodingKeys: String, CodingKey {
+        case ranges
+        case reserveRanges = "reserve_ranges"
+        case reserveQuota = "reserve_quota"
+        case p5, pw, r5, rw, q_updated, p5_stale, pw_stale, plan, reset_cards
+    }
 }
 
 struct CodexResetCards: Codable {
     var count: Int
     var expires: [Int]
     var updated: Int?
+}
+
+struct CodexReserveQuota: Codable {
+    var usedPercent: Double?
+    var resetsAt: Int?
+    var windowMinutes: Int?
+    var plan: String?
+    var updated: Int?
+    var stale: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case resetsAt = "resets_at"
+        case windowMinutes = "window_minutes"
+        case plan, updated, stale
+    }
 }
 
 struct GeminiModelStat: Codable, Identifiable {
@@ -935,6 +960,7 @@ struct Usage: Codable {
     var qwenwork: QwenWorkQuota
     var kimicode: KimiCodeStat
     var musecode: TokenUsageStat
+    var cmdcode: TokenUsageStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -946,7 +972,7 @@ struct Usage: Codable {
         case qoder, qoderwork, qodercli, hermes, zcode, mimocode
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, musecode, prime_agent, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, musecode, cmdcode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -976,6 +1002,7 @@ struct Usage: Codable {
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
         kimicode = try c.decodeIfPresent(KimiCodeStat.self, forKey: .kimicode) ?? KimiCodeStat(ranges: .empty)
         musecode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .musecode) ?? TokenUsageStat(ranges: .empty)
+        cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()

@@ -122,7 +122,7 @@ enum UsageShareImage {
     static func tint(for name: String) -> Color {
         switch name {
         case "Claude Code": return Theme.claude
-        case "Codex": return Theme.codex
+        case "Codex", "Luna Reserve": return Theme.codex
         case "Gemini": return Theme.gemini
         case "Grok": return Theme.grok
         case "Grok Bot": return Theme.grokBot
@@ -140,6 +140,7 @@ enum UsageShareImage {
         case "Qwen Code": return Theme.qwencode
         case "Kimi Code": return Theme.kimicode
         case "Muse Code": return Theme.musecode
+        case "Command Code": return Theme.cmdcode
         case "Prime Agent": return Theme.primeAgent
         case "DeepSeek Harness": return Theme.deepseekHarness
         default: return Theme.tTertiary

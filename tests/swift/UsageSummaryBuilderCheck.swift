@@ -17,6 +17,18 @@ struct UsageSummaryBuilderCheck {
 
         let usage = try decodeFixture(Self.fixtureJSON)
         let allVisible = UsageToolVisibility.allVisible
+        let staleReserveQuota = try JSONDecoder().decode(
+            CodexReserveQuota.self,
+            from: Data(#"{"used_percent":42,"stale":true}"#.utf8)
+        )
+        try expect(staleReserveQuota.usedPercent == 42 && staleReserveQuota.stale == true,
+                   "reserve stale flag must decode")
+        let legacyReserveQuota = try JSONDecoder().decode(
+            CodexReserveQuota.self,
+            from: Data(#"{"used_percent":42}"#.utf8)
+        )
+        try expect(legacyReserveQuota.stale == nil,
+                   "reserve quota without stale must remain decoder-compatible")
 
         let todayText = UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: allVisible, updated: "12:34"
@@ -26,9 +38,11 @@ struct UsageSummaryBuilderCheck {
         try expect(todayText.contains("$1.25"), "claude cost missing: \(todayText)")
         try expect(todayText.contains("Codex"), "codex line missing: \(todayText)")
         try expect(todayText.contains("$0.50"), "codex cost missing: \(todayText)")
+        try expect(todayText.contains("Luna Reserve"), "reserve line missing: \(todayText)")
+        try expect(todayText.contains("$0.25"), "reserve cost missing: \(todayText)")
         try expect(todayText.contains("合计"), "total line missing: \(todayText)")
-        // Claude 1.25 + Codex 0.50 + Gemini 0.10
-        try expect(todayText.contains("$1.85"), "total cost wrong: \(todayText)")
+        // Claude 1.25 + Codex 0.50 + Luna Reserve 0.25 + Gemini 0.10
+        try expect(todayText.contains("$2.10"), "total cost wrong: \(todayText)")
         try expect(todayText.contains("更新于 12:34"), "updated missing: \(todayText)")
         try expect(!todayText.contains("更新于 更新"), "must not double-prefix bare time: \(todayText)")
         try expect(todayText.contains("Gemini"), "gemini should appear when visible: \(todayText)")
@@ -74,8 +88,9 @@ struct UsageSummaryBuilderCheck {
                    "hidden gemini must be omitted: \(hiddenText)")
         try expect(hiddenText.contains("Claude Code"), "claude still required: \(hiddenText)")
         try expect(hiddenText.contains("Codex"), "codex still required: \(hiddenText)")
-        try expect(hiddenText.contains("$1.75"),
-                   "total without gemini should be $1.75: \(hiddenText)")
+        try expect(hiddenText.contains("Luna Reserve"), "reserve still required: \(hiddenText)")
+        try expect(hiddenText.contains("$2.00"),
+                   "total without gemini should be $2.00: \(hiddenText)")
 
         // Empty tools (OpenCode with zeros) must not dump noise.
         try expect(!todayText.contains("OpenCode"),
@@ -91,9 +106,10 @@ struct UsageSummaryBuilderCheck {
         let lines = UsageSummaryBuilder.toolLines(
             usage: usage, range: .today, visibility: hideGemini
         )
-        try expect(lines.map(\.name) == ["Claude Code", "Codex"],
+        try expect(lines.map(\.name) == ["Claude Code", "Codex", "Luna Reserve"],
                    "tool order/names: \(lines.map(\.name))")
-        try expect(lines.map(\.id) == ["claude", "codex"], "tool ids: \(lines.map(\.id))")
+        try expect(lines.map(\.id) == ["claude", "codex", "codex_reserve"],
+                   "tool ids: \(lines.map(\.id))")
         try expect(lines[0].cost == 1.25, "claude cost value")
         try expect(lines[0].tokens == 1350, "claude tokens 1000+200+100+50")
         try expect(lines[0].input == 1000, "claude input detail")
@@ -101,6 +117,8 @@ struct UsageSummaryBuilderCheck {
         try expect(lines[0].cacheRead == 100, "claude cache read")
         try expect(lines[1].cost == 0.50, "codex cost value")
         try expect(lines[1].tokens == 350, "codex tokens 100+50+200")
+        try expect(lines[2].cost == 0.25, "reserve cost value")
+        try expect(lines[2].tokens == 70, "reserve tokens 40+10+20")
 
         try expect(usage.openclaw.ranges.today.reason == 0,
                    "older OpenClaw snapshots without reason must decode as zero")
@@ -111,10 +129,10 @@ struct UsageSummaryBuilderCheck {
                    "OpenClaw reasoning tokens must survive decode and summary aggregation")
 
         let totals = UsageSummaryBuilder.totals(for: lines)
-        try expect(totals.tools == 2, "totals tools")
-        try expect(abs(totals.cost - 1.75) < 0.001, "totals cost")
-        try expect(totals.input == 1100, "totals input")
-        try expect(totals.output == 400, "totals output")
+        try expect(totals.tools == 3, "totals tools")
+        try expect(abs(totals.cost - 2.00) < 0.001, "totals cost")
+        try expect(totals.input == 1140, "totals input")
+        try expect(totals.output == 420, "totals output")
         try expect(hiddenText.contains("输入") || UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: hideGemini
         ).contains("输入"), "text totals include input detail")
@@ -197,6 +215,14 @@ struct UsageSummaryBuilderCheck {
       "codex": {
         "ranges": {
           "today": {"hit": 20, "in": 100, "cached": 50, "out": 200, "reason": 10, "cost": 0.5, "sessions": 1, "models": []},
+          "yesterday": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
+        },
+        "reserve_ranges": {
+          "today": {"hit": 20, "in": 40, "cached": 10, "out": 20, "reason": 5, "cost": 0.25, "sessions": 1, "models": []},
           "yesterday": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
           "week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
           "last_week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},

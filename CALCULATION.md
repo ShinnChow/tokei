@@ -27,6 +27,7 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP | JSON-RPC，`qw_query` / `qwenwork.usage`（默认关闭） |
 | Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` | JSONL, protocol 1.5 `usage.record` / protocol 1 `StatusUpdate.token_usage` |
 | Muse Code | `${TOKEI_MUSE_DIR:-~/.local/share/muse}/sessions/*/*/*/session.jsonl` | JSONL, `model_completed` 事件 `usage` + `model` |
+| Command Code | `${TOKEI_CMDCODE_DIR:-~/.commandcode}/projects/*/*.jsonl` | JSONL, assistant message 顶层 `usage` + `costUsd` |
 | Kimi Code(额度) | `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` → `api.kimi.com/coding/v1/usages` | 本机登录态只读查询，见 §5 |
 | ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite, `model_usage` Token 明细 |
 | MiMoCode | `$XDG_DATA_HOME/mimocode/mimocode*.db`，macOS 使用 `~/Library/Application Support/mimocode/` | SQLite, OpenCode-compatible `message` 数据 |
@@ -138,6 +139,18 @@ protocol 1.5 为每个 Agent 单独保存 `agents/<agent>/wire.jsonl`。Tokei �
 只读取 `model_completed` 用量事件，按 `source_run_record_id` 去重；`goal_usage_attribution`
 是归因账本，不重复计入。项目取自 `runtime.session.metadata` 的 `workspace_root`，
 时刻取自记录的 `recorded_at`（微秒）。
+
+**Command Code** — 各 token 字段是独立桶:
+- 输入 = `usage.inputTokens`
+- 输出 = `usage.outputTokens`
+- 缓存读 = `usage.cacheReadTokens`
+- 缓存写 = `usage.cacheWriteTokens`
+- 成本 = `usage.costUsd`（仅接受有限非负值，直接采用不估算）
+
+只读取真实会话转录中的 assistant `usage`，跳过 checkpoints、prompts 与 hooks audit
+sidecar，并按消息身份与时刻跨文件去重。兼容顶层和嵌套消息结构，项目取自 session
+记录的 `cwd`，时刻取自 `timestamp`（ISO 8601，兼容 `Z` 后缀）。
+
 **Prime Agent** — Usage 字段与 Pi Coding Agent 一致:
 - 输入 = `usage.input`
 - 输出 = `usage.output`
@@ -355,6 +368,21 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQ
 - `plan_type` — 套餐类型
 
 兼容 Codex 新旧返回结构:旧结构通常是 primary=5h、secondary=周;新结构可能只有 primary=周。
+
+### Codex Luna Reserve(第二缸油)
+
+OpenAI 给 Codex 的 fallback 额度:常规高级模型额度见底后,会话切到 `gpt-reserve`,
+单独计量、单独重置,不占用主额度。日志特征:
+
+- 用量:`turn_context`/`session_meta` 的 `payload.model` 为 `gpt-reserve`;
+  同一文件可先走主额度后切 Reserve,因此事件级以 `token_count` 的
+  `rate_limits` 为准(`limit_name=gpt-reserve` 或 `limit_id=base_model_inference`,
+  主额度是 `limit_id=codex`)
+- 额度:`limit_name=gpt-reserve` 的 `primary`(周窗口)的已用百分比与重置时间,
+  与主额度独立展示
+- 成本:Reserve 按 Luna 级别计价(`openai/gpt-5.6-luna` $0.20/$1.20),
+  不吃 `gpt-5.5` 兜底;展示名为 `Luna Reserve` 而非裸 `GPT`
+- 主用量/Daily/回顾/项目足迹均扣除 Reserve 部分,互不重叠
 
 重置卡使用当前 Codex 登录态只读查询
 `/backend-api/wham/rate-limit-reset-credits`。本地仅缓存可用数量和到期时间，不保存卡片

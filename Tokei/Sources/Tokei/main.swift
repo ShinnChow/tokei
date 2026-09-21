@@ -360,7 +360,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
                     var total = 0
                     if showC { let r = u.claude.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
-                    if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
+                    if showX {
+                        let r = u.codex.ranges.get(.today)
+                        let reserve = u.codex.reserveRanges?.get(.today) ?? CodexRange()
+                        total += r.tokens + reserve.tokens
+                    }
                     if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                     if showWAI { let r = u.workbuddyAI.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
