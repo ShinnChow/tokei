@@ -516,9 +516,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func updatePanelLayout(for button: NSStatusBarButton) {
         panelLayout.update(
+            fitting: measuredPanelSize(),
             anchorVisibleFrame: button.window?.screen?.visibleFrame,
             fallbackVisibleFrame: NSScreen.screens.first?.visibleFrame
         )
+    }
+
+    /// 量一次面板内容的自然尺寸。
+    ///
+    /// 用一个一次性的 host 渲染 `scrollable: false` 的同一个视图——那个分支不套
+    /// 滚动视图、也不把自己钉到 layout 的尺寸上，所以报出来的就是内容本身要多大。
+    /// 直接问正在显示的 host 是问不出来的：它被固定画布钉死，只会回答画布的尺寸。
+    ///
+    /// 只在打开之前调用，开着的时候绝不重量——见 `PanelPlacement.contentSize`。
+    private func measuredPanelSize() -> CGSize {
+        let probe = NSHostingController(
+            rootView: PanelView(store: store, layout: panelLayout, scrollable: false))
+        probe.view.layoutSubtreeIfNeeded()
+        let size = probe.sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                                 height: CGFloat.greatestFiniteMagnitude))
+        return size.width > 0 && size.height > 0 ? size : .zero
     }
 
     func popoverDidShow(_ notification: Notification) {
