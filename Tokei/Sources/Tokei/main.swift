@@ -19,6 +19,9 @@ final class Store: ObservableObject {
     // popover 的视图树启动时建好后就不再释放,面板关上也还活着。
     // 动画类视图得靠这个标志判断自己是不是真的能被看见。
     @Published var popoverVisible = false
+    /// 正在跑刷新。空态卡片靠它区分「这个区间真没用量」和「还没刷出来」——
+    /// 两者长得一模一样，但一个是结论，一个只是还没轮到。
+    @Published var isRefreshing = false
 
     let syncManager = SyncManager()
     let quotaHistory = QuotaHistoryStore.shared
@@ -31,10 +34,13 @@ final class Store: ObservableObject {
     @AppStorage("syncEnabled") var syncEnabled = false
 
     private var retryCount = 0
-    private var refreshInFlight = false
+    private var refreshInFlight = false { didSet { isRefreshing = refreshInFlight } }
     private var refreshPending = false
     private var dashboardPrewarmStarted = false
     private var quotaDetailPrewarmPending = false
+    /// 上一次刷新开跑的时刻。调度按它算间隔，所以「面板打开顺手刷的那次」
+    /// 也算数，不会开完面板立刻又被定时器刷一遍。
+    private(set) var lastRefreshStartedAt = Date.distantPast
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -79,6 +85,7 @@ final class Store: ObservableObject {
     }
 
     private func performRefresh() {
+        lastRefreshStartedAt = Date()
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
@@ -252,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return menu
     }()
     var timer: Timer?
+    /// 面板关着时按 30 秒刷；开着时用户正盯着看，30 秒的空窗会让人以为统计坏了，
+    /// 所以加密到 10 秒。关上就退回去，免得白白每 10 秒拉起一次 Python。
+    static let idleRefreshInterval: TimeInterval = 30
+    static let visibleRefreshInterval: TimeInterval = 10
     var globalMouseMonitor: Any?
     weak var popoverAnchorButton: NSStatusBarButton?
 
@@ -307,9 +318,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         Updater.shared.checkForUpdate()
         ActivityReporter.shared.reportLaunchIfNeeded(appVersion: Updater.releaseTag)
         autoFetchPricing()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.store.refresh()
+        // 用 .common 模式而不是 Timer.scheduledTimer 的默认 .default：
+        // 后者在你滚动或拖动面板时 runloop 进入 .eventTracking，定时器直接停摆——
+        // 越是盯着面板翻看越不更新。这里每 2 秒空转一次，到点了才真去刷。
+        let tick = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let due = self.store.popoverVisible
+                ? Self.visibleRefreshInterval : Self.idleRefreshInterval
+            guard Date().timeIntervalSince(self.store.lastRefreshStartedAt) >= due else { return }
+            self.store.refresh()
         }
+        RunLoop.main.add(tick, forMode: .common)
+        timer = tick
         Timer.scheduledTimer(withTimeInterval: Updater.automaticCheckInterval, repeats: true) { _ in
             Updater.shared.checkForUpdate()
         }

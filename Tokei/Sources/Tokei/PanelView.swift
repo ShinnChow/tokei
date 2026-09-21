@@ -609,7 +609,10 @@ struct PanelView: View {
                     modelDisclosure(claudeRows, open: $claudeModelsOpen, tint: Theme.claude)
                 }
             } else if !compactExpired && quotaState != .unavailable {
-                usageEmptyHint
+                usageEmptyHint(recent: recentUsageHint { key in
+                    let range = c.ranges.get(key)
+                    return range.in + range.out + range.cr + range.cw
+                })
             }
 
             if compactExpired {
@@ -683,7 +686,10 @@ struct PanelView: View {
                                          reasonIncludedInOutput: true)
                 }
             } else if hasQuotaData {
-                usageEmptyHint
+                usageEmptyHint(recent: recentUsageHint { key in
+                    let range = x.ranges.get(key)
+                    return range.in + range.out + range.reason
+                })
             }
             if hasQuotaData {
                 thinDivider
@@ -756,7 +762,10 @@ struct PanelView: View {
                     tokenModelDisclosure(r.models, open: $kimiCodeModelsOpen, tint: Theme.kimicode)
                 }
             } else if x.hasQuota {
-                usageEmptyHint
+                usageEmptyHint(recent: recentUsageHint { key in
+                    let range = x.ranges.get(key)
+                    return range.in + range.out + range.cr + range.cw + range.reason
+                })
             } else {
                 emptyHint
             }
@@ -947,7 +956,7 @@ struct PanelView: View {
             } else if !hasUsage {
                 Text("请打开一次 Devin 桌面端并登录，它会把套餐额度写入本地；"
                      + "Token 统计来自 Devin CLI 的会话库。")
-                    .font(.system(size: PanelFontSize.scaled(10)))
+                    .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1272,7 +1281,10 @@ struct PanelView: View {
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if !compactExpired && quotaState != .unavailable {
-                usageEmptyHint
+                usageEmptyHint(recent: recentUsageHint { key in
+                    let range = g.ranges.get(key)
+                    return range.in + range.out + range.cr + range.reason
+                })
             }
 
             if compactExpired {
@@ -1873,10 +1885,27 @@ struct PanelView: View {
             .foregroundStyle(Theme.tTertiary)
     }
 
-    var usageEmptyHint: some View {
-        Text("\(sel.label)暂无用量，额度状态如下")
-            .font(.system(size: Theme.fontSize(10)))
-            .foregroundStyle(Theme.tTertiary)
+    /// 空态措辞见 `UsageEmptyState`：刷新中 / 真的没有，两者必须能分辨。
+    func usageEmptyHint(recent: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if store.isRefreshing {
+                Text("正在刷新\(sel.label)用量…")
+            } else {
+                Text("\(sel.label)暂无用量，额度状态如下")
+                if let recent = recent {
+                    Text("最近一次 · \(recent)")
+                }
+            }
+        }
+        .font(.system(size: Theme.fontSize(10)))
+        .foregroundStyle(Theme.tTertiary)
+    }
+
+    func recentUsageHint(_ tokens: (RangeKey) -> Int) -> String? {
+        guard case .empty(let recent) = UsageEmptyState.resolve(
+            selected: sel, refreshing: false, tokens: tokens
+        ) else { return nil }
+        return recent
     }
 
     func quotaStateNotice(
