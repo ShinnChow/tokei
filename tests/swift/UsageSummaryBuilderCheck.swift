@@ -35,6 +35,21 @@ struct UsageSummaryBuilderCheck {
         try expect(todayText.contains("$0.10") || todayText.contains("$0.1"),
                    "gemini cost missing: \(todayText)")
 
+        var mixed = usage
+        mixed.deepseekHarness.ranges.today.cost = 0.31
+        mixed.deepseekHarness.ranges.today.cost_cny = 5.02
+        mixed.deepseekHarness.ranges.today.in = 100
+        let nativeText = UsageSummaryBuilder.text(usage: mixed, range: .today,
+                                                 visibility: allVisible)
+        try expect(nativeText.contains("¥5.02"), "native CNY missing: \(nativeText)")
+        try expect(nativeMoney(0.31, 5.02) == "$0.31 + ¥5.02", "currencies must stay separate")
+        let nativeTotals = UsageSummaryBuilder.totals(for: UsageSummaryBuilder.toolLines(
+            usage: mixed, range: .today, visibility: allVisible))
+        try expect(nativeTotals.cost_cny == 5.02, "CNY total mismatch")
+        let decoded = try JSONDecoder().decode(TokenUsageRange.self, from:
+            Data(#"{"cost":0.31,"cost_cny":5.02}"#.utf8))
+        try expect(decoded.cost == 0.31 && decoded.cost_cny == 5.02, "currency decoding mismatch")
+
         // Store path uses lastUpdated = "更新 HH:mm:ss" (main.swift); strip, don't nest.
         let storeStampText = UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
@@ -143,6 +158,13 @@ struct UsageSummaryBuilderCheck {
             let hasImage = pb.canReadObject(forClasses: [NSImage.self], options: nil)
                 || pb.data(forType: .png) != nil
             try expect(hasImage, "pasteboard should contain image/png")
+        }
+
+        // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
+        let gray = NSColor(Theme.tTertiary)
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
+            let tint = NSColor(UsageShareImage.tint(for: name))
+            try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
         }
 
         print("usage summary builder checks passed")
