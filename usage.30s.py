@@ -254,6 +254,9 @@ _DEFAULT_PRICES = {
     "openai/gpt-5.6-terra":          {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 2.5},
     "openai/gpt-5.6-luna":           {"in": 0.2,   "out": 1.2,  "cache_read": 0.02,   "cache_write": 0.25},
     "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
+    "openai/gpt-6-astra":            {"in": 10.0,  "out": 50.0, "cache_read": 1.0,    "cache_write": 12.5},
+    "openai/gpt-6-sol":              {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    "openai/gpt-6-luna":             {"in": 0.1,   "out": 0.5,  "cache_read": 0.01,   "cache_write": 0.125},
     "qwen/qwen3.8-max":              {"in": 2.0,   "out": 6.0,  "cache_read": 0.25,   "cache_write": 2.5},
     "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
     "deepseek/deepseek-v4-pro":      {"in": 0.66,  "out": 1.98, "cache_read": 0.022,  "cache_write": 0.0},
@@ -345,6 +348,11 @@ _PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
 # 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
 # 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
 _BUILTIN_OVERRIDE_MODELS = {
+    # OpenAI Standard API rates, verified 2026-09-23:
+    # https://developers.openai.com/api/docs/pricing
+    **{model: dict(_DEFAULT_PRICES[model]) for model in (
+        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna",
+    )},
     "openai/gpt-5.6-sol": {
         "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
     },
@@ -664,7 +672,7 @@ def nice_model(m: str) -> str:
         mt = re.search(r"gpt[- ]?(\d+(?:\.\d+)?)", s)
         version = mt.group(1) if mt else ""
         variant_labels = []
-        for token, label in (("sol", "Sol"), ("luna", "Luna"), ("terra", "Terra"),
+        for token, label in (("astra", "Astra"), ("sol", "Sol"), ("luna", "Luna"), ("terra", "Terra"),
                              ("mini", "Mini"), ("pro", "Pro")):
             if re.search(rf"(?:^|[-_/ ]){token}(?:$|[-_/ ])", s):
                 variant_labels.append(label)
@@ -768,7 +776,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 7
+_CODEX_PARSER_VERSION = 8
 _CODEX_ACCOUNTING_VERSION = 7
 
 
@@ -3216,8 +3224,10 @@ def _codex_probe_record_header(data):
 
 
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
-                              model_limit=4 * 1024, start_offset=0, end_offset=None):
+                              model_limit=64 * 1024, start_offset=0, end_offset=None):
     """Yield model changes and token records without buffering unrelated large JSONL lines."""
+    # Recent permission profiles put payload.model beyond the old 4 KB prefix.
+    # Keep model probing bounded so large instructions never require full buffering.
     prefix = bytearray()
     candidate = None
     kind = None
@@ -3670,7 +3680,7 @@ def scan_codex(bounds, cache):
                         lr = last.get("reasoning_output_tokens", 0) or 0
                         # 无模型字段(老版本 CLI 日志/截断会话)标为 unknown,不冒充 gpt-5.5;
                         # 计费仍按 gpt-5.5 保守估算(下行 price_model 兜底)
-                        model = _known_id_or_raw(file_model) or "unknown"
+                        model = _model_identity_id(file_model) or "unknown"
                         # 同一文件可先走主额度后切 Reserve:事件级额度优先于文件级模型。
                         if _codex_is_reserve_limits(rl):
                             model = _CODEX_RESERVE_MODEL

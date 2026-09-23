@@ -357,10 +357,10 @@ class CodexLunaReserveTests(unittest.TestCase):
                 self.assertEqual(reserve["in"], 50)
                 self.assertEqual(main["in"] + reserve["in"], 150)
                 self.assertEqual(main["out"] + reserve["out"], 15)
-                self.assertEqual(USAGE._CODEX_PARSER_VERSION, 7)
+                self.assertGreaterEqual(USAGE._CODEX_PARSER_VERSION, 7)
                 self.assertEqual(USAGE._CODEX_ACCOUNTING_VERSION, 7)
                 entry = cache["codex"][str(path.resolve())]
-                self.assertEqual(entry["parser_version"], 7)
+                self.assertEqual(entry["parser_version"], USAGE._CODEX_PARSER_VERSION)
                 self.assertEqual(entry["accounting_version"], 7)
                 ledger = USAGE._load_ledger()["tools"]
                 self.assertEqual(ledger["codex"][day_key]["in"], 100)
