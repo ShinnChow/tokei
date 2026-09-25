@@ -625,14 +625,17 @@ struct PanelView: View {
                 )
             } else if quotaState != .unavailable {
                 thinDivider
-                if let q5 = c.q5, c.q5_stale != true {
-                    quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset, tint: Theme.claude)
+                if let q5 = c.q5 {
+                    quotaRow(title: "5h 剩余", pct: 100 - q5, reset: c.q5_reset,
+                             tint: Theme.claude, stale: c.q5_stale == true)
                 }
-                if let q7 = c.q7, c.q7_stale != true {
-                    quotaRow(title: "周 · 全部剩余", pct: 100 - q7, reset: c.q7_reset, tint: Theme.claude)
+                if let q7 = c.q7 {
+                    quotaRow(title: "周 · 全部剩余", pct: 100 - q7, reset: c.q7_reset,
+                             tint: Theme.claude, stale: c.q7_stale == true)
                 }
-                if let qf = c.qf, c.qf_stale != true {
-                    quotaRow(title: "周 · Fable 剩余", pct: 100 - qf, reset: c.qf_reset, tint: .orange)
+                if let qf = c.qf {
+                    quotaRow(title: "周 · Fable 剩余", pct: 100 - qf, reset: c.qf_reset,
+                             tint: .orange, stale: c.qf_stale == true)
                 }
                 if quotaState == .expired {
                     quotaStateNotice(
@@ -693,16 +696,20 @@ struct PanelView: View {
             if hasQuotaData {
                 thinDivider
             }
-            if let p5 = x.p5, x.p5_stale != true {
-                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.codex)
+            if let p5 = x.p5 {
+                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5,
+                         tint: Theme.codex, stale: x.p5_stale == true)
             }
-            if let pw = x.pw, x.pw_stale != true {
-                quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw, tint: Theme.codex)
+            if let pw = x.pw {
+                quotaRow(title: "周剩余", pct: 100 - pw, reset: x.rw,
+                         tint: Theme.codex, stale: x.pw_stale == true)
             }
             // Reserve 常驻:额度行跟 5h/周排在一起;按模型紧跟额度行,不跟重置卡/plan隔开。
-            if let q = x.reserveQuota, let pct = q.usedPercent, q.stale != true {
-                quotaRow(title: "Reserve 剩余", pct: 100 - pct, detail: "常规额度外", reset: q.resetsAt, tint: Theme.codex)
-            } else if let q = x.reserveQuota, q.stale == true {
+            if let q = x.reserveQuota, let pct = q.usedPercent {
+                quotaRow(title: "Reserve 剩余", pct: 100 - pct, detail: "常规额度外",
+                         reset: q.resetsAt, tint: Theme.codex, stale: q.stale == true)
+            }
+            if let q = x.reserveQuota, q.stale == true {
                 quotaStateNotice(
                     title: "Reserve 额度读数已过期",
                     detail: "重置后已有新的 Reserve 消耗；等待下一条额度记录更新。",
@@ -771,12 +778,14 @@ struct PanelView: View {
             if x.hasQuota || x.hasStaleQuota {
                 thinDivider
             }
-            if let p5 = x.p5, x.p5_stale != true {
-                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5, tint: Theme.kimicode)
+            if let p5 = x.p5 {
+                quotaRow(title: "5h 剩余", pct: 100 - p5, reset: x.r5,
+                         tint: Theme.kimicode, stale: x.p5_stale == true)
             }
-            if let pw = x.pw, x.pw_stale != true {
+            if let pw = x.pw {
                 // 接口只给了这一档的重置时刻,没有说周期是周还是月,所以标题不写周期名。
-                quotaRow(title: "订阅额度剩余", pct: 100 - pw, reset: x.rw, tint: Theme.kimicode)
+                quotaRow(title: "订阅额度剩余", pct: 100 - pw, reset: x.rw,
+                         tint: Theme.kimicode, stale: x.pw_stale == true)
             }
             if x.hasStaleQuota {
                 quotaStateNotice(
@@ -1295,11 +1304,12 @@ struct PanelView: View {
                     tint: Theme.grok,
                     warning: true
                 )
-            } else if let pct = g.pct, g.stale != true {
+            } else if let pct = g.pct {
                 if hasUsage { thinDivider }
                 let title = (g.window == "month") ? "月剩余" : "周剩余"
                 // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
-                quotaRow(title: title, pct: 100 - pct, reset: g.reset, tint: Theme.grok)
+                quotaRow(title: title, pct: 100 - pct, reset: g.reset,
+                         tint: Theme.grok, stale: g.stale == true)
                 ForEach(g.products.filter { $0.pct != nil }) { product in
                     if let used = product.pct {
                         grokProductShareRow(
@@ -2377,8 +2387,15 @@ struct PanelView: View {
         }
     }
 
-    func quotaRow(title: String, pct: Double, detail: String? = nil, reset: Int?, tint: Color) -> some View {
-        VStack(spacing: 4) {
+    /// 一行额度。
+    ///
+    /// `stale` 为真时仍然把数字画出来，只是压暗——额度过期就整行消失的话，卡片
+    /// 会在有和没有之间反复横跳，用户既看不出上次是多少，也说不清是坏了还是
+    /// 真没有。压暗加上下方的过期提示，足以说明「这是最后一次读到的值」。
+    func quotaRow(title: String, pct: Double, detail: String? = nil, reset: Int?,
+                  tint: Color, stale: Bool = false) -> some View {
+        let low = pct <= 15 && !stale
+        return VStack(spacing: 4) {
             HStack {
                 Text(title).font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tSecondary)
                 if let d = detail {
@@ -2389,7 +2406,8 @@ struct PanelView: View {
                 Spacer()
                 Text(SubscriptionQuotaPresentation.remainingLabel(pct))
                     .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
-                    .foregroundStyle(pct <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(Theme.tPrimary))
+                    .foregroundStyle(low ? AnyShapeStyle(.red)
+                                         : AnyShapeStyle(stale ? Theme.tTertiary : Theme.tPrimary))
                 // 无重置时间时不显示「· ?」，避免分产品行误导。
                 if reset != nil {
                     Text("· \(Fmt.reset(reset))")
@@ -2397,9 +2415,11 @@ struct PanelView: View {
                         .foregroundStyle(Theme.tTertiary)
                 }
             }
-            MiniBar(value: pct, tint: pct <= 15 ? .red : tint)
+            MiniBar(value: pct, tint: low ? .red : tint.opacity(stale ? 0.4 : 1))
         }
-        .help(reset != nil ? "\(Fmt.countdown(reset)) 后重置" : "")
+        .opacity(stale ? 0.65 : 1)
+        .help(stale ? "上次读到的额度，尚未刷新"
+                    : (reset != nil ? "\(Fmt.countdown(reset)) 后重置" : ""))
     }
 
     func claudeQuotaStatus(_ stat: ClaudeStat) -> some View {
