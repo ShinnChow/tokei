@@ -344,10 +344,20 @@ struct SegmentedTabs: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard sel != k else { return }
-                        sel = k
+                        // 高亮块照常做弹簧动画，但页面切换本身必须留在动画之外。
+                        //
+                        // 两者写在同一个闭包里时，SwiftUI 会把它们并进同一个事务，
+                        // 于是整块面板的布局跟着弹簧一起动。面板是挂在菜单栏按钮上的
+                        // NSPopover，开着的时候做动画式布局会让 AppKit 重新挑选屏幕和
+                        // 锚点——在全屏 Space 与外接显示器下会把面板甩到屏幕边上。
+                        // main.swift 里的 sizingOptions = [] 与 animates = false 堵的是
+                        // 同一件事的另外两个入口，这里是第三个。
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                             highlighted = k
                         }
+                        var pageChange = Transaction()
+                        pageChange.disablesAnimations = true
+                        withTransaction(pageChange) { sel = k }
                     }
             }
         }

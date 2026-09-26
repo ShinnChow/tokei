@@ -44,6 +44,22 @@ class PopoverPlacementTests(unittest.TestCase):
         self.assertNotIn("PanelContentSizeKey", panel_source)
         self.assertNotIn("NSScreen.main?.visibleFrame", panel_source)
 
+    def test_switching_pages_never_animates_the_panel_layout(self):
+        """面板挂在菜单栏按钮上，开着的时候做动画式布局会让 AppKit 重新挑选屏幕
+        和锚点——全屏 Space 与外接显示器下会把面板甩到屏幕边上（issue #97）。
+
+        高亮块可以做动画，页面切换不行。两者写在同一个闭包里时 SwiftUI 会并进
+        同一个事务，所以切换必须显式关掉动画。
+        """
+        design = (ROOT / "Tokei/Sources/Tokei/Design.swift").read_text()
+        app_source = (ROOT / "Tokei/Sources/Tokei/main.swift").read_text()
+
+        self.assertIn("pageChange.disablesAnimations = true", design)
+        self.assertIn("withTransaction(pageChange) { sel = k }", design)
+        # 同一件事的另外两个入口，一并守住
+        self.assertIn("host.sizingOptions = []", app_source)
+        self.assertIn("popover.animates = false", app_source)
+
     def test_panel_size_follows_content_and_screen_not_a_hardcoded_constant(self):
         """面板高度不能是写死的数：对某台机器合适的值，换块屏幕不是浪费就是超出。
 
