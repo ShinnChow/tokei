@@ -66,7 +66,7 @@ final class DataLoader {
     }
 
     private struct ClaudeQuotaState: Codable, Equatable {
-        var version = 2
+        var version = 3
         var candidate: ClaudeQuotaCandidate?
         var snapshot: ClaudeQuotaSnapshot?
         var scanModified: TimeInterval = -1
@@ -78,6 +78,10 @@ final class DataLoader {
     private static let claudeQuotaFullScanInterval = 6 * 60 * 60
     private static let claudeQuotaRetryScanInterval = 5 * 60
     private static let claudeCacheFileLimit = 16 * 1024 * 1024
+    /// 修改时间晚于「现在 + 5 分钟」的缓存文件不可信（实机见过 2037 年的残留）：
+    /// 记成水位线后真正的新文件永远比它旧，增量扫描就此失效。这类文件当作还不存在，
+    /// 不解析也不参与水位线；与采集器的 _CLAUDE_QUOTA_FUTURE_SKEW 同一口径。
+    private static let claudeQuotaFutureSkew: TimeInterval = 5 * 60
     private static let claudeQuotaScanLock = NSLock()
     private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
     private static let deepSeekPreparationLock = NSLock()
@@ -131,7 +135,7 @@ final class DataLoader {
     private static func loadClaudeQuotaState() -> ClaudeQuotaState {
         guard let data = try? Data(contentsOf: claudeQuotaStateURL),
               let state = try? JSONDecoder().decode(ClaudeQuotaState.self, from: data),
-              state.version == 2 else { return ClaudeQuotaState() }
+              state.version == 3 else { return ClaudeQuotaState() }
         return state
     }
 
@@ -213,7 +217,8 @@ final class DataLoader {
         claudeQuotaScanLock.lock()
         defer { claudeQuotaScanLock.unlock() }
         let nowEpoch = Int(now.timeIntervalSince1970)
-        let records = claudeCacheRecords()
+        let horizon = now.timeIntervalSince1970 + claudeQuotaFutureSkew
+        let records = claudeCacheRecords().filter { $0.modified <= horizon }
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
         for record in records { recordsByPath[record.url.path] = record }
         let original = loadClaudeQuotaState()

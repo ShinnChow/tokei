@@ -12697,12 +12697,16 @@ def _zstd_decompress(data):
 
 
 # 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
-_CLAUDE_QUOTA_STATE_VERSION = 2
+_CLAUDE_QUOTA_STATE_VERSION = 3
 _CLAUDE_QUOTA_STALE_TTL = 1800
 _CLAUDE_QUOTA_FULL_SCAN_INTERVAL = 6 * 3600
 _CLAUDE_QUOTA_RETRY_SCAN_INTERVAL = 5 * 60
 _CLAUDE_CACHE_FILE_LIMIT = 16 * 1024 * 1024
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+# 修改时间晚于「现在 + 5 分钟」的缓存文件不可信（实机见过 2037 年的残留）：
+# 一旦记成水位线，真正的新文件永远比它旧，增量扫描就此失效且无法自愈。
+# 这类文件当作还不存在，不解析也不参与水位线；等时间真走到它，再按普通文件处理。
+_CLAUDE_QUOTA_FUTURE_SKEW = 5 * 60
 
 
 def _claude_record_signature(record):
@@ -12831,7 +12835,9 @@ def _claude_quota_from_environment(now=None):
 def _scan_claude_plan_raw(now=None):
     import time
     now = int(time.time()) if now is None else int(now)
-    records = _claude_cache_records()
+    horizon_ns = (now + _CLAUDE_QUOTA_FUTURE_SKEW) * 1_000_000_000
+    records = [record for record in _claude_cache_records()
+               if record["mtime_ns"] <= horizon_ns]
     records_by_path = {record["path"]: record for record in records}
     original = _load_claude_quota_state()
     state = dict(original)
