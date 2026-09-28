@@ -3469,10 +3469,14 @@ def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
                     spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
                     if isinstance(spawn, dict):
                         parent_id = spawn.get("parent_thread_id")
-                return meta.get("id") or meta.get("session_id"), parent_id
+                # 分页续页（history_mode=paginated）用 history_base 标明接在哪一页之后。
+                history_base = meta.get("history_base")
+                if not isinstance(history_base, dict) or not history_base:
+                    history_base = None
+                return meta.get("id") or meta.get("session_id"), parent_id, history_base
     except OSError:
         pass
-    return None, None
+    return None, None, None
 
 
 def _codex_rollout_files():
@@ -3492,8 +3496,29 @@ def _codex_rollout_files():
     return files
 
 
+_CODEX_UNKNOWN = object()
+
+
+def _codex_page_key(path, entry):
+    """同一会话里「这是哪一页」。
+
+    Codex Desktop 会把一个长会话分页写成多个文件，续页的 session_meta 带
+    history_base（接在第几条之后）。同一页的镜像（sessions/ 与 archived_sessions/
+    各一份）history_base 相同；不同续页各不相同；第一页没有 history_base。
+    早先缓存的条目没存这个字段，用到时再读一次文件头补上。
+    """
+    if "history_base" not in entry:
+        entry["history_base"] = _codex_session_meta(path)[2]
+    base = entry.get("history_base")
+    return json.dumps(base, sort_keys=True) if isinstance(base, dict) else None
+
+
 def _codex_canonical_file_cache(file_cache):
-    """Keep resumed segments; discard only copies covered by another segment."""
+    """Keep resumed segments; discard only copies covered by another segment.
+
+    有 response_ids 的文件按 id 覆盖去重；没有 id 的旧式文件无法逐条比对，
+    同一会话、同一页只留最完整的一份。续页各是一页，不会被当成前一页的副本丢掉。
+    """
     canonical = {}
     groups = {}
     for path, entry in file_cache.items():
@@ -3511,7 +3536,9 @@ def _codex_canonical_file_cache(file_cache):
                 int(entry.get("parsed_size", 0) or 0))
     for copies in groups.values():
         covered = set()
-        legacy_selected = False
+        legacy_pages = set()
+        # 只有同一会话里有两个以上无 id 的文件时才需要分页，平常不碰文件。
+        paged = sum(1 for _, entry in copies if not entry.get("response_ids")) > 1
         for path, entry in sorted(copies, key=score, reverse=True):
             ids = set(entry.get("response_ids") or [])
             if ids:
@@ -3519,9 +3546,10 @@ def _codex_canonical_file_cache(file_cache):
                     continue
                 covered.update(ids)
             else:
-                if legacy_selected:
+                page = _codex_page_key(path, entry) if paged else None
+                if page in legacy_pages:
                     continue
-                legacy_selected = True
+                legacy_pages.add(page)
             canonical[path] = entry
     return canonical
 
@@ -3595,7 +3623,7 @@ def scan_codex(bounds, cache):
 
             if append_from is None:
                 events = []
-                session_id, forked_from_id = _codex_session_meta(f)
+                session_id, forked_from_id, history_base = _codex_session_meta(f)
                 file_limits = None; file_limits_ts = None; file_plan = None
                 file_g_limits = None; file_g_ts = None; file_g_plan = None
                 file_r_limits = None; file_r_ts = None
@@ -3610,6 +3638,8 @@ def scan_codex(bounds, cache):
                 events = []
                 session_id = entry.get("session_id")
                 forked_from_id = entry.get("forked_from_id")
+                # 老缓存没有这个键时保持「未知」，由 _codex_page_key 按需补读。
+                history_base = entry.get("history_base", _CODEX_UNKNOWN)
                 file_limits = entry.get("limits"); file_limits_ts = entry.get("limits_ts")
                 file_plan = entry.get("plan")
                 file_g_limits = entry.get("g_limits"); file_g_ts = entry.get("g_ts")
@@ -3801,6 +3831,8 @@ def scan_codex(bounds, cache):
                 "canonical": was_canonical,
                 "dedupe_peers": entry.get("dedupe_peers") if isinstance(entry, dict) else None,
             }
+            if history_base is not _CODEX_UNKNOWN:
+                fc[f]["history_base"] = history_base
             cache["_dirty"] = True
             if _time.monotonic() >= next_checkpoint:
                 _save_scan_cache(cache)
