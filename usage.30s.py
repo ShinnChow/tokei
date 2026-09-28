@@ -1046,7 +1046,36 @@ def ledger_flush():
             os.close(lock_fd)
 
 
+# _sources 保留多少天。
+#
+# 它记的是「当天这笔用量分别来自哪个会话」，只有当前扫描还能重新看到那些会话时
+# 才需要——用来在会话贡献变化时替换而不是重复累加。更老的日子永远不会再被扫到，
+# 明细只是每次 compute 都被递归遍历一遍再整份写回：实测 codex 的 _sources 占了
+# 整个账本 1.56 MB 里的 1.2 MB，对应 _ledger_values 的 9.7 万次调用。
+#
+# 收拢只丢来源明细，当天的合计值原样保留；万一某天又出现在实时扫描里，
+# _ledger_merge_sources 本来就有「没有 _sources 的老记录」那条 legacy 分支兜底。
+_LEDGER_SOURCES_RETAIN_DAYS = 45
+
+
+def _prune_ledger_sources(ledger, today=None):
+    """把过了保留期的天的 _sources 收拢掉，合计值不动。返回是否有改动。"""
+    today = today or date.today()
+    cutoff = (today - timedelta(days=_LEDGER_SOURCES_RETAIN_DAYS)).isoformat()
+    pruned = False
+    for days in (ledger.get("tools") or {}).values():
+        if not isinstance(days, dict):
+            continue
+        for day_key, day in days.items():
+            if day_key >= cutoff or not isinstance(day, dict):
+                continue
+            if day.pop("_sources", None) is not None:
+                pruned = True
+    return pruned
+
+
 def _save_ledger(ledger):
+    _prune_ledger_sources(ledger)
     tmp = None
     try:
         directory = os.path.dirname(_LEDGER_FILE)
@@ -3367,6 +3396,12 @@ def _iter_codex_token_lines(path, chunk_size=64 * 1024, header_limit=4 * 1024):
 # 按最近活跃优先：项目足迹本来就按 last_active 排序，用户看得见的那几行
 # 第一轮就补齐，长尾在后台几分钟内自然补完。
 _CODEX_PROJECT_BACKFILL_PER_SCAN = 150
+# 只给这么多天内活跃过的会话补项目路径。
+#
+# 打开一个会话文件约 10ms，几千个历史会话合起来是几十秒；而项目足迹按最近活跃
+# 排序，几个月前的会话补上了也排在看不见的地方。超出这个窗口的条目写空串占位，
+# 之后不再重试——宁可老项目缺席，也不让每轮扫描替它们反复开文件。
+_CODEX_PROJECT_BACKFILL_DAYS = 60
 
 
 def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
@@ -3766,11 +3801,18 @@ def scan_codex(bounds, cache):
         dedupe_paths.update(linked_paths)
     # 项目路径按需补齐,让 Codex 参与项目足迹与回顾页。没读到也写空串占位,
     # 免得每轮扫描都为同一批读不出 cwd 的会话重复开文件。
-    pending = [(str(entry.get("last_event_ts") or ""), f, entry)
-               for f, entry in fc.items()
-               if isinstance(entry, dict) and "proj" not in entry]
-    if pending:
-        pending.sort(reverse=True)      # 最近活跃的会话先补，排序用缓存里现成的时间戳
+    horizon = (datetime.now() - timedelta(days=_CODEX_PROJECT_BACKFILL_DAYS)).isoformat()
+    pending, skipped = [], []
+    for f, entry in fc.items():
+        if not isinstance(entry, dict) or "proj" in entry:
+            continue
+        stamp = str(entry.get("last_event_ts") or "")
+        (pending if stamp >= horizon else skipped).append((stamp, f, entry))
+    if pending or skipped:
+        # 窗口外的直接占位，不开文件；窗口内的最近活跃优先，按轮次上限分摊。
+        for _, _f, entry in skipped:
+            entry["proj"] = ""
+        pending.sort(reverse=True)
         for _, f, entry in pending[:_CODEX_PROJECT_BACKFILL_PER_SCAN]:
             entry["proj"] = _codex_session_cwd(f) or ""
         cache["_dirty"] = True

@@ -41,6 +41,9 @@ final class Store: ObservableObject {
     /// 上一次刷新开跑的时刻。调度按它算间隔，所以「面板打开顺手刷的那次」
     /// 也算数，不会开完面板立刻又被定时器刷一遍。
     private(set) var lastRefreshStartedAt = Date.distantPast
+    /// 上一次刷新实际耗时。间隔要按它退避——扫描在数据量大的机器上可能十几秒，
+    /// 固定 10 秒会让刷新首尾相接，还会和自己抢扫描缓存的文件锁，越刷越慢。
+    private(set) var lastRefreshDuration: TimeInterval = 0
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
@@ -76,16 +79,22 @@ final class Store: ObservableObject {
         performRefresh()
     }
 
+    /// 打开额度曲线页时立刻取数。
+    ///
+    /// 原本在主刷新进行中会改为「等刷新完再说」，可那个延后链路有两个漏口：
+    /// prewarmQuotaDetailIfReady 见到还有排队的刷新就直接返回，而刷新失败的分支
+    /// 压根不会走到它。面板开着时刷新变密之后，这两个口子叠起来足以让页面一天
+    /// 都不取一次数，只对着上次的缓存。
+    ///
+    /// 取数本身很便宜——脚本会复用 60 秒内的 last_usage.json，实测 3 秒出头，
+    /// 而且 QuotaDetailRepository 自己有 refreshing 门闩挡重入，不需要外面再挡一层。
     func loadQuotaDetail() {
-        if refreshInFlight {
-            quotaDetailPrewarmPending = true
-        } else {
-            QuotaDetailRepository.shared.load(force: true)
-        }
+        QuotaDetailRepository.shared.load(force: true)
     }
 
     private func performRefresh() {
         lastRefreshStartedAt = Date()
+        let startedAt = lastRefreshStartedAt
         DataLoader.load { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
@@ -109,6 +118,7 @@ final class Store: ObservableObject {
                 self.finishRefresh()
                 return
             }
+            self.lastRefreshDuration = Date().timeIntervalSince(startedAt)
             self.retryCount = 0
             self.loadError = nil
             self.recordQuotaHistory(local)
@@ -146,7 +156,9 @@ final class Store: ObservableObject {
     }
 
     private func prewarmQuotaDetailIfReady() {
-        guard quotaDetailPrewarmPending, !refreshPending, popoverVisible else { return }
+        // 不再要求「没有排队中的刷新」：面板开着时刷新很密，那个条件几乎总为真，
+        // 预热就一直轮空。重入由 QuotaDetailRepository 自己的门闩挡。
+        guard quotaDetailPrewarmPending, popoverVisible else { return }
         quotaDetailPrewarmPending = false
         QuotaDetailRepository.shared.load(force: true)
     }
@@ -323,8 +335,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // 越是盯着面板翻看越不更新。这里每 2 秒空转一次，到点了才真去刷。
         let tick = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            let due = self.store.popoverVisible
+            // 想要的节奏，再按上次耗时退避：一次刷新至少要留出同样长的空闲，
+            // 否则扫描慢的机器上刷新会连成一片。快的机器不受影响。
+            let wanted = self.store.popoverVisible
                 ? Self.visibleRefreshInterval : Self.idleRefreshInterval
+            let due = max(wanted, self.store.lastRefreshDuration * 2)
             guard Date().timeIntervalSince(self.store.lastRefreshStartedAt) >= due else { return }
             self.store.refresh()
         }
