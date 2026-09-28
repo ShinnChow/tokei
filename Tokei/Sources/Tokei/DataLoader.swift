@@ -646,11 +646,15 @@ final class DataLoader {
         return "/usr/bin/env"
     }()
 
+    /// 这段脚本以模块方式导入 App 包里的采集器。不关掉字节码缓存的话，Python 会把
+    /// __pycache__ 写进 Contents/Resources，App 签名随即失效
+    /// （codesign: a sealed resource is missing or invalid）。
     private static let syncSnapshotPython = """
     import importlib.util
     import os
     import sys
 
+    sys.dont_write_bytecode = True
     script_path, device_id, sync_dir, claude_quota = sys.argv[1:5]
     if claude_quota:
         os.environ["TOKEI_CLAUDE_QUOTA_JSON"] = claude_quota

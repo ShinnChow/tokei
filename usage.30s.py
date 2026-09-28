@@ -10308,7 +10308,9 @@ def scan_deepseek_harness(bounds, cache):
 # SQLite: ~/.local/share/opencode/opencode.db；旧版 JSON 作为补充来源。
 # JSON 文件: ~/.local/share/opencode/storage/message/<session>/msg_*.json
 # 每条 assistant 消息有 tokens{input,output,reasoning,cache{read,write}} + cost + modelID。
-_OPENCODE_COST_CACHE_VERSION = 2
+# V2（session_message 表）的助手消息角色在行的 type 列，模型是 {id, providerID}
+# 引用，tokens / cost 与 V1 同形。迁移过来的历史两张表都有，同一条消息 ID 相同。
+_OPENCODE_COST_CACHE_VERSION = 3
 
 
 def _opencode_db_paths():
@@ -10383,6 +10385,42 @@ def _opencode_message_day(message, session_id="", created_ms=0, estimate_missing
     return day
 
 
+def _opencode_v2_message(message, session_id):
+    """V2 助手消息转成 V1 的形状，交给同一个 _opencode_message_day 解析。"""
+    model = message.get("model")
+    converted = dict(message)
+    converted["role"] = "assistant"
+    converted["sessionID"] = message.get("sessionID") or session_id
+    if isinstance(model, dict):
+        converted["modelID"] = message.get("modelID") or model.get("id") or ""
+        converted["providerID"] = message.get("providerID") or model.get("providerID")
+    return converted
+
+
+def _opencode_database_messages(connection, tables):
+    """先读 V2，再用 V1 补 V2 里没有的消息：新消息只写 V2，旧消息两边都有。"""
+    if "session_message" in tables:
+        for message_id, session_id, created_ms, raw in connection.execute(
+                "SELECT id, session_id, time_created, data FROM session_message "
+                "WHERE type = 'assistant'"):
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(message, dict):
+                yield message_id, session_id, created_ms, _opencode_v2_message(
+                    message, session_id or "")
+    if "message" in tables:
+        for message_id, session_id, created_ms, raw in connection.execute(
+                "SELECT id, session_id, time_created, data FROM message"):
+            try:
+                message = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(message, dict):
+                yield message_id, session_id, created_ms, message
+
+
 def _scan_opencode_database(path, estimate_missing_cost=False):
     import sqlite3
 
@@ -10392,22 +10430,28 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
     connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
         # 会话自带工作目录，让 OpenCode / MiMoCode 参与项目足迹与回顾页。
+        # 有的版本把会话放在 session_v2，一并读。
         session_projects = {}
-        session_columns = {row[1] for row in connection.execute("PRAGMA table_info(session)")}
-        if {"id", "directory"} <= session_columns:
+        for table in ("session", "session_v2"):
+            if table not in tables:
+                continue
+            session_columns = {row[1] for row in connection.execute(
+                f"PRAGMA table_info({table})")}
+            if not {"id", "directory"} <= session_columns:
+                continue
             try:
                 for session_id, directory in connection.execute(
-                        "SELECT id, directory FROM session"):
+                        f"SELECT id, directory FROM {table}"):
                     if isinstance(directory, str) and directory.startswith("/"):
-                        session_projects[session_id] = directory
+                        session_projects.setdefault(session_id, directory)
             except sqlite3.Error:
                 pass
-        rows = connection.execute("SELECT id, session_id, time_created, data FROM message")
-        for message_id, session_id, created_ms, raw in rows:
-            try:
-                message = json.loads(raw)
-            except (TypeError, ValueError):
+        for message_id, session_id, created_ms, message in _opencode_database_messages(
+                connection, tables):
+            if message_id and str(message_id) in message_ids:
                 continue
             day = _opencode_message_day(message, session_id or "", created_ms or 0,
                                         estimate_missing_cost=estimate_missing_cost)
