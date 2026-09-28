@@ -461,6 +461,9 @@ def _normalize(model: str):
     if "/" in m:
         return m                                      # 已是 OpenRouter 格式
     if m.startswith("claude"):
+        # 日期快照与 -latest 同基础版一个价：claude-opus-5-5-20260921 → claude-opus-5-5。
+        # 不剥的话下一行会把「5-20260921」当成版本号，最后按家族兜底成别的型号计价。
+        m = re.sub(r"-(?:\d{8}|latest)$", "", m)
         m = re.sub(r"-(\d+)-(\d+)$", r"-\1.\2", m)    # claude-opus-4-8 → claude-opus-4.8
         return "anthropic/" + m
     if re.match(r"(gpt|o\d|chatgpt)", m):
@@ -667,10 +670,17 @@ def nice_model(m: str) -> str:
         return "未知"
     import re
     s = m.lower()
-    for key, disp in (("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")):
+    for key, disp in (("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"),
+                      ("haiku", "Haiku")):
         if key in s:
-            mt = re.search(r"(\d+)-(\d+)", s)
-            return f"{disp} {mt.group(1)}.{mt.group(2)}" if mt else disp
+            # 新写法版本在家族名之后（opus-5-5 / opus-5.5 / opus-5，可能再带日期），
+            # 老写法在之前（claude-3-5-sonnet）。版本段最多两位，日期不会被当成版本。
+            mt = (re.search(rf"{key}[-_ ]?(\d{{1,2}})(?:[-.](\d{{1,2}}))?(?!\d)", s)
+                  or re.search(rf"(\d{{1,2}})(?:[-.](\d{{1,2}}))?[-_ ]{key}", s))
+            if not mt:
+                return disp
+            major, minor = mt.group(1), mt.group(2)
+            return f"{disp} {major}.{minor}" if minor else f"{disp} {major}"
     if "gpt" in s:
         # Luna Reserve 的内部标识,展示为 Luna Reserve 而不是裸 GPT。
         if re.search(r"(?:^|[-_/ ])reserve(?:$|[-_/ ])", s):
