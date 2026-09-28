@@ -1359,6 +1359,7 @@ struct PanelView: View {
                     }
                 }
                 grokQuotaStatus(g)
+                if g.auth_expired == true { grokAuthExpiredNotice(g) }
             } else if quotaState == .expired {
                 if hasUsage { thinDivider }
                 quotaStateNotice(
@@ -1369,6 +1370,9 @@ struct PanelView: View {
                     tint: Theme.grok,
                     warning: true
                 )
+            } else if g.auth_expired == true {
+                if hasUsage { thinDivider }
+                grokAuthExpiredNotice(g)
             } else if hasUsage {
                 thinDivider
                 quotaStateNotice(
@@ -1380,6 +1384,18 @@ struct PanelView: View {
                 )
             }
         }
+    }
+
+    /// 实时开关开着但登录过期时，明说现在看的是本地值，以及怎么恢复。
+    private func grokAuthExpiredNotice(_ g: GrokStat) -> some View {
+        quotaStateNotice(
+            title: "Grok 登录已过期",
+            detail: "实时额度暂停查询，先显示本地日志里的额度。运行一次 grok 续期后自动恢复。",
+            source: grokQuotaSourceLabel(g.source),
+            updated: g.q_updated,
+            tint: Theme.grok,
+            warning: true
+        )
     }
 
     func grokQuotaStatus(_ stat: GrokStat) -> some View {

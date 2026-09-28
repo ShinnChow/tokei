@@ -4842,17 +4842,30 @@ def _grok_live_quota_enabled():
     return bool(_tokei_config().get("grok_live_quota_enabled"))
 
 
-def _grok_auth_token():
+# access token 大约 6 小时过期；离过期不足一分钟也按已过期处理。
+_GROK_AUTH_EXPIRY_SKEW = 60
+
+
+def _grok_auth_state(now_epoch=None):
+    """返回 (token, 是否已过期)。
+
+    只读 access token，不代刷：auth.json 与 Grok CLI / OpenUsage 共用，refresh_token
+    会轮换，抢刷会把它们自己的登录顶掉。过期了就交给界面说明，等 grok 下次运行时续期。
+    """
     auth = _load_json(GROK_AUTH, {})
     if not isinstance(auth, dict):
-        return None
+        return None, False
     for entry in auth.values():
         if not isinstance(entry, dict):
             continue
         token = entry.get("key") or entry.get("access_token")
         if isinstance(token, str) and token.strip():
-            return token.strip()
-    return None
+            expires = _iso_to_epoch(entry.get("expires_at")) \
+                if isinstance(entry.get("expires_at"), str) else None
+            now = now_epoch if now_epoch is not None \
+                else datetime.now(timezone.utc).timestamp()
+            return token.strip(), bool(expires and expires - now <= _GROK_AUTH_EXPIRY_SKEW)
+    return None, False
 
 
 def _normalize_grok_billing(config, *, plan=None, source=None, updated=None,
@@ -5020,9 +5033,12 @@ def fetch_grok_live_quota():
     cached = _cached_grok_quota(_GROK_QUOTA_TTL)
     if cached and cached.get("source") == "live":
         return cached
-    token = _grok_auth_token()
+    token, expired = _grok_auth_state()
     if not token:
         return _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL)
+    if expired:
+        # 过期的 token 只会换来 401；以前每次刷新都白敲一次接口，再悄悄退回本地日志。
+        return {"auth_expired": True}
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -5062,13 +5078,19 @@ def scan_grok_quota():
     if log_quota and not log_quota.get("stale"):
         _save_grok_quota_cache(log_quota)
 
+    auth_expired = False
     if _grok_live_quota_enabled():
         live = fetch_grok_live_quota()
         if live and live.get("pct") is not None:
             return live
+        auth_expired = bool(live and live.get("auth_expired"))
+
+    def with_auth_state(quota):
+        # 实时开关开着却只能给本地值时，把原因带给界面，不装作还在查实时。
+        return {**quota, "auth_expired": True} if auth_expired else quota
 
     if log_quota and log_quota.get("pct") is not None:
-        return log_quota
+        return with_auth_state(log_quota)
 
     cached = _cached_grok_quota(_GROK_QUOTA_FALLBACK_TTL * 12)  # 本地缓存放宽到约 1 小时
     if cached and cached.get("pct") is not None:
@@ -5081,8 +5103,8 @@ def scan_grok_quota():
             out["stale"] = True
             out["pct"] = 0.0
             out["reset"] = None
-        return out
-    return {}
+        return with_auth_state(out)
+    return {"auth_expired": True} if auth_expired else {}
 
 
 # ---------- 千问办公额度 (官方桌面端本机 MCP；需显式开启) ----------
@@ -13305,6 +13327,7 @@ def compute():
             "source": grok_quota.get("source"),
             "q_updated": grok_quota.get("updated"),
             "stale": grok_quota.get("stale"),
+            "auth_expired": bool(grok_quota.get("auth_expired")),
         },
         "grok_bot": {
             "ranges": grok_bot_ranges,
