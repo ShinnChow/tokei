@@ -966,6 +966,10 @@ struct DevinStat: Codable {
     }
 }
 
+/// MiniMax Code 同样是两个互不相干的来源：`ranges` 来自桌面端的本地运行时库，
+/// `quota` 来自用户自愿填写 Token Plan Key 后的联网查询，形状与 Devin 相同。
+typealias MiniMaxStat = DevinStat
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -992,6 +996,7 @@ struct Usage: Codable {
     var musecode: TokenUsageStat
     var cmdcode: TokenUsageStat
     var devin: DevinStat
+    var minimax: MiniMaxStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -1004,7 +1009,7 @@ struct Usage: Codable {
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
         case codebuddy
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, musecode, cmdcode, prime_agent, devin, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, musecode, cmdcode, prime_agent, devin, minimax, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -1037,6 +1042,7 @@ struct Usage: Codable {
         musecode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .musecode) ?? TokenUsageStat(ranges: .empty)
         cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
         devin = (try? c.decodeIfPresent(DevinStat.self, forKey: .devin)) ?? .empty
+        minimax = (try? c.decodeIfPresent(MiniMaxStat.self, forKey: .minimax)) ?? .empty
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()

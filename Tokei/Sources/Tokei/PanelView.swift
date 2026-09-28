@@ -32,6 +32,7 @@ struct PanelView: View {
     @State private var museCodeModelsOpen = false
     @State private var cmdCodeModelsOpen = false
     @State private var devinModelsOpen = false
+    @State private var miniMaxModelsOpen = false
     @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
     @State private var mode: PanelMode = .cards
@@ -79,6 +80,7 @@ struct PanelView: View {
     @AppStorage("showMuseCode") private var showMuseCode = true
     @AppStorage("showCmdCode") private var showCmdCode = true
     @AppStorage("showDevin") private var showDevin = true
+    @AppStorage("showMiniMax") private var showMiniMax = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
     /// 默认关闭：显式授权后复用 Grok Bot 或 Cursor 登录态查询官方额度。
@@ -113,7 +115,7 @@ struct PanelView: View {
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
             musecode: showMuseCode, cmdcode: showCmdCode,
-            devin: showDevin
+            devin: showDevin, minimax: showMiniMax
         )
     }
 
@@ -124,7 +126,8 @@ struct PanelView: View {
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent, showDevin].filter { $0 }.count
+         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent, showDevin,
+         showMiniMax].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
     private var useWide: Bool { visibleCount > 2 }
@@ -405,7 +408,7 @@ struct PanelView: View {
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         let mcr = u.musecode.ranges.get(sel), ccr = u.cmdcode.ranges.get(sel)
-        let dvr = u.devin.ranges.get(sel)
+        let dvr = u.devin.ranges.get(sel), mmr = u.minimax.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
@@ -529,6 +532,10 @@ struct PanelView: View {
                          active: dvr.sessions > 0 || u.devin.quota.available,
                          tint: Theme.devin,
                          content: AnyView(devinBlock(dvr, quota: u.devin.quota))),
+            ToolCardItem(id: "minimax", name: "MiniMax Code", visible: showMiniMax,
+                         active: mmr.sessions > 0 || u.minimax.quota.available,
+                         tint: Theme.minimax,
+                         content: AnyView(miniMaxBlock(mmr, quota: u.minimax.quota))),
             ToolCardItem(id: "kimicode", name: "Kimi Code", visible: showKimiCode,
                          active: kcr.sessions > 0 || u.kimicode.hasQuota || u.kimicode.hasStaleQuota,
                          tint: Theme.kimicode, content: AnyView(kimiCodeBlock(u.kimicode, kcr))),
@@ -945,25 +952,45 @@ struct PanelView: View {
     /// Devin 的两个来源互不相干，卡片上也分开呈现：上半是 CLI 会话库里的
     /// 本地 token，下半是桌面端启动时写下的套餐额度。任何一半有数据就画那一半。
     func devinBlock(_ r: TokenUsageRange, quota: ProviderQuotaStat) -> some View {
+        tokenAndQuotaBlock(
+            title: "Devin", toolID: "devin", tint: Theme.devin, r, quota: quota,
+            modelsOpen: $devinModelsOpen,
+            emptyHint: "请打开一次 Devin 桌面端并登录，它会把套餐额度写入本地；"
+                + "Token 统计来自 Devin CLI 的会话库。")
+    }
+
+    /// MiniMax Code：token 来自桌面端的本地库，额度要用户在设置里填 Token Plan Key
+    /// 才会联网查询；没填就只画 token，不催。
+    func miniMaxBlock(_ r: TokenUsageRange, quota: ProviderQuotaStat) -> some View {
+        tokenAndQuotaBlock(
+            title: "MiniMax Code", toolID: "minimax", tint: Theme.minimax, r, quota: quota,
+            modelsOpen: $miniMaxModelsOpen,
+            emptyHint: "Token 统计来自 MiniMax Code 桌面端的本地数据库；"
+                + "在设置 → Provider 额度 填入 Token Plan Key 可显示 5 小时与周额度。")
+    }
+
+    private func tokenAndQuotaBlock(
+        title: String, toolID: String, tint: Color, _ r: TokenUsageRange,
+        quota: ProviderQuotaStat, modelsOpen: Binding<Bool>, emptyHint: String
+    ) -> some View {
         let hasUsage = r.sessions > 0
         return VStack(alignment: .leading, spacing: 11) {
-            cardHead("Devin", tint: Theme.devin, sessions: r.sessions, toolID: "devin")
+            cardHead(title, tint: tint, sessions: r.sessions, toolID: toolID)
             if hasUsage {
                 CostHeadline(value: Fmt.human(r.totalTokens),
-                             caption: "\(sel.label) 总量", tint: Theme.devin)
+                             caption: "\(sel.label) 总量", tint: tint)
                 metricGrid([.init("dollarsign.circle", "≈成本",
                                   String(format: "$%.2f", r.cost))],
-                           hit: r.hit, extra: tokenUsageMetrics(r), tint: Theme.devin)
+                           hit: r.hit, extra: tokenUsageMetrics(r), tint: tint)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: $devinModelsOpen, tint: Theme.devin)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: tint)
                 }
             }
             if quota.available {
                 if hasUsage { thinDivider }
-                providerQuotaContent(quota, tint: Theme.devin)
+                providerQuotaContent(quota, tint: tint)
             } else if !hasUsage {
-                Text("请打开一次 Devin 桌面端并登录，它会把套餐额度写入本地；"
-                     + "Token 统计来自 Devin CLI 的会话库。")
+                Text(emptyHint)
                     .font(.system(size: Theme.fontSize(10)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2603,6 +2630,8 @@ struct PanelView: View {
     @State private var zaiRegion = "global"
     @State private var zaiKey = ""
     @State private var zaiKeyStored = false
+    @State private var miniMaxKey = ""
+    @State private var miniMaxKeyStored = false
     @State private var providerSettingsResult = ""
     @State private var grokBotAuthorizing = false
     @State private var grokBotAuthorizationResult = ""
@@ -2939,6 +2968,7 @@ struct PanelView: View {
                 settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
                 settingsRow("Command Code", tint: Theme.cmdcode, isOn: $showCmdCode)
                 settingsRow("Devin", tint: Theme.devin, isOn: $showDevin)
+                settingsRow("MiniMax Code", tint: Theme.minimax, isOn: $showMiniMax)
             }
         }
         .onChange(of: showQoder) { enabled in
@@ -2950,6 +2980,10 @@ struct PanelView: View {
         }
         .onChange(of: showDevin) { enabled in
             Self.setProviderQuotaEnabled("devin", enabled)
+            store.refresh()
+        }
+        .onChange(of: showMiniMax) { enabled in
+            Self.setProviderQuotaEnabled("minimax", enabled && miniMaxKeyStored)
             store.refresh()
         }
         .onChange(of: showCursor) { enabled in
@@ -3054,6 +3088,30 @@ struct PanelView: View {
                 }
             }
 
+            thinDivider
+
+            Text("MiniMax Code")
+                .font(.system(size: Theme.fontSize(10), weight: .semibold))
+                .foregroundStyle(Theme.minimax)
+            Text("Token 统计读本机数据，无需配置。填入 Token Plan 的 Key（sk-cp-…）后才会联网查询 5 小时与周额度；中国区与国际区自动识别。")
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            providerSettingsField(
+                label: "API Key",
+                placeholder: miniMaxKeyStored ? "已保存，留空不修改" : "Token Plan Key",
+                text: $miniMaxKey,
+                secure: true
+            )
+            if miniMaxKeyStored {
+                HStack {
+                    Spacer()
+                    settingsActionButton(icon: "trash", title: "清除 MiniMax 密钥") {
+                        clearProviderToken(.minimax)
+                    }
+                }
+            }
+
             HStack {
                 settingsActionButton(icon: "checkmark.circle", title: "保存 Provider 设置") {
                     saveProviderSettings()
@@ -3103,6 +3161,7 @@ struct PanelView: View {
         zaiRegion = SyncManager.providerSetting("zai_region") ?? "global"
         sub2APIKeyStored = ProviderCredentialStore.token(for: .sub2api) != nil
         zaiKeyStored = ProviderCredentialStore.token(for: .zai) != nil
+        miniMaxKeyStored = ProviderCredentialStore.token(for: .minimax) != nil
     }
 
     private func saveProviderSettings() {
@@ -3120,13 +3179,17 @@ struct PanelView: View {
             || ProviderCredentialStore.setToken(sub2APIKey, for: .sub2api)
         let savedZaiKey = zaiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || ProviderCredentialStore.setToken(zaiKey, for: .zai)
-        guard savedURL, savedRegion, savedSub2APIKey, savedZaiKey else {
+        let savedMiniMaxKey = miniMaxKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || ProviderCredentialStore.setToken(miniMaxKey, for: .minimax)
+        guard savedURL, savedRegion, savedSub2APIKey, savedZaiKey, savedMiniMaxKey else {
             providerSettingsResult = "保存失败"
             return
         }
         sub2APIKey = ""
         zaiKey = ""
+        miniMaxKey = ""
         loadProviderSettings()
+        Self.setProviderQuotaEnabled("minimax", showMiniMax && miniMaxKeyStored)
         providerSettingsResult = "已保存"
         store.refresh()
     }
@@ -3137,6 +3200,9 @@ struct PanelView: View {
             return
         }
         loadProviderSettings()
+        if provider == .minimax {
+            Self.setProviderQuotaEnabled("minimax", false)
+        }
         providerSettingsResult = "已清除"
         store.refresh()
     }
@@ -3358,6 +3424,10 @@ struct PanelView: View {
             let enabled = defaults.object(forKey: key) as? Bool ?? fallback
             setProviderQuotaEnabled(provider, enabled)
         }
+        // MiniMax 额度要联网：卡片开着且用户填过 Key 才查。
+        let miniMaxShown = defaults.object(forKey: "showMiniMax") as? Bool ?? true
+        setProviderQuotaEnabled(
+            "minimax", miniMaxShown && ProviderCredentialStore.token(for: .minimax) != nil)
     }
 
     var settingsPricingSection: some View {
@@ -4004,7 +4074,7 @@ struct PanelView: View {
                          "codebuddy",
                          "deepseek_harness",
                          "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent",
-                         "devin"]
+                         "devin", "minimax"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")
             lines.append("json: ok tools: \(tools)")

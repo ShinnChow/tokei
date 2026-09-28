@@ -26,6 +26,7 @@ struct UsageToolVisibility: Equatable {
     var musecode = true
     var cmdcode = true
     var devin = true
+    var minimax = true
 
     static let allVisible = UsageToolVisibility()
 }
@@ -346,6 +347,10 @@ enum UsageSummaryBuilder {
         if visibility.devin {
             appendTokenTool(&lines, id: "devin", name: "Devin",
                             range: usage.devin.ranges.get(range))
+        }
+        if visibility.minimax {
+            appendTokenTool(&lines, id: "minimax", name: "MiniMax Code",
+                            range: usage.minimax.ranges.get(range))
         }
         return lines
     }

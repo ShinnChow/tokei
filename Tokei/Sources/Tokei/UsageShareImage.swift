@@ -144,6 +144,8 @@ enum UsageShareImage {
         case "Command Code": return Theme.cmdcode
         case "Prime Agent": return Theme.primeAgent
         case "DeepSeek Harness": return Theme.deepseekHarness
+        case "Devin": return Theme.devin
+        case "MiniMax Code": return Theme.minimax
         default: return Theme.tTertiary
         }
     }

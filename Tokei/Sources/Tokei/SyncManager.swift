@@ -257,7 +257,7 @@ final class SyncManager {
     }
 
     private static let providerQuotaIDs: Set<String> = [
-        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity", "devin",
+        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity", "devin", "minimax",
     ]
     private static let providerSettingKeys: Set<String> = [
         "sub2api_base_url", "zai_region", "zai_usage_scope",
@@ -470,6 +470,7 @@ final class SyncManager {
             mergeRanges(&u.musecode.ranges, peer.usage.musecode.ranges, pairs)
             mergeRanges(&u.cmdcode.ranges, peer.usage.cmdcode.ranges, pairs)
             mergeRanges(&u.devin.ranges, peer.usage.devin.ranges, pairs)
+            mergeRanges(&u.minimax.ranges, peer.usage.minimax.ranges, pairs)
         }
         return u
     }

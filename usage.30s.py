@@ -180,7 +180,11 @@ DEVIN_CLI_DB_PATHS = _path_candidates(
     os.path.join(HOME, "Library", "Application Support", "devin", "cli", "sessions.db"),
     os.path.join(APPDATA, "devin", "cli", "sessions.db"),
     os.path.join(LOCALAPPDATA, "devin", "cli", "sessions.db"))
-OPENCLAW_DB = os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
+# MiniMax Code 桌面端的本地运行时库；模型名在同级的 observability/logs 里。
+MINIMAX_DB_PATHS = _path_candidates(
+    "TOKEI_MINIMAX_DB",
+    os.path.join(HOME, ".minimax", "v2", "sqlite", "runtime-state.sqlite"))
+OPENCLAW_DB =os.path.join(OPENCLAW_STATE_DIR, "tasks", "runs.sqlite")
 OPENCLAW_STATE_DB = os.path.join(OPENCLAW_STATE_DIR, "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(OPENCLAW_STATE_DIR, "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
@@ -475,6 +479,8 @@ def _normalize(model: str):
         return "meta/" + m
     if m.startswith("mimo"):
         return "xiaomi/" + m
+    if m.startswith("minimax"):
+        return "minimax/" + m
     if m == "hy3":
         return "tencent/hy3"
     if m in ("hy3-preview", "hy3 preview"):
@@ -686,6 +692,11 @@ def nice_model(m: str) -> str:
             return "MiMo"
         head = "MiMo-V" + parts[0] if parts[0][0].isdigit() else "MiMo-" + parts[0]
         return "-".join([head] + [part.capitalize() for part in parts[1:]])
+    if s.split("/")[-1].startswith("minimax"):
+        # minimax/minimax-m3 → MiniMax M3，MiniMax-M2.7-highspeed → MiniMax M2.7 Highspeed
+        rest = m.split("/")[-1][len("minimax"):]
+        parts = [part for part in re.split(r"[-\s]+", rest) if part]
+        return " ".join(["MiniMax"] + [part[:1].upper() + part[1:] for part in parts])
     name = re.sub(r"[-:](free|preview|latest)$", "", m.split("/")[-1]).replace("-", " ")
     return " ".join(w[:1].upper() + w[1:] if w[:1].isalpha() else w
                     for w in name.split())
@@ -1505,6 +1516,10 @@ def _empty_devin():
 
 
 def _empty_mimocode():
+    return _empty_opencode()
+
+
+def _empty_minimax():
     return _empty_opencode()
 
 
@@ -5446,6 +5461,7 @@ _PROVIDER_QUOTA_ENV = {
     "zai": "TOKEI_ZAI_QUOTA",
     "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
     "devin": "TOKEI_DEVIN_QUOTA",
+    "minimax": "TOKEI_MINIMAX_QUOTA",
 }
 
 
@@ -7471,6 +7487,168 @@ def scan_devin_quota():
     return fetch_devin_quota() if _provider_quota_enabled("devin") else {}
 
 
+# ---------- MiniMax Token Plan（用户自愿填写的 Key，联网查询）----------
+# 本地库只有 token 没有额度。额度要拿 Token Plan 的 Subscription Key（sk-cp-…）
+# 去官方接口查，所以默认关闭：用户在设置里填了 Key 才会联网。
+# 返回的 model_remains 有几种写法并存，桌面端自己也是分别解析的：
+#   current_interval_remaining_percent        剩余百分比（数字）
+#   current_interval_used/total_percent       已用 / 总额（字符串，加赠时总额 > 100）
+#   current_interval_total/usage_count        次数；注意 usage_count 其实是「剩余」次数
+# weekly 同理（current_weekly_*），*_status == 3 表示不限量。
+# 中国区与国际区的 Key 不通用：拿错区域的 Key 会得到 1004，此时换另一个区域再试。
+_MINIMAX_QUOTA_ENDPOINTS = {
+    "cn": ("https://www.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+           "https://www.minimax.cn/v1/token_plan/remains"),
+    "global": ("https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+               "https://www.minimax.io/v1/token_plan/remains"),
+}
+_MINIMAX_UNAUTHORIZED = 1004
+_MINIMAX_UNLIMITED_STATUS = 3
+
+
+def _minimax_number(value):
+    if isinstance(value, str):
+        value = value.strip().rstrip("%").strip()
+    return _provider_number(value)
+
+
+def _minimax_window_usage(entry, prefix):
+    """返回 (已用百分比, 说明)；拿不到时百分比为 None。"""
+    if _provider_number(entry.get(f"{prefix}_status")) == _MINIMAX_UNLIMITED_STATUS:
+        return 0.0, "不限量"
+    remaining = _minimax_number(entry.get(f"{prefix}_remaining_percent"))
+    if remaining is not None:
+        return 100.0 - remaining, None
+    used = _minimax_number(entry.get(f"{prefix}_used_percent"))
+    if used is not None:
+        total = _minimax_number(entry.get(f"{prefix}_total_percent"))
+        return (used / total * 100.0 if total and total > 0 else used), None
+    total = _provider_number(entry.get(f"{prefix}_total_count"))
+    left = _provider_number(entry.get(f"{prefix}_usage_count"))
+    if total and total > 0 and left is not None:
+        used = max(0.0, total - left)
+        return used / total * 100.0, f"{int(used):,}/{int(total):,} 次"
+    return None, None
+
+
+def _minimax_reset(entry, end_key, remains_key, now):
+    reset = _provider_epoch(entry.get(end_key))
+    if reset:
+        return reset
+    remains = _provider_number(entry.get(remains_key))
+    return int(now + remains / 1000.0) if remains and remains > 0 else None
+
+
+def _minimax_status_code(payload):
+    base = payload.get("base_resp") if isinstance(payload, dict) else None
+    code = _provider_number(base.get("status_code")) if isinstance(base, dict) else None
+    return int(code) if code is not None else None
+
+
+def _normalize_minimax_quota(payload, *, region="cn", updated=None):
+    now = int(updated if updated is not None else datetime.now().timestamp())
+    entries = payload.get("model_remains") if isinstance(payload, dict) else None
+    entries = [item for item in entries or [] if isinstance(item, dict)]
+
+    def is_video(item):
+        return "video" in str(item.get("model_name") or "").lower()
+
+    text = next((item for item in entries if item.get("model_name") == "general"), None) \
+        or next((item for item in entries if not is_video(item)), None)
+    windows = []
+    if text:
+        for window_id, title, prefix, end_key, remains_key, minutes in (
+                ("minimax-5h", "5小时额度", "current_interval",
+                 "end_time", "remains_time", 300),
+                ("minimax-weekly", "周额度", "current_weekly",
+                 "weekly_end_time", "weekly_remains_time", 10080)):
+            used, detail = _minimax_window_usage(text, prefix)
+            if used is not None:
+                windows.append(_provider_window(
+                    window_id, title, used, _minimax_reset(text, end_key, remains_key, now),
+                    minutes, detail))
+    video = next((item for item in entries if is_video(item)
+                  and (_provider_number(item.get("current_interval_total_count")) or 0) > 0),
+                 None)
+    if video:
+        used, detail = _minimax_window_usage(video, "current_interval")
+        if used is not None:
+            windows.append(_provider_window(
+                "minimax-video", "视频额度", used,
+                _minimax_reset(video, "end_time", "remains_time", now), None, detail))
+    return {
+        "available": bool(windows),
+        "plan": "Token Plan" if windows else None,
+        "account": None,
+        "windows": windows,
+        "details": [],
+        "source": "minimax-api",
+        "region": region,
+        "updated": now,
+        "stale": False,
+    }
+
+
+def _minimax_regions():
+    configured = (_provider_config_string("TOKEI_MINIMAX_REGION", "minimax_region") or "").lower()
+    if configured in _MINIMAX_QUOTA_ENDPOINTS:
+        return (configured,)
+    # 上次查通的区域先试，省掉一次注定 1004 的请求。
+    last = _latest_cached_provider_quota("minimax") or {}
+    return ("global", "cn") if last.get("region") == "global" else ("cn", "global")
+
+
+def _minimax_quota_payload(api_key, region):
+    """同一区域有新旧两个入口；404 或非 JSON 换下一个，网络错误直接抛出。"""
+    last_error = None
+    for url in _MINIMAX_QUOTA_ENDPOINTS[region]:
+        try:
+            return _provider_json_request(
+                url, headers={"Authorization": f"Bearer {api_key}"}, timeout=8)
+        except (RuntimeError, ValueError) as error:
+            last_error = error
+    raise last_error or RuntimeError("MiniMax quota endpoint unavailable")
+
+
+def fetch_minimax_quota():
+    api_key = _provider_config_string("TOKEI_MINIMAX_API_KEY", "minimax_api_key")
+    if not api_key:
+        return {}
+    marker = _provider_credential_marker("minimax-remains-v1", api_key)
+    cached = _cached_provider_quota("minimax", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    fallback = _cached_provider_quota(
+        "minimax", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+    # 失败后同样按 TTL 节流，Key 填错时不至于每次刷新都去敲接口。
+    if _provider_quota_recent_attempt_result("minimax", marker, _PROVIDER_QUOTA_TTL):
+        return fallback or {}
+    try:
+        for region in _minimax_regions():
+            payload = _minimax_quota_payload(api_key, region)
+            code = _minimax_status_code(payload)
+            if code == _MINIMAX_UNAUTHORIZED:
+                continue
+            if code not in (None, 0):
+                raise RuntimeError(f"MiniMax quota error {code}")
+            quota = _normalize_minimax_quota(payload, region=region)
+            if not quota["available"]:
+                _save_provider_quota_attempt("minimax", marker, result="empty")
+                return fallback or {}
+            _save_provider_quota_cache("minimax", marker, quota)
+            return quota
+        raise PermissionError("MiniMax rejected the Token Plan key")
+    except Exception:
+        _save_provider_quota_attempt("minimax", marker)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_minimax_quota():
+    return fetch_minimax_quota() if _provider_quota_enabled("minimax") else {}
+
+
 def scan_provider_quotas(errors=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -7480,6 +7658,7 @@ def scan_provider_quotas(errors=None):
         "zai": scan_zai_quota,
         "antigravity": scan_antigravity_quota,
         "devin": scan_devin_quota,
+        "minimax": scan_minimax_quota,
     }
     result = {name: {} for name in (*all_scans, "cursor", "grok_bot")}
     scans = {name: scan for name, scan in all_scans.items()
@@ -10637,6 +10816,301 @@ def scan_devin(bounds, cache):
     return {"ranges": B}
 
 
+# ---------- MiniMax Code ----------
+# 桌面端的本地运行时库：~/.minimax/v2/sqlite/runtime-state.sqlite。
+# local_runtime_token_usage 每轮对话一行，四个桶并列相加（raw 里的
+# totalTokens = input + output + cacheRead + cacheWrite），托管登录下
+# cost_usd 恒为 0。model 列目前是空的，真实模型只出现在按小时轮转的
+# observability 日志里：
+#
+#   llm_response_identifiers {"session_id":…,"turn_id":…,"model":"MiniMax-M3",…}
+#
+# 日志会被轮转删掉，所以对上号的结果按行号区间压缩存进扫描缓存（runs），
+# 日志没了模型也不丢；还没等到库里那一行的 turn 暂存在 pending 里。
+_MINIMAX_SCAN_VERSION = 1
+_MINIMAX_LOG_MARKER = b"llm_response_identifiers"
+_MINIMAX_PENDING_TTL = 2 * 24 * 3600
+
+
+def _minimax_db_path():
+    return _first_existing_file(MINIMAX_DB_PATHS)
+
+
+def _minimax_log_dir(db_path):
+    return os.path.join(os.path.dirname(os.path.dirname(db_path)), "observability", "logs")
+
+
+def _minimax_read_turn_models(log_dir, offsets, pending, now=None):
+    """增量读日志，把 turn_id → 模型记进 pending。返回新认识的 turn 数。
+
+    offsets 是 {文件名: 已读到的字节}；文件变短说明被重写，从头再读。
+    半行留到下一轮，避免把正在写的那行读成坏 JSON。
+    """
+    now = int(now if now is not None else _time.time())
+    try:
+        names = {name for name in os.listdir(log_dir) if name.endswith(".log")}
+    except OSError:
+        names = set()
+    for name in [name for name in offsets if name not in names]:
+        del offsets[name]
+    learned = 0
+    for name in sorted(names):
+        path = os.path.join(log_dir, name)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        offset = offsets.get(name)
+        offset = offset if isinstance(offset, int) and 0 <= offset <= size else 0
+        if offset == size:
+            offsets[name] = offset
+            continue
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(offset)
+                for line in handle:
+                    if not line.endswith(b"\n"):
+                        break
+                    offset += len(line)
+                    marker = line.find(_MINIMAX_LOG_MARKER)
+                    if marker < 0:
+                        continue
+                    start = line.find(b"{", marker)
+                    try:
+                        record = json.loads(line[start:].decode("utf-8")) if start >= 0 else None
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    turn_id, model = record.get("turn_id"), record.get("model")
+                    if isinstance(turn_id, str) and turn_id \
+                            and isinstance(model, str) and model.strip():
+                        pending[turn_id] = [model.strip(), now]
+                        learned += 1
+        except OSError:
+            continue
+        offsets[name] = offset
+    return learned
+
+
+def _minimax_project_path(workdir, is_default):
+    """会话的工作目录才算项目；应用自己管的目录（每个会话的临时 workspace、
+    ~/.minimax-agent-cn/projects 这类默认根）不算。"""
+    if is_default or not isinstance(workdir, str) or not os.path.isabs(workdir):
+        return None
+    try:
+        relative = os.path.relpath(workdir, HOME)
+    except ValueError:
+        return workdir
+    if relative.split(os.sep)[0].startswith(".minimax"):
+        return None
+    return workdir
+
+
+def _minimax_run_lookup(runs, through):
+    import bisect
+    starts = [start for start, _ in runs]
+
+    def lookup(row_id):
+        if row_id > through:
+            return None
+        index = bisect.bisect_right(starts, row_id) - 1
+        return runs[index][1] if index >= 0 else None
+    return lookup
+
+
+def _scan_minimax_database(path, pending, runs, through):
+    """返回 (days, 新的 runs, 新的 through, 本轮对上的 turn_id)。"""
+    import sqlite3
+
+    def number(value):
+        try:
+            return max(int(value or 0), 0)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "local_runtime_token_usage" not in tables:
+            return {}, [], 0, set()
+        columns = {row[1] for row in connection.execute(
+            "PRAGMA table_info(local_runtime_token_usage)")}
+        if not {"id", "session_id", "ts", "input_tokens", "output_tokens"} <= columns:
+            return {}, [], 0, set()
+
+        def column(name):
+            return name if name in columns else "NULL"
+
+        session_projects = {}
+        if "local_runtime_sessions" in tables:
+            session_columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(local_runtime_sessions)")}
+            workdir = next((name for name in ("project_workspace_dir", "workspace_dir")
+                            if name in session_columns), None)
+            if workdir:
+                default = "is_default_workspace" \
+                    if "is_default_workspace" in session_columns else "0"
+                try:
+                    for session_id, directory, is_default in connection.execute(
+                            f"SELECT session_id, {workdir}, {default} "
+                            "FROM local_runtime_sessions"):
+                        project = _minimax_project_path(directory, is_default)
+                        if project:
+                            session_projects[session_id] = project
+                except sqlite3.Error:
+                    pass
+
+        rows = connection.execute(f"""
+            SELECT id, session_id, {column("turn_id")}, {column("model")}, ts,
+                   input_tokens, output_tokens, {column("reasoning_tokens")},
+                   {column("cache_read_tokens")}, {column("cache_write_tokens")},
+                   {column("raw")}
+            FROM local_runtime_token_usage
+            ORDER BY id ASC
+        """).fetchall()
+    finally:
+        connection.close()
+
+    # 库被重建过（行号从头再来）时，旧的行号区间不再对应同一批行。
+    if rows and rows[-1][0] < through:
+        runs, through = [], 0
+    known = _minimax_run_lookup(runs, through)
+    matched = set()
+    evidence = []
+    for row in rows:
+        row_id, session_id, turn_id, model = row[0], row[1], row[2], row[3]
+        model = model.strip() if isinstance(model, str) and model.strip() else None
+        if not model and isinstance(turn_id, str) and turn_id in pending:
+            model = pending[turn_id][0]
+            matched.add(turn_id)
+        evidence.append(model or known(row_id))
+
+    # 同一会话里其余轮次的模型给缺失的那几轮兜底；只用于本轮展示，
+    # 不写回 runs，免得猜测被当成证据固化下来。
+    session_models = {}
+    for row, model in zip(rows, evidence):
+        if model:
+            counts = session_models.setdefault(row[1], {})
+            counts[model] = counts.get(model, 0) + 1
+
+    days, sessions = {}, {}
+    for row, model in zip(rows, evidence):
+        _, session_id, _, _, ts, inp, out, reasoning, cache_read, cache_write, raw = row
+        inp, out, cache_read, cache_write = (
+            number(inp), number(out), number(cache_read), number(cache_write))
+        # 思考 token 是否已含在 output 里，以 raw 的 totalTokens 为准；对不上就不计，
+        # 宁可少算这一桶也不重复计。
+        reason = number(reasoning)
+        if reason:
+            try:
+                total_tokens = number(json.loads(raw).get("totalTokens"))
+            except (TypeError, ValueError, AttributeError):
+                total_tokens = 0
+            if total_tokens != inp + out + cache_read + cache_write + reason:
+                reason = 0
+        total = inp + out + cache_read + cache_write + reason
+        if total <= 0:
+            continue
+        stamp = _provider_epoch(ts)
+        if stamp is None:
+            continue
+        try:
+            created = datetime.fromtimestamp(stamp).astimezone()
+        except (OSError, OverflowError, ValueError):
+            continue
+        if not model:
+            counts = session_models.get(session_id)
+            model = max(counts, key=counts.get) if counts else None
+        display_model = (_known_id_or_raw(model) or model) if model else "minimax"
+        cost = 0.0
+        price_id = _pricing_id(model) if model else None
+        if price_id:
+            price = _raw_price(price_id)
+            cost = (inp / 1e6 * price["in"] + (out + reason) / 1e6 * price["out"]
+                    + cache_read / 1e6 * price["cache_read"]
+                    + cache_write / 1e6 * price["cache_write"])
+
+        day_key = created.date().isoformat()
+        day = days.setdefault(day_key, _empty_token_day())
+        day["_cost_version"] = _MINIMAX_SCAN_VERSION
+        _add_token_usage(day, inp, out, cache_read, cache_write, reason, cost, display_model)
+        project = session_projects.get(session_id)
+        if project:
+            bucket = day.setdefault("projects", {}).setdefault(
+                project, {"tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+            bucket["tokens"] += total
+            bucket["cost"] += cost
+            bucket["models"][display_model] = bucket["models"].get(display_model, 0) + total
+            if session_id not in bucket["sessions"]:
+                bucket["sessions"].append(str(session_id))
+        day["hours"][created.hour] += total
+        sessions.setdefault(day_key, set()).add(str(session_id or "unknown"))
+    for day_key, session_ids in sessions.items():
+        days[day_key]["sessions"] = sorted(session_ids)
+
+    new_runs = []
+    for row, model in zip(rows, evidence):
+        if not new_runs or new_runs[-1][1] != model:
+            new_runs.append([row[0], model])
+    return days, new_runs, (rows[-1][0] if rows else 0), matched
+
+
+def scan_minimax(bounds, cache):
+    ledger_touch("minimax")
+    fc = cache.setdefault("minimax", {})
+    B = _empty_token_ranges()
+    db_path = _minimax_db_path()
+    if not db_path:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    db_path = os.path.realpath(db_path)
+    cache_key = "db:" + db_path
+    entry = fc.get(cache_key)
+    if not isinstance(entry, dict) or entry.get("version") != _MINIMAX_SCAN_VERSION:
+        previous = entry if isinstance(entry, dict) else {}
+        # 口径升级只作废计算结果；runs 是从已轮转掉的日志里攒下来的证据，要留着。
+        entry = {"version": _MINIMAX_SCAN_VERSION, "logs": {}, "pending": {},
+                 "runs": previous.get("runs") or [], "through": previous.get("through") or 0}
+        fc.clear()
+        fc[cache_key] = entry
+        cache["_dirty"] = True
+
+    offsets, pending = entry.setdefault("logs", {}), entry.setdefault("pending", {})
+    before = dict(offsets)
+    learned = _minimax_read_turn_models(_minimax_log_dir(db_path), offsets, pending)
+    if offsets != before:
+        cache["_dirty"] = True
+
+    signature = _sqlite_signature(db_path)
+    if learned or "days" not in entry or entry.get("sig") != signature:
+        days, runs, through, matched = _scan_minimax_database(
+            db_path, pending, entry.get("runs") or [], entry.get("through") or 0)
+        horizon = int(_time.time()) - _MINIMAX_PENDING_TTL
+        for turn_id in [turn_id for turn_id, value in pending.items()
+                        if turn_id in matched or not isinstance(value, list)
+                        or len(value) != 2 or not isinstance(value[1], int)
+                        or value[1] < horizon]:
+            del pending[turn_id]
+        entry.update({"sig": signature, "days": days, "runs": runs, "through": through})
+        cache["_dirty"] = True
+
+    for day_key, day in ledger_reconcile("minimax", entry.get("days", {})).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    return {"ranges": B}
+
+
 # ---------- MiMoCode ----------
 # MiMoCode uses the OpenCode message schema and XDG data-directory rules.
 def _mimocode_data_dirs():
@@ -12464,6 +12938,7 @@ def compute():
     hm = _safe_scan("hermes", lambda: scan_hermes(bounds, cache), _empty_hermes, errors)
     zc = _safe_scan("zcode", lambda: scan_zcode(bounds, cache), _empty_zcode, errors)
     dv = _safe_scan("devin", lambda: scan_devin(bounds, cache), _empty_devin, errors)
+    mm = _safe_scan("minimax", lambda: scan_minimax(bounds, cache), _empty_minimax, errors)
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
@@ -12627,6 +13102,7 @@ def compute():
     paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     dvranges = {k: token_usage_range(dv["ranges"][k]) for k in RANGE_KEYS}
+    mmranges = {k: token_usage_range(mm["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
     wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
@@ -12717,6 +13193,10 @@ def compute():
         "devin": {
             "ranges": dvranges,
             "quota": provider_quotas["devin"],
+        },
+        "minimax": {
+            "ranges": mmranges,
+            "quota": provider_quotas["minimax"],
         },
         "cursor": provider_quotas["cursor"],
         "zed": provider_quotas["zed"],
@@ -12812,7 +13292,7 @@ def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
                      "workbuddy_ai", "codebuddy",
-                     "deepseek_harness", "qwencode", "devin"):
+                     "deepseek_harness", "qwencode", "devin", "minimax"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -12863,7 +13343,7 @@ def _recalc_costs(result):
                     cost = authoritative_cost or (
                         ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                         + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key in ("hermes", "zcode", "mimocode", "devin"):
+                elif tool_key in ("hermes", "zcode", "mimocode", "devin", "minimax"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
                     reason = m.get("reason", 0)
@@ -12959,6 +13439,14 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    # Devin / MiniMax Code 把 token 与账号额度放在同一个键下：token 要同步，
+    # 额度（Devin 的那行带着登录邮箱）同样只留在本机。
+    for key in ("devin", "minimax"):
+        tool = snapshot.get(key)
+        if isinstance(tool, dict) and "quota" in tool:
+            tool = dict(tool)
+            tool.pop("quota", None)
+            snapshot[key] = tool
     kimi = snapshot.get("kimicode")
     if isinstance(kimi, dict):
         kimi = dict(kimi)
@@ -13554,7 +14042,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "codex_reserve": 0.0,
                        "gemini": 0.0, "grok": 0.0,
-                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "pi": 0.0,
+                       "zcode": 0.0, "mimocode": 0.0, "devin": 0.0, "minimax": 0.0,
+                       "pi": 0.0,
                        "workbuddy": 0.0, "workbuddy_ai": 0.0, "codebuddy": 0.0,
                        "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
@@ -13719,7 +14208,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 m[key] += mv.get(key, 0)
 
     for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
-                             ("devin", "Devin")):
+                             ("devin", "Devin"), ("minimax", "MiniMax Code")):
         for dk, day_data in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -13932,7 +14421,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "codex_reserve", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "devin", "pi", "workbuddy", "workbuddy_ai", "codebuddy", "deepseek_harness",
+        "mimocode", "devin", "minimax", "pi", "workbuddy", "workbuddy_ai", "codebuddy",
+        "deepseek_harness",
         "opencode", "qwencode", "musecode", "cmdcode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
@@ -13986,7 +14476,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "hermes": round(v["hermes"], 2),
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2),
-              "devin": round(v["devin"], 2), "pi": round(v["pi"], 2),
+              "devin": round(v["devin"], 2), "minimax": round(v["minimax"], 2),
+              "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
               "workbuddy_ai": round(v["workbuddy_ai"], 2),
               "codebuddy": round(v["codebuddy"], 2),
@@ -14002,7 +14493,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                              + v["codebuddy"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["musecode"] + v["cmdcode"] + v["prime_agent"] + v["hermes"]
-                             + v["openclaw"] + v["devin"], 2),
+                             + v["openclaw"] + v["devin"] + v["minimax"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "xr_in": v["xr_in"], "xr_out": v["xr_out"],
@@ -14265,9 +14756,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             name = f"{nice_model(model)} (OpenCode)"
             model_tok[name] = model_tok.get(name, 0) + token_total(usage)
 
-    # --- ZCode / MiMoCode / Devin ---
+    # --- ZCode / MiMoCode / Devin / MiniMax Code ---
     for tool_key, suffix in (("zcode", "ZCode"), ("mimocode", "MiMoCode"),
-                             ("devin", "Devin")):
+                             ("devin", "Devin"), ("minimax", "MiniMax Code")):
         for dk, day in _iter_cached_token_days(cache.get(tool_key, {})):
             if cutoff and dk < cutoff:
                 continue
@@ -15188,6 +15679,7 @@ _PROJECT_SOURCES = (
 _PROJECT_DAY_SOURCES = (
     # tool_key,  显示名
     ("devin",    "Devin"),
+    ("minimax",  "MiniMax Code"),
     ("hermes",   "Hermes"),
     ("opencode", "OpenCode"),
     ("mimocode", "MiMoCode"),

@@ -421,6 +421,7 @@ struct DashboardView: View {
         case "musecode": return Theme.musecode
         case "cmdcode": return Theme.cmdcode
         case "devin": return Theme.devin
+        case "minimax": return Theme.minimax
         default: return Theme.claude
         }
     }
@@ -1138,6 +1139,8 @@ struct DashboardView: View {
                           reasonIncludedInOutput: true, to: &out)
         appendTokenModels(usage.cmdcode.ranges.get(key).models, tool: "cmdcode", suffix: "Command Code", to: &out)
         appendTokenModels(usage.devin.ranges.get(key).models, tool: "devin", suffix: "Devin", to: &out)
+        appendTokenModels(usage.minimax.ranges.get(key).models, tool: "minimax",
+                          suffix: "MiniMax Code", to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -1206,6 +1209,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.musecode.ranges.get(key), reasonIncludedInOutput: true)
             + tokenUsageTotal(usage.cmdcode.ranges.get(key))
             + tokenUsageTotal(usage.devin.ranges.get(key))
+            + tokenUsageTotal(usage.minimax.ranges.get(key))
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -1229,6 +1233,7 @@ struct DashboardView: View {
             + usage.musecode.ranges.get(key).cost
             + usage.cmdcode.ranges.get(key).cost
             + usage.devin.ranges.get(key).cost
+            + usage.minimax.ranges.get(key).cost
     }
 
     static func tokenUsageTotal(

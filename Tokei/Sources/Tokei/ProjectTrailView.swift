@@ -260,6 +260,12 @@ struct ProjectTrailView: View {
         case "workbuddy_ai": return Theme.workbuddyAI
         case "codebuddy": return Theme.codebuddy
         case "deepseek_harness": return Theme.deepseekHarness
+        case "opencode": return Theme.opencode
+        case "kimicode": return Theme.kimicode
+        case "musecode": return Theme.musecode
+        case "cmdcode": return Theme.cmdcode
+        case "devin": return Theme.devin
+        case "minimax": return Theme.minimax
         default: return Theme.tTertiary
         }
     }
