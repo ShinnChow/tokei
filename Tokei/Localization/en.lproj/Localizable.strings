@@ -3,6 +3,7 @@
 
 " · %@ 台设备已合并" = " · %@ devices merged";
 " · 更新中" = " · Updating";
+"%@ Credits" = "%@ Credits";
 "%@ token" = "%@ tokens";
 "%@ 万亿 token" = "%@ trillion tokens";
 "%@ 上下文快照" = "%@ context snapshot";

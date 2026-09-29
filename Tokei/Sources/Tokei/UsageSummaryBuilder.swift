@@ -10,6 +10,7 @@ struct UsageToolVisibility: Equatable {
     var qoder = true
     var qoderwork = true
     var qodercli = true
+    var qodercliCN = true
     var hermes = true
     var zcode = true
     var mimocode = true
@@ -265,15 +266,12 @@ enum UsageSummaryBuilder {
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.qodercli {
-            let r = usage.qodercli.ranges.get(range)
-            let line = Line(
-                id: "qodercli", name: "Qoder CLI", cost: nil,
-                tokens: r.totalTokens, sessions: r.sessions, calls: r.calls,
-                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil,
-                extra: r.credits > 0 ? "\(Fmt.credits(r.credits)) Credits" : nil
-            )
-            if !line.isEmpty { lines.append(line) }
+            appendQoderCli(&lines, id: "qodercli", name: "Qoder CLI",
+                           range: usage.qodercli.ranges.get(range))
+        }
+        if visibility.qodercliCN {
+            appendQoderCli(&lines, id: "qodercli_cn", name: "Qoder CN",
+                           range: usage.qodercliCN.ranges.get(range))
         }
         if visibility.hermes {
             let r = usage.hermes.ranges.get(range)
@@ -365,6 +363,18 @@ enum UsageSummaryBuilder {
     ) -> Line? {
         toolLines(usage: usage, range: range, visibility: visibility)
             .first { $0.id == id }
+    }
+
+    private static func appendQoderCli(_ lines: inout [Line], id: String, name: String,
+                                       range r: QoderRange) {
+        let line = Line(
+            id: id, name: name, cost: nil,
+            tokens: r.totalTokens, sessions: r.sessions, calls: r.calls,
+            input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+            reason: nil, hit: r.hit > 0 ? r.hit : nil,
+            extra: r.credits > 0 ? "\(Fmt.credits(r.credits)) Credits" : nil
+        )
+        if !line.isEmpty { lines.append(line) }
     }
 
     private static func appendTokenTool(

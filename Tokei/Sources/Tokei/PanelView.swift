@@ -17,6 +17,7 @@ struct PanelView: View {
     @State private var grokModelsOpen = false
     @State private var grokBotModelsOpen = false
     @State private var qoderCliModelsOpen = false
+    @State private var qoderCliCNModelsOpen = false
     @State private var hermesModelsOpen = false
     @State private var zcodeModelsOpen = false
     @State private var mimocodeModelsOpen = false
@@ -66,6 +67,7 @@ struct PanelView: View {
     @AppStorage("showQoderIde") private var showQoder = true
     @AppStorage("showQoderWork") private var showQoderWork = true
     @AppStorage("showQoderCli") private var showQoderCli = true
+    @AppStorage("showQoderCliCN") private var showQoderCliCN = true
     @AppStorage("showHermes") private var showHermes = true
     @AppStorage("showZcode") private var showZcode = true
     @AppStorage("showMimoCode") private var showMimoCode = true
@@ -111,6 +113,7 @@ struct PanelView: View {
             claude: showClaude, codex: showCodex, gemini: showGemini, grok: showGrok,
             grokBot: showGrokBot,
             qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
+            qodercliCN: showQoderCliCN,
             hermes: showHermes, zcode: showZcode, mimocode: showMimoCode,
             openclaw: showOpenClaw, pi: showPi, primeAgent: showPrimeAgent,
             workbuddy: showWorkBuddy, workbuddyAI: showWorkBuddyAI,
@@ -124,7 +127,7 @@ struct PanelView: View {
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showCursor, showZed, showSub2API, showZai,
-         showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showHermes,
+         showGrok, showGrokBot, showQoder, showQoderWork, showQoderCli, showQoderCliCN, showHermes,
          showZcode, showMimoCode,
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
@@ -404,7 +407,7 @@ struct PanelView: View {
             return (sel, selected, selectedUsage)
         }()
         let qr = u.qoder.ranges.get(sel), qwr = u.qoderwork.ranges.get(sel)
-        let qclir = u.qodercli.ranges.get(sel)
+        let qclir = u.qodercli.ranges.get(sel), qclicnr = u.qodercliCN.ranges.get(sel)
         let hr = u.hermes.ranges.get(sel)
         let zr = u.zcode.ranges.get(sel), mr = u.mimocode.ranges.get(sel)
         let lr = u.openclaw.ranges.get(sel), pr = u.pi.ranges.get(sel)
@@ -500,7 +503,14 @@ struct PanelView: View {
                          tint: Theme.qoderwork, content: AnyView(qoderworkBlock(u.qoderwork, qwr))),
             ToolCardItem(id: "qodercli", name: "Qoder CLI", visible: showQoderCli,
                          active: qclir.calls > 0 || qclir.totalTokens > 0,
-                         tint: Theme.qodercli, content: AnyView(qodercliBlock(u.qodercli, qclir))),
+                         tint: Theme.qodercli, content: AnyView(qodercliBlock(
+                            u.qodercli, qclir, name: "Qoder CLI", toolID: "qodercli",
+                            tint: Theme.qodercli, modelsOpen: $qoderCliModelsOpen))),
+            ToolCardItem(id: "qodercli_cn", name: "Qoder CN", visible: showQoderCliCN,
+                         active: qclicnr.calls > 0 || qclicnr.totalTokens > 0,
+                         tint: Theme.qodercliCN, content: AnyView(qodercliBlock(
+                            u.qodercliCN, qclicnr, name: "Qoder CN", toolID: "qodercli_cn",
+                            tint: Theme.qodercliCN, modelsOpen: $qoderCliCNModelsOpen))),
             ToolCardItem(id: "hermes", name: "Hermes", visible: showHermes, active: hr.sessions > 0,
                          tint: Theme.hermes, content: AnyView(hermesBlock(hr, modelsOpen: $hermesModelsOpen))),
             ToolCardItem(id: "zcode", name: "ZCode", visible: showZcode, active: zr.sessions > 0,
@@ -1769,16 +1779,22 @@ struct PanelView: View {
         }
     }
 
-    // MARK: - Qoder CLI 卡片
+    // MARK: - Qoder CLI / Qoder CN 卡片
+    /// 国际版与国内版（~/.qoder-cn）transcript 同格式，共用一张卡片的排法。
     @ViewBuilder
-    func qodercliBlock(_ q: QoderStat, _ r: QoderRange) -> some View {
+    func qodercliBlock(_ q: QoderStat, _ r: QoderRange, name: String, toolID: String,
+                       tint: Color, modelsOpen: Binding<Bool>) -> some View {
+        let exactTokens = r.usage_available && r.totalTokens > 0
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain("Qoder CLI", tint: Theme.qodercli, toolID: "qodercli")
+            cardHeadPlain(name, tint: tint, toolID: toolID)
             if r.calls > 0 || r.totalTokens > 0 {
-                if r.usage_available && r.totalTokens > 0 {
-                    CostHeadline(value: Fmt.human(r.totalTokens), caption: L("%@ 总量", sel.label), tint: Theme.qodercli)
+                if exactTokens {
+                    CostHeadline(value: Fmt.human(r.totalTokens), caption: L("%@ 总量", sel.label), tint: tint)
+                } else if r.credits > 0 {
+                    // 内置路由不把 token 落盘（usage 全是 0），这时 Credits 是唯一的计量
+                    CostHeadline(value: Fmt.credits(r.credits), caption: L("%@ Credits", sel.label), tint: tint)
                 }
-                metricGrid(r.credits > 0 ? [
+                metricGrid(exactTokens && r.credits > 0 ? [
                     .init("circle.hexagongrid.fill", "Credits", Fmt.credits(r.credits)),
                 ] : [], hit: r.hit, extra: {
                     var items: [Metric] = [
@@ -1800,11 +1816,11 @@ struct PanelView: View {
                         items.append(.init("point.3.connected.trianglepath.dotted", L("子agent"), "\(r.sub_agents)"))
                     }
                     return items
-                }(), tint: Theme.qodercli)
+                }(), tint: tint)
                 if !r.models.isEmpty {
-                    tokenModelDisclosure(r.models, open: $qoderCliModelsOpen, tint: Theme.qodercli)
+                    tokenModelDisclosure(r.models, open: modelsOpen, tint: tint)
                 } else if let model = q.model, !model.isEmpty {
-                    modelBadge(model, tint: Theme.qodercli)
+                    modelBadge(model, tint: tint)
                 }
             } else {
                 emptyHint
@@ -2218,9 +2234,11 @@ struct PanelView: View {
                                     .layoutPriority(1)
                                 Spacer(minLength: 6)
                                 HStack(spacing: 6) {
-                                    Text(Fmt.human(total))
-                                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
-                                        .foregroundStyle(Theme.tTertiary)
+                                    if total > 0 {
+                                        Text(Fmt.human(total))
+                                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                                            .foregroundStyle(Theme.tTertiary)
+                                    }
                                     if hit > 0 {
                                         Text(String(format: "%.0f%%", hit))
                                             .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
@@ -3015,6 +3033,7 @@ struct PanelView: View {
                 settingsRow("Qoder Desktop", tint: Theme.qoder, isOn: $showQoder)
                 settingsRow("QoderWork", tint: Theme.qoderwork, isOn: $showQoderWork)
                 settingsRow("Qoder CLI", tint: Theme.qodercli, isOn: $showQoderCli)
+                settingsRow("Qoder CN", tint: Theme.qodercliCN, isOn: $showQoderCliCN)
                 settingsRow("Hermes", tint: Theme.hermes, isOn: $showHermes)
                 settingsRow("ZCode", tint: Theme.zcode, isOn: $showZcode)
                 settingsRow("MiMoCode", tint: Theme.mimocode, isOn: $showMimoCode)
@@ -4133,7 +4152,8 @@ struct PanelView: View {
         if let data = result.stdout.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let tools = ["claude", "codex", "gemini", "antigravity", "cursor", "zed",
-                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli", "hermes",
+                         "sub2api", "zai", "grok", "grok_bot", "qoder", "qoderwork", "qodercli",
+                         "qodercli_cn", "hermes",
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "codebuddy",
                          "deepseek_harness",

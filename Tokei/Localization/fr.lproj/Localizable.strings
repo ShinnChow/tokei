@@ -3,6 +3,7 @@
 
 " · %@ 台设备已合并" = " · %@ appareils fusionnés";
 " · 更新中" = " · Mise à jour";
+"%@ Credits" = "Crédits %@";
 "%@ 上下文快照" = "Instantané de contexte %@";
 "%@ 会话" = "%@ sessions";
 "%@ 分钟" = "%@ min";
