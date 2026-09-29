@@ -44,6 +44,9 @@ private struct QuotaHistoryFrame {
     var now: Date
     var start: Date
     var projection: QuotaHistoryProjection
+    /// 每天用了多少额度。取本机留着的全部快照（最多 7 天），不跟着上面的跨度走，
+    /// 否则选 24h 时只剩今天和半个昨天。
+    var daily: [QuotaDailyConsumption]
 }
 
 struct QuotaHistoryView: View {
@@ -105,14 +108,62 @@ struct QuotaHistoryView: View {
                 }
             }
         }
+        dailyConsumptionSection(frame.daily)
         changesSection(frame.projection)
         activitySection(frame.projection)
+    }
+
+    /// 每天用掉了周额度的多少个百分点（issue #85）。Codex 看周额度，Claude 看周 · 全部。
+    @ViewBuilder
+    private func dailyConsumptionSection(_ daily: [QuotaDailyConsumption]) -> some View {
+        let window = tool == .codex ? tool.windowNames[0] : tool.windowNames[1]
+        let rows = Array(daily.filter { $0.window == window }.prefix(7))
+        if !rows.isEmpty {
+            let largest = max(rows.map(\.consumed).max() ?? 0, 0.1)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(L("每天用了多少额度"))
+                        .font(.system(size: Theme.fontSize(12), weight: .bold))
+                        .foregroundStyle(Theme.tPrimary)
+                    Text(L(window))
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold))
+                        .foregroundStyle(tool.tint)
+                }
+                ForEach(rows) { row in
+                    HStack(spacing: 8) {
+                        Text(Calendar.current.isDateInToday(row.dayStart)
+                             ? L("今天") : Self.dayFormatter.string(from: row.dayStart))
+                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                            .foregroundStyle(Theme.tTertiary)
+                            .frame(width: 40, alignment: .leading)
+                        GeometryReader { proxy in
+                            Capsule()
+                                .fill(seriesColor(for: row.window).opacity(row.isComplete ? 0.85 : 0.4))
+                                .frame(width: max(2, proxy.size.width * CGFloat(row.consumed / largest)))
+                        }
+                        .frame(width: 96, height: 7)
+                        Text(row.isComplete
+                             ? String(format: "%.1f%%", row.consumed)
+                             : L("约 %@", String(format: "%.1f%%", row.consumed)))
+                            .font(.system(size: Theme.fontSize(10.5), weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.tPrimary)
+                            .frame(width: 64, alignment: .trailing)
+                        if row.refills > 0 {
+                            Text(L("回满 ×%@", row.refills))
+                                .font(.system(size: Theme.fontSize(9)))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
     }
 
     private var footnote: some View {
         Text(span.showsDailyTokens
              ? L("长跨度画的是每日真实 token 消耗，已合并所有设备的账本（CLI 清理旧日志也不缩水）；额度百分比快照只保留 7 天，画不了这么长。")
-             : L("额度曲线来自本机定时快照；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。"))
+             : L("额度曲线来自本机定时快照；每日用量是当天剩余额度下降之和，回满不抵扣，当天有一头没采到的标「约」；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。"))
             .font(.system(size: Theme.fontSize(9.5)))
             .foregroundStyle(Theme.tTertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -296,7 +347,9 @@ struct QuotaHistoryView: View {
             Text(L("已用 %@%%", String(format: "%.0f", used)))
                 .font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                 .foregroundStyle(Theme.tSecondary)
-                .frame(width: 62, alignment: .trailing)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minWidth: 62, alignment: .trailing)
         }
     }
 
@@ -345,10 +398,16 @@ struct QuotaHistoryView: View {
                         .font(.system(size: Theme.fontSize(11), weight: .semibold, design: .rounded))
                         .foregroundStyle(Theme.tSecondary)
                         .frame(width: 52, alignment: .trailing)
-                    Text(cycle.used_pct.map { L("用到%@%%", String(format: "%.0f", $0)) } ?? "—")
-                        .font(.system(size: Theme.fontSize(9), design: .monospaced))
-                        .foregroundStyle(Theme.tTertiary)
-                        .frame(width: 52, alignment: .trailing)
+                    // 按最宽的「用到100%」留列宽：译文（使用率 100%）更长，写死 52 会截成「…」
+                    ZStack(alignment: .trailing) {
+                        Text(L("用到%@%%", "100")).hidden()
+                        Text(cycle.used_pct.map { L("用到%@%%", String(format: "%.0f", $0)) } ?? "—")
+                    }
+                    .font(.system(size: Theme.fontSize(9), design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minWidth: 52, alignment: .trailing)
                 }
             }
             if hiddenCount > 0 {
@@ -589,10 +648,17 @@ struct QuotaHistoryView: View {
                             .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                             .foregroundStyle(Theme.tTertiary)
                             .frame(width: 40, alignment: .leading)
-                        Text(L(event.window))
-                            .font(.system(size: Theme.fontSize(9.5), weight: .semibold))
-                            .foregroundStyle(tool.tint)
-                            .frame(width: 42, alignment: .leading)
+                        // 列宽按这个工具最长的窗口名来定：中文 42 点够用，
+                        // 译文（Semaine · Fable）会折成两行，各行也要对齐。
+                        ZStack(alignment: .leading) {
+                            ForEach(tool.windowNames, id: \.self) { Text(L($0)).hidden() }
+                            Text(L(event.window))
+                                .foregroundStyle(tool.tint)
+                        }
+                        .font(.system(size: Theme.fontSize(9.5), weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(minWidth: 42, alignment: .leading)
                         Text(String(format: "-%.1f%%", event.drop))
                             .font(.system(size: Theme.fontSize(10.5), weight: .semibold, design: .monospaced))
                             .foregroundStyle(Theme.tPrimary)
@@ -650,7 +716,8 @@ struct QuotaHistoryView: View {
             projection: QuotaHistoryProjection(
                 points: history.points(since: start),
                 tool: tool
-            )
+            ),
+            daily: QuotaHistoryProjection.dailyConsumption(from: history.points, tool: tool)
         )
     }
 
@@ -676,6 +743,12 @@ struct QuotaHistoryView: View {
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd"
         return formatter
     }()
 

@@ -223,6 +223,7 @@
 "周额度" = "Weekly quota";
 "命中" = "Hits";
 "响应" = "Responses";
+"回满 ×%@" = "refilled ×%@";
 "回顾" = "Review";
 "团队共享资源包" = "Team shared resource pack";
 "团队账号个人可用积分" = "Team account personal credits";
@@ -408,6 +409,7 @@
 "正在检查" = "Checking";
 "正在读取周额度…" = "Reading weekly quota…";
 "此版本包含尚未发布的改动，不检查线上更新" = "This build contains unreleased changes; online updates are not checked";
+"每天用了多少额度" = "Daily quota usage";
 "永动机" = "Perpetual Motion";
 "沉睡" = "Asleep";
 "活动时间" = "Active hours";
@@ -454,6 +456,7 @@
 "系统未能加载登录项" = "System failed to load login item";
 "系统未能加载登录项：%@" = "System failed to load login item: %@";
 "累计" = "Total";
+"约 %@" = "~%@";
 "经典白" = "Classic White";
 "续期" = "Renew";
 "综合剩余比例" = "Combined remaining";
@@ -553,7 +556,7 @@
 "额度数据已过期 · 更新于 %@" = "Quota data expired · updated %@";
 "额度数据已过期" = "Quota data expired";
 "额度曲线" = "Quota";
-"额度曲线来自本机定时快照；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。" = "Quota curves come from scheduled local snapshots; model markers come from local session token deltas within the same minute—indicating related activity, not official per-model billing attribution.";
+"额度曲线来自本机定时快照；每日用量是当天剩余额度下降之和，回满不抵扣，当天有一头没采到的标「约」；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。" = "Quota curves come from periodic local snapshots. Daily usage is the sum of drops in remaining quota that day (refills don't offset it); days not sampled at both ends are marked \"~\". Model markers come from local session token increases in the same minute and only indicate related activity, not official per-model billing.";
 "额度更新" = "Quota updated";
 "额度更新于 %@" = "Quota updated %@";
 "额度有效期" = "Quota validity";
