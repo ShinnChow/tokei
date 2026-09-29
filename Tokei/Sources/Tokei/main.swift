@@ -286,13 +286,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static let kimicodeColor = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // macOS 26 上用可变宽度初始化时，状态栏项偶发在按钮拿到标题、图标之前就被压没，
+        // 进程在跑、菜单栏却看不到图标（issue #8，用户在 26.5 上复现并验证了这套处理）。
+        // 先按正方形占位并显式设为可见；拿到内容后 fitStatusItemWidth 再按内容定宽。
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.isVisible = true
         if let b = statusItem.button {
             b.action = #selector(handleStatusItemClick(_:))
             b.target = self
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         updateStatusTitle()
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.isVisible = true
+            self?.updateStatusTitle()
+        }
         NotificationCenter.default.addObserver(
             forName: L10n.languageDidChange, object: nil, queue: .main
         ) { [weak self] _ in
@@ -486,6 +494,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.invalidateIntrinsicContentSize()
         let compactWidth = ceil(button.intrinsicContentSize.width) + 4
         statusItem.length = max(NSStatusBar.system.thickness, compactWidth)
+        // 菜单栏图标是唯一入口，每次定宽都确认一次可见（issue #8）。
+        statusItem.isVisible = true
+    }
+
+    /// 已经在运行时，再从访达、启动台或 Spotlight 打开 Tokei 就直接唤出面板。
+    /// 菜单栏图标被挤掉或系统没显示出来时（issue #8），这是唯一还能进来的入口。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        statusItem?.isVisible = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.popover.isShown,
+                  let button = self.statusItem?.button, button.window != nil else { return }
+            self.popoverAnchorButton = button
+            self.togglePopover(anchorButton: button)
+        }
+        return false
     }
 
     func autoFetchPricing() {

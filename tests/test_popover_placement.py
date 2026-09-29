@@ -62,6 +62,17 @@ class PopoverPlacementTests(unittest.TestCase):
         self.assertIn("layout.pageDidChange(next.rawValue, width: pageWidth(for: next))",
                       panel_source)
 
+    def test_status_item_stays_visible_and_reopening_the_app_shows_the_panel(self):
+        """macOS 26 上可变宽度初始化的状态栏项偶发被压没，进程在跑、图标却看不到（issue #8）。"""
+        app_source = (ROOT / "Tokei/Sources/Tokei/main.swift").read_text()
+        self.assertIn("statusItem(withLength: NSStatusItem.squareLength)", app_source)
+        self.assertNotIn("statusItem(withLength: NSStatusItem.variableLength)", app_source)
+        self.assertGreaterEqual(app_source.count("isVisible = true"), 3, "启动、下一轮、每次定宽都确认可见")
+        # squareLength 是占位常量不是宽度，定宽的下限仍用菜单栏厚度
+        self.assertIn("max(NSStatusBar.system.thickness, compactWidth)", app_source)
+        self.assertIn("func applicationShouldHandleReopen", app_source)
+        self.assertIn("button.window != nil", app_source, "按钮不在窗口里时不能硬挂弹窗")
+
     def test_switching_pages_never_animates_the_panel_layout(self):
         """面板挂在菜单栏按钮上，开着的时候做动画式布局会让 AppKit 重新挑选屏幕
         和锚点——全屏 Space 与外接显示器下会把面板甩到屏幕边上（issue #97）。
