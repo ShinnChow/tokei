@@ -1738,7 +1738,8 @@ def _format_token_models(models, include_prices=True):
                         "cost": v.get("cost", 0), "cost_cny": v.get("cost_cny", 0),
                         "credits": v.get("credits", 0),
                         "pin": 0 if v.get("cost_cny") else p["in"],
-                        "pout": 0 if v.get("cost_cny") else p["out"]})
+                        "pout": 0 if v.get("cost_cny") else p["out"],
+                        "pcr": 0 if v.get("cost_cny") else p["cache_read"]})
     return result
 
 
@@ -13187,7 +13188,7 @@ def compute():
             p = price_for(n)
             models.append({"name": nice_model(n), "in": v["in"], "out": v["out"],
                            "cr": v["cr"], "cw": v["cw"], "cost": v["cost"],
-                           "pin": p["in"], "pout": p["out"]})
+                           "pin": p["in"], "pout": p["out"], "pcr": p["cache_read"]})
         return {"hit": hit, "in": b["in"], "out": b["out"],
                 "cr": b["cr"], "cw": b["cw"], "cost": b["cost"], "models": models,
                 "sessions": len(b["sessions"])}
@@ -13207,7 +13208,8 @@ def compute():
             p = gemini_price(n)
             models.append({"name": nice_model(n), "in": max(v["in"] - v["cached"], 0),
                            "out": v["out"], "cached": v["cached"], "thoughts": v["thoughts"],
-                           "cost": v["cost"], "pin": p["in"], "pout": p["out"]})
+                           "cost": v["cost"], "pin": p["in"], "pout": p["out"],
+                           "pcr": p["cache_read"]})
         return {"hit": hit, "in": max(b["in"] - b["cached"], 0), "out": b["out"],
                 "cached": b["cached"], "thoughts": b["thoughts"], "cost": b["cost"],
                 "models": models, "sessions": len(b["sessions"])}
@@ -13524,6 +13526,7 @@ def _recalc_costs(result):
                     total_cost += authoritative_cost
                     m["pin"] = 0
                     m["pout"] = 0
+                    m["pcr"] = 0
                     continue
                 if tool_key == "hermes" and authoritative_cost:
                     total_cost += authoritative_cost
@@ -13531,11 +13534,13 @@ def _recalc_costs(result):
                         price = _raw_price(price_id)
                         m["pin"] = price["in"]
                         m["pout"] = price["out"]
+                        m["pcr"] = price["cache_read"]
                     continue
                 if not price_id:
                     total_cost += authoritative_cost
                     m["pin"] = 0
                     m["pout"] = 0
+                    m["pcr"] = 0
                     continue
                 p = _raw_price(price_id)
                 ti = m.get("in", 0)
@@ -13580,6 +13585,9 @@ def _recalc_costs(result):
                 m["cost"] = round(cost, 6)
                 m["pin"] = p["in"]
                 m["pout"] = p["out"]
+                # 缓存读往往占 Token 的绝大部分，单价标签得把它也写出来，否则按
+                # 输入 / 输出价比较两个模型会得出反直觉的结论。
+                m["pcr"] = p.get("cache_read", 0)
                 total_cost += cost
             r["cost"] = round(total_cost, 6)
 

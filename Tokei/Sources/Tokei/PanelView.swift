@@ -625,7 +625,8 @@ struct PanelView: View {
                 let claudeRows = r.models.filter { $0.name != "合成" }.map { m in // l10n-ignore
                     let denom = m.cr + m.cw + m.in
                     let hit = denom > 0 ? Double(m.cr) / Double(denom) * 100 : 0
-                    return ModelRow(name: m.name, pin: m.pin, pout: m.pout, cost: m.cost, total: m.total, hit: hit,
+                    return ModelRow(name: m.name, pin: m.pin, pout: m.pout, pcr: m.pcr ?? 0,
+                                   cost: m.cost, total: m.total, hit: hit,
                                    tokIn: m.in, tokOut: m.out, tokCR: m.cr, tokCW: m.cw)
                 }
                 if !claudeRows.isEmpty {
@@ -952,7 +953,8 @@ struct PanelView: View {
                         let total = m.in + m.out + m.cached + m.thoughts
                         let denom = m.cached + m.in
                         let hit = denom > 0 ? Double(m.cached) / Double(denom) * 100 : 0
-                        return ModelRow(name: m.name, pin: m.pin, pout: m.pout, cost: m.cost, total: total, hit: hit,
+                        return ModelRow(name: m.name, pin: m.pin, pout: m.pout, pcr: m.pcr ?? 0,
+                                        cost: m.cost, total: total, hit: hit,
                                         tokIn: m.in, tokOut: m.out, tokCR: m.cached, tokCW: m.thoughts)
                     }
                     modelDisclosure(geminiRows, open: $geminiModelsOpen, tint: Theme.gemini,
@@ -2045,6 +2047,7 @@ struct PanelView: View {
         var name: String
         var pin: Double
         var pout: Double
+        var pcr: Double = 0
         var cost: Double
         var total: Int = 0
         var hit: Double = 0
@@ -2246,7 +2249,7 @@ struct PanelView: View {
                                            tokOut: inclusiveIO ? m.out + m.reason : m.out,
                                            tokCR: m.cr, tokCW: m.cw,
                                            tokReason: m.reason,
-                                           pin: m.pin, pout: m.pout, hit: hit, tint: tint,
+                                           pin: m.pin, pout: m.pout, pcr: m.pcr, hit: hit, tint: tint,
                                            componentsAreSubtotals: inclusiveIO)
                         }
                     }
@@ -2332,7 +2335,7 @@ struct PanelView: View {
                         .buttonStyle(.plain)
                         if isExpanded {
                             modelDetailRow(tokIn: m.tokIn, tokOut: m.tokOut, tokCR: m.tokCR, tokCW: m.tokCW,
-                                           pin: m.pin, pout: m.pout, hit: m.hit, tint: tint)
+                                           pin: m.pin, pout: m.pout, pcr: m.pcr, hit: m.hit, tint: tint)
                         }
                     }
                 }
@@ -2345,7 +2348,7 @@ struct PanelView: View {
 
     @ViewBuilder
     func modelDetailRow(tokIn: Int, tokOut: Int, tokCR: Int, tokCW: Int, tokReason: Int = 0,
-                         pin: Double, pout: Double, hit: Double = 0, tint: Color,
+                         pin: Double, pout: Double, pcr: Double = 0, hit: Double = 0, tint: Color,
                          componentsAreSubtotals: Bool = false) -> some View {
         let tagFont = Font.system(size: 9, weight: .medium, design: .monospaced)
         let labelFont = Font.system(size: 8.5)
@@ -2382,6 +2385,13 @@ struct PanelView: View {
                         Text("$").font(tagFont).foregroundStyle(tint)
                         Text("\(String(format: "%.2g", pin))/\(String(format: "%.2g", pout))")
                             .font(tagFont).foregroundStyle(tint)
+                        // 缓存读常占 Token 的绝大部分：不写出它的单价，按输入 / 输出价
+                        // 比较两个模型会得出反直觉的结论（例如 Opus 5.5 与 Sonnet 5.5 同为 0.2）。
+                        if pcr > 0 {
+                            Text("·").font(tagFont).foregroundStyle(tint.opacity(0.6))
+                            Text(L("读")).font(labelFont).foregroundStyle(Theme.tTertiary)
+                            Text(String(format: "%.2g", pcr)).font(tagFont).foregroundStyle(tint)
+                        }
                     }
                     .padding(.horizontal, 6).padding(.vertical, 2.5)
                     .background(Capsule().fill(tint.opacity(0.12)))

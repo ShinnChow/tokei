@@ -26,6 +26,7 @@ struct ClaudeModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double      // 输入单价 $/M
     var pout: Double     // 输出单价 $/M
+    var pcr: Double?     // 缓存读单价 $/M；老数据没有
     var id: String { name }
     var total: Int { `in` + out + cr + cw }
 }
@@ -201,6 +202,7 @@ struct GeminiModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double      // 输入单价 $/M
     var pout: Double     // 输出单价 $/M
+    var pcr: Double?     // 缓存读单价 $/M；老数据没有
     var id: String { name }
 }
 
@@ -579,6 +581,7 @@ struct TokenModelStat: Codable, Identifiable {
     var credits: Double = 0
     var pin: Double = 0
     var pout: Double = 0
+    var pcr: Double = 0
     var id: String { modelId ?? name }
 
     init(from decoder: Decoder) throws {
@@ -596,11 +599,12 @@ struct TokenModelStat: Codable, Identifiable {
         cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
+        pcr = try c.decodeIfPresent(Double.self, forKey: .pcr) ?? 0
     }
 
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
-        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout
+        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout, pcr
         case credits
     }
 }
