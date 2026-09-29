@@ -46,20 +46,38 @@ if [[ -z "${SDKROOT:-}" ]]; then
     fi
 fi
 
-swift build -c release
+# 通用二进制：Apple 芯片和 Intel 各编一份再用 lipo 合成（issue #13）。
+# 不走 `--arch arm64 --arch x86_64`：那条路要完整 Xcode 的 xcbuild，
+# 只装 Command Line Tools 的机器编不了。本地只想快点验证时可设 TOKEI_ARCHS=arm64。
+ARCHS="${TOKEI_ARCHS:-arm64 x86_64}"
+for arch in $ARCHS; do
+    case "$arch" in
+        arm64|x86_64) ;;
+        *) echo "TOKEI_ARCHS 只支持 arm64 / x86_64: $arch" >&2; exit 1 ;;
+    esac
+    swift build -c release --arch "$arch"
+done
 
 APP="Tokei.app"
-BIN="$(swift build -c release --show-bin-path)/Tokei"
-GROK_BOT_HELPER="$(swift build -c release --show-bin-path)/TokeiGrokBotHelper"
 PROJ_DIR="$(dirname "$(pwd)")"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 
 # 二进制
-cp "$BIN" "$APP/Contents/MacOS/Tokei"
-cp "$GROK_BOT_HELPER" "$APP/Contents/Helpers/TokeiGrokBotHelper"
-chmod 755 "$APP/Contents/Helpers/TokeiGrokBotHelper"
+merge_arches() {
+    local product="$1" output="$2" slices=() arch
+    for arch in $ARCHS; do
+        slices+=("$(swift build -c release --arch "$arch" --show-bin-path)/$product")
+    done
+    lipo -create "${slices[@]}" -output "$output"
+    for arch in $ARCHS; do
+        lipo "$output" -verify_arch "$arch" || { echo "$product 缺少 $arch" >&2; exit 1; }
+    done
+}
+merge_arches Tokei "$APP/Contents/MacOS/Tokei"
+merge_arches TokeiGrokBotHelper "$APP/Contents/Helpers/TokeiGrokBotHelper"
+chmod 755 "$APP/Contents/MacOS/Tokei" "$APP/Contents/Helpers/TokeiGrokBotHelper"
 
 # 打包 Python 脚本和配置到 Resources
 cp "$PROJ_DIR/usage.30s.py" "$APP/Contents/Resources/"
