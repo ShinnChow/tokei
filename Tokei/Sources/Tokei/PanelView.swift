@@ -35,11 +35,12 @@ struct PanelView: View {
     @State private var miniMaxModelsOpen = false
     @State private var openClawModelsOpen = false
     @State private var expandedModels: Set<String> = []
-    /// 离屏截图检查各页面用（Tokei --shot out.png --mode settings）；正常启动恒为卡片页。
+    /// 新建的面板从哪一页开始。打开前量尺寸时按面板当前停留的页面临时设置（issue #105），
+    /// 离屏截图检查各页面也用它（Tokei --shot out.png --mode settings）；平时恒为卡片页。
     static var initialMode: PanelMode = .cards
     @State private var mode: PanelMode = PanelView.initialMode
     @State private var trailProjects: [TrailProject]?
-    enum PanelMode { case cards, quotaHistory, dashboard, projects, settings }
+    enum PanelMode: String { case cards, quotaHistory, dashboard, projects, settings }
     private enum ToolCardPresentation: Equatable {
         case standard
         case compactStatus
@@ -158,10 +159,17 @@ struct PanelView: View {
         return [exit, json, errors].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
+    /// 每一页要多宽。首页随卡片数在窄版（322）与宽版之间变，其余页面有自己的下限。
+    private func pageWidth(for mode: PanelMode) -> CGFloat {
+        switch mode {
+        case .settings, .quotaHistory: return settingsPanelWidth
+        case .cards: return panelWidth
+        case .dashboard, .projects: return max(panelWidth, 420)
+        }
+    }
+
     var body: some View {
-        let w = (mode == .settings || mode == .quotaHistory)
-            ? settingsPanelWidth
-            : (mode == .cards ? panelWidth : max(panelWidth, 420))
+        let w = pageWidth(for: mode)
         Group {
             if scrollable {
                 if mode == .projects {
@@ -196,6 +204,10 @@ struct PanelView: View {
         )
         .background {
             if scrollable { Theme.bg }
+        }
+        // 换到宽度不同的页面时，由 App 按新页面重新摆放弹窗（issue #105）。
+        .onChange(of: mode) { next in
+            layout.pageDidChange(next.rawValue, width: pageWidth(for: next))
         }
     }
 

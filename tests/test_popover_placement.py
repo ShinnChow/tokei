@@ -44,6 +44,24 @@ class PopoverPlacementTests(unittest.TestCase):
         self.assertNotIn("PanelContentSizeKey", panel_source)
         self.assertNotIn("NSScreen.main?.visibleFrame", panel_source)
 
+    def test_only_a_page_of_a_different_width_reshows_the_open_panel(self):
+        """卡片不超过两张时首页是窄版，进设置、额度曲线会被固定画布裁掉（issue #105）。
+
+        开着的面板只允许在「换页且宽度变了」时重新显示一次，走和打开时同一条路径；
+        切页签、刷新数据仍然不能改画布（issue #97）。
+        """
+        app_source = (ROOT / "Tokei/Sources/Tokei/main.swift").read_text()
+        panel_source = (ROOT / "Tokei/Sources/Tokei/PanelView.swift").read_text()
+
+        # 只有两处 show：打开面板，以及换到宽度不同的页面
+        self.assertEqual(app_source.count("popover.show(relativeTo: "), 2)
+        self.assertEqual(app_source.count("refitPanelForPage()"), 2, "定义一处，只由换页回调调用")
+        self.assertIn("panelLayout.onPageWidthChange", app_source)
+        # 关掉时停在设置页，重开也得按设置页量
+        self.assertIn("PanelView.PanelMode(rawValue: panelLayout.page)", app_source)
+        self.assertIn("layout.pageDidChange(next.rawValue, width: pageWidth(for: next))",
+                      panel_source)
+
     def test_switching_pages_never_animates_the_panel_layout(self):
         """面板挂在菜单栏按钮上，开着的时候做动画式布局会让 AppKit 重新挑选屏幕
         和锚点——全屏 Space 与外接显示器下会把面板甩到屏幕边上（issue #97）。

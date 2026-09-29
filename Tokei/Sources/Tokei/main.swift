@@ -310,6 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         host.sizingOptions = []
         popover.contentViewController = host
         popover.contentSize = panelLayout.contentSize
+        panelLayout.onPageWidthChange = { [weak self] in
+            // 等这一轮视图更新结束再动弹窗。
+            DispatchQueue.main.async { self?.refitPanelForPage() }
+        }
         popover.behavior = .applicationDefined
         // SwiftUI 页面切换本身已有动画。禁用 NSPopover 的尺寸动画，避免 AppKit
         // 在外接显示器的全屏 Space 中按错误屏幕重新计算锚点。
@@ -537,6 +541,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// 换到宽度不同的页面（issue #105）：卡片不超过两张时首页是窄版，进设置、额度曲线
+    /// 要更宽，固定画布会把内容裁掉。按新页面重新量，再像打开时一样挂到菜单栏按钮下显示。
+    ///
+    /// 只有 PanelLayoutContext 判断宽度真的变了才会走到这里；切页签、刷新数据、宽版用户
+    /// 换页都不经过这里，画布照旧固定，不会重新挑选屏幕和锚点（issue #97）。
+    private func refitPanelForPage() {
+        guard popover.isShown, let button = popoverAnchorButton ?? statusItem.button else { return }
+        updatePanelLayout(for: button)
+        popover.contentSize = panelLayout.contentSize
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
     private func updatePanelLayout(for button: NSStatusBarButton) {
         panelLayout.update(
             fitting: measuredPanelSize(),
@@ -553,6 +569,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     ///
     /// 只在打开之前调用，开着的时候绝不重量——见 `PanelPlacement.contentSize`。
     private func measuredPanelSize() -> CGSize {
+        // 按面板当前停留的页面量：关掉时停在设置页，重开时也得按设置页的宽度来（issue #105）。
+        let previous = PanelView.initialMode
+        PanelView.initialMode = PanelView.PanelMode(rawValue: panelLayout.page) ?? .cards
+        defer { PanelView.initialMode = previous }
         let probe = NSHostingController(
             rootView: PanelView(store: store, layout: panelLayout, scrollable: false))
         probe.view.layoutSubtreeIfNeeded()
