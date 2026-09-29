@@ -251,6 +251,8 @@ ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 _DEFAULT_PRICES = {
     "anthropic/claude-fable-5.1":   {"in": 10.0,  "out": 50.0, "cache_read": 0.25,   "cache_write": 12.5, "write1h": 20.0},
     "anthropic/claude-sonnet-5":    {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    # OpenRouter 目录还没收录 Sonnet 5.5；官方价与 Sonnet 5 相同。收录后以目录为准。
+    "anthropic/claude-sonnet-5.5":  {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
     "anthropic/claude-opus-4.8":     {"in": 5.0,   "out": 25.0, "cache_read": 0.5,    "cache_write": 6.25},
     "anthropic/claude-sonnet-4.6":   {"in": 3.0,   "out": 15.0, "cache_read": 0.3,    "cache_write": 3.75},
     "anthropic/claude-haiku-4.5":    {"in": 1.0,   "out": 5.0,  "cache_read": 0.1,    "cache_write": 1.25},

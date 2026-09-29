@@ -140,6 +140,17 @@ class ClaudeModelNameTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(USAGE.nice_model(model), expected)
 
+    def test_sonnet_5_5_is_its_own_model_at_the_official_price(self):
+        """OpenRouter 还没收录 Sonnet 5.5 时，靠内置价认出它，而不是按 sonnet 家族兜底成 Sonnet 5。"""
+        for model in ("claude-sonnet-5-5", "claude-sonnet-5.5", "claude-sonnet-5-5-20260915"):
+            with self.subTest(model=model):
+                self.assertEqual(USAGE._pricing_id(model), "anthropic/claude-sonnet-5.5")
+                self.assertEqual(USAGE.nice_model(model), "Sonnet 5.5")
+        price = USAGE._raw_price("claude-sonnet-5-5")
+        self.assertEqual((price["in"], price["out"], price["cache_read"], price["cache_write"]),
+                         (2.0, 10.0, 0.2, 2.5))
+        self.assertEqual(price["write1h"], 4.0)
+
     def test_dated_snapshots_and_latest_price_as_their_base_model(self):
         """以前日期后缀被当成版本号，最后按家族兜底：Opus 5.5 被算成 Opus 4.8（贵 25%），
         Sonnet 4.5 被算成 Sonnet 5。"""
