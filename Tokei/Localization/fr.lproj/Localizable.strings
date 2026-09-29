@@ -41,6 +41,7 @@
 "<未配置 git remote>" = "<aucun remote git configuré>";
 "API 价" = "Tarif API";
 "Claude Code CLI 额度查询" = "Consultation du quota Claude Code CLI";
+"Claude Code 或 Claude 桌面端下次读到额度时自动刷新" = "Se met à jour automatiquement la prochaine fois que Claude Code ou l'app Claude lit le quota";
 "Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，" = "Aucune carte de quota hebdomadaire Claude Code : ouvrez la page Usage dans Claude Desktop,";
 "Claude Code 额度缓存" = "Cache du quota Claude Code";
 "Claude 周" = "Claude hebdo";
@@ -53,7 +54,6 @@
 "Grok Bot 额度查询" = "Consultation du quota Grok Bot";
 "Grok Build / 本机 CLI 编程消耗，占用本周统一额度池的比例。" = "Consommation Grok Build / CLI local, en part du pool de quota unifié de la semaine.";
 "Grok Build（本机 CLI）" = "Grok Build (CLI local)";
-"Grok 写入新周期日志后，将自动恢复额度展示。" = "L'affichage du quota reprendra dès que Grok enregistrera des journaux d'un nouveau cycle.";
 "Grok 实时接口" = "API en direct Grok";
 "Grok 实时额度查询" = "Consultation du quota Grok en direct";
 "Grok 本地日志" = "Journaux locaux Grok";
@@ -63,10 +63,8 @@
 "Kimi Code 本地登录态" = "Session locale Kimi Code";
 "Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。" = "La session Kimi Code expire bientôt. Après expiration, Tokei cesse d'interroger le quota officiel. Envoyez un message dans Kimi Code pour rafraîchir.";
 "Kimi 订阅" = "Abonnement Kimi";
-"Provider 缓存" = "Cache Provider";
 "Provider 额度" = "Quota Provider";
 "Reserve 剩余" = "Réserve restante";
-"Reserve 额度读数已过期" = "Lecture du quota de réserve expirée";
 "Sub2API URL 仅支持 HTTPS 或本机 HTTP" = "L'URL Sub2API supporte uniquement HTTPS ou HTTP local";
 "Tokei · 知度" = "Tokei · Utilisation IA";
 "Tokei 仅通过千问办公桌面端的本机 QwenWork 接口读取额度，不读取或保存登录凭据。" = "Tokei lit uniquement le quota via le point de terminaison local QwenWork de l'app de bureau ; il ne lit ni ne stocke d'identifiants.";
@@ -81,6 +79,7 @@
 "一个周额度用了多少" = "Quota hebdomadaire consommé";
 "上周" = "Sem. passée";
 "上次更新 %@" = "Dernière mise à jour %@";
+"上次读到 · %@" = "Dernière lecture · %@";
 "下载中 %@%%" = "Téléchargement en cours %@%%";
 "不是有效 JSON 对象" = "N'est pas un objet JSON valide";
 "不足 7 天的是重置时间被提前重锚，额度提前回满，长度不一样不能直接比。" = "Les cycles de moins de 7 jours ont vu leur heure de réinitialisation devancée ; les durées diffèrent et ne peuvent être comparées directement.";
@@ -231,6 +230,7 @@
 "已用 %@%%" = "Utilisé %@%%";
 "已用尽" = "Épuisé";
 "已连续用机 %@ 分钟,起来活动一下 🧍" = "Vous travaillez depuis %@ min—levez-vous et étirez-vous 🧍";
+"已重置" = "Réinitialisé";
 "已隐藏 %@ 个项目" = "%@ projets masqués";
 "常规额度外" = "Au-delà du quota régulier";
 "平均深度" = "Instantané de contexte du jour";
@@ -241,8 +241,6 @@
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Affichage du dernier résultat réussi ; s'actualise automatiquement dès que la connexion ou le réseau est rétabli.";
 "当前时间范围内还没有检测到额度下降" = "Aucune baisse de quota détectée dans cette plage pour l'instant";
 "当前版本 %@" = "Version actuelle %@";
-"当前用量仍可查看；新周期日志写入后会自动恢复。" = "Consommation actuelle toujours visible ; reprendra automatiquement à l'arrivée des journaux du nouveau cycle.";
-"当前用量仍可查看；额度更新后会自动恢复。" = "Consommation actuelle toujours visible ; reprendra automatiquement après mise à jour du quota.";
 "当前范围无可分享的用量" = "Aucune consommation partageable dans cette plage";
 "彩色" = "Coloré";
 "总成本" = "Coût total";
@@ -374,10 +372,9 @@
 "知度 · AI 用量" = "Tokei · Utilisation de l'IA";
 "积分" = "Crédits";
 "窗口" = "Fenêtre";
+"窗口已在 %@ 重置，还没读到新窗口的额度" = "Cette fenêtre a été réinitialisée à %@ ; le quota de la nouvelle fenêtre n'a pas encore été lu";
+"窗口重置后本机又用过 Codex，旧读数不再准确；等下一条额度记录更新。" = "Codex a été utilisé sur ce Mac après la réinitialisation ; l'ancienne lecture n'est plus exacte. En attente du prochain relevé de quota.";
 "第三方模型" = "Modèles tiers";
-"等待 Claude Code 更新额度" = "En attente de la mise à jour du quota par Claude Code";
-"等待 Claude Code 更新额度，恢复后将自动展示。" = "En attente de la mise à jour du quota par Claude Code ; affiché automatiquement après reprise.";
-"等待 Codex 写入新的额度读数" = "En attente d'une nouvelle lecture de quota par Codex";
 "等待其他设备…" = "En attente des autres appareils…";
 "等待授权…" = "En attente d'autorisation…";
 "系统" = "Système";
@@ -452,11 +449,9 @@
 "选择" = "Choisir";
 "选择同步目录" = "Choisir le répertoire de synchronisation";
 "通过 xAI 开放 API（api.x.ai / Console 密钥）调用模型的消耗，与 CLI 共用同一周额度池。" = "Consommation via l'API publique xAI (api.x.ai / clé Console), partageant le même pool hebdomadaire avec le CLI.";
-"部分额度待更新" = "Certains quotas en attente de mise à jour";
 "配置" = "Configurer";
 "采样点" = "Échantillons";
 "重置卡" = "Cartes de réinit.";
-"重置后已有新的 Reserve 消耗；等待下一条额度记录更新。" = "Nouvelle consommation Reserve depuis la réinitialisation ; en attente du prochain relevé.";
 "重试" = "Réessayer";
 "错误" = "Erreur";
 "长跨度画的是每日真实 token 消耗，已合并所有设备的账本（CLI 清理旧日志也不缩水）；额度百分比快照只保留 7 天，画不了这么长。" = "Les plages longues tracent la consommation réelle quotidienne de tokens, fusionnée sur tous les appareils ; les instantanés de pourcentage ne sont gardés que 7 jours.";
@@ -469,10 +464,7 @@
 "项目排行" = "Classement des projets";
 "项目足迹" = "Projets";
 "预览" = "Aperçu";
-"额度周期已结束" = "Cycle de quota terminé";
 "额度数据" = "Données de quota";
-"额度数据已过期" = "Données de quota expirées";
-"额度数据已过期 · 更新于 %@" = "Données de quota expirées · mis à jour à %@";
 "额度曲线" = "Quotas";
 "额度曲线来自本机定时快照；每日用量是当天剩余额度下降之和，回满不抵扣，当天有一头没采到的标「约」；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。" = "Les courbes de quota proviennent d'instantanés locaux périodiques. L'usage quotidien est la somme des baisses du quota restant ce jour-là (les recharges ne le compensent pas) ; les jours non échantillonnés aux deux extrémités sont marqués « ~ ». Les marqueurs de modèle viennent des hausses de tokens des sessions locales dans la même minute et indiquent seulement une activité liée, pas une facturation officielle par modèle.";
 "额度更新" = "Mises à jour du quota";
@@ -482,7 +474,6 @@
 "额度来源 %@ · %@" = "Source du quota %@ · %@";
 "额度比例未知" = "Part de quota inconnue";
 "额度窗口" = "Fenêtre de quota";
-"额度读数已过期" = "Lecture du quota expirée";
 "额度轨迹" = "Historique des quotas";
 "首字" = "Première lettre";
 "默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。" = "Désactivé par défaut. Si activé, seulement si le cache Claude Desktop est indisponible, Tokei utilise la session Claude Code CLI pour interroger Anthropic pour 5h, hebdo et modèles (en cache 5 min). Les identifiants restent en mémoire.";

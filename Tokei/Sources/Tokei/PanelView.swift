@@ -416,14 +416,6 @@ struct PanelView: View {
         let cbr = u.codebuddy.ranges.get(sel)
         let or = u.opencode.ranges.get(sel)
         let dshr = u.deepseekHarness.ranges.get(sel)
-        let claudeQuotaState = SubscriptionQuotaState.resolve([
-            (value: u.claude.q5, stale: u.claude.q5_stale),
-            (value: u.claude.q7, stale: u.claude.q7_stale),
-            (value: u.claude.qf, stale: u.claude.qf_stale),
-        ])
-        let grokQuotaState = SubscriptionQuotaState.resolve([
-            (value: u.grok.pct, stale: u.grok.stale),
-        ])
         let cursorUsage = u.cursor.usage?.ranges.get(sel) ?? TokenUsageRange()
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
@@ -434,8 +426,6 @@ struct PanelView: View {
                          active: cr.sessions > 0 || u.claude.q5 != nil ||
                              u.claude.q7 != nil || u.claude.qf != nil,
                          tint: Theme.claude,
-                         presentation: claudeQuotaState.shouldUseCompactCard(hasUsage: cr.sessions > 0)
-                             ? .compactStatus : .standard,
                          content: AnyView(claudeBlock(u.claude, cr))),
             ToolCardItem(id: "codex", name: "Codex", visible: showCodex,
                          active: xr.sessions > 0 || u.codex.p5 != nil || u.codex.pw != nil ||
@@ -474,9 +464,6 @@ struct PanelView: View {
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
                          tint: Theme.grok,
-                         presentation: grokQuotaState.shouldUseCompactCard(
-                            hasUsage: kr.sessions > 0 || kr.usage_calls > 0
-                         ) ? .compactStatus : .standard,
                          content: AnyView(grokBlock(u.grok, kr))),
             ToolCardItem(id: "grok-bot", name: "Grok Bot", visible: showGrokBot,
                          active: grokBotDisplay.range.sessions > 0 ||
@@ -619,7 +606,6 @@ struct PanelView: View {
             (value: c.q7, stale: c.q7_stale),
             (value: c.qf, stale: c.qf_stale),
         ])
-        let compactExpired = quotaState.shouldUseCompactCard(hasUsage: r.sessions > 0)
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Claude Code", tint: Theme.claude, sessions: r.sessions, toolID: "claude")
             if r.sessions > 0 {
@@ -642,23 +628,14 @@ struct PanelView: View {
                 if !claudeRows.isEmpty {
                     modelDisclosure(claudeRows, open: $claudeModelsOpen, tint: Theme.claude)
                 }
-            } else if !compactExpired && quotaState != .unavailable {
+            } else if quotaState != .unavailable {
                 usageEmptyHint(recent: recentUsageHint { key in
                     let range = c.ranges.get(key)
                     return range.in + range.out + range.cr + range.cw
                 })
             }
 
-            if compactExpired {
-                quotaStateNotice(
-                    title: L("额度数据已过期"),
-                    detail: L("等待 Claude Code 更新额度，恢复后将自动展示。"),
-                    source: L("Claude Code 额度缓存"),
-                    updated: c.q_updated,
-                    tint: Theme.claude,
-                    warning: true
-                )
-            } else if quotaState != .unavailable {
+            if quotaState != .unavailable {
                 thinDivider
                 if let q5 = c.q5 {
                     quotaRow(title: L("5h 剩余"), pct: 100 - q5, reset: c.q5_reset,
@@ -672,18 +649,7 @@ struct PanelView: View {
                     quotaRow(title: L("周 · Fable 剩余"), pct: 100 - qf, reset: c.qf_reset,
                              tint: .orange, stale: c.qf_stale == true)
                 }
-                if quotaState == .expired {
-                    quotaStateNotice(
-                        title: L("额度数据已过期"),
-                        detail: L("当前用量仍可查看；额度更新后会自动恢复。"),
-                        source: L("Claude Code 额度缓存"),
-                        updated: c.q_updated,
-                        tint: Theme.claude,
-                        warning: true
-                    )
-                } else {
-                    claudeQuotaStatus(c)
-                }
+                claudeQuotaStatus(c)
             } else if r.sessions > 0 {
                 thinDivider
                 quotaStateNotice(
@@ -744,22 +710,14 @@ struct PanelView: View {
                 quotaRow(title: L("Reserve 剩余"), pct: 100 - pct, detail: L("常规额度外"),
                          reset: q.resetsAt, tint: Theme.codex, stale: q.stale == true)
             }
-            if let q = x.reserveQuota, q.stale == true {
-                quotaStateNotice(
-                    title: L("Reserve 额度读数已过期"),
-                    detail: L("重置后已有新的 Reserve 消耗；等待下一条额度记录更新。"),
-                    source: L("Codex 本地状态"),
-                    updated: q.updated,
-                    tint: Theme.codex,
-                    warning: true
-                )
-            }
             // Reserve 用量明细:只有按模型一行,紧跟额度行。
             if let reserve = x.reserveRanges?.get(sel), reserve.sessions > 0 {
                 codexReserveBlock(reserve)
             }
-            if x.pw_stale == true {
-                codexQuotaStatus(x)
+            if x.p5_stale == true || x.pw_stale == true || x.reserveQuota?.stale == true {
+                staleQuotaFootnote(
+                    updated: x.q_updated,
+                    help: L("窗口重置后本机又用过 Codex，旧读数不再准确；等下一条额度记录更新。"))
             }
             if let cards = x.reset_cards, cards.count > 0 {
                 codexResetCardsRow(cards)
@@ -823,14 +781,9 @@ struct PanelView: View {
                          tint: Theme.kimicode, stale: x.pw_stale == true)
             }
             if x.hasStaleQuota {
-                quotaStateNotice(
-                    title: L("额度读数已过期"),
-                    detail: L("Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。"),
-                    source: "api.kimi.com",
+                staleQuotaFootnote(
                     updated: x.q_updated,
-                    tint: Theme.kimicode,
-                    warning: true
-                )
+                    help: L("Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。"))
             }
             if let plan = x.plan, !plan.isEmpty {
                 HStack {
@@ -1173,14 +1126,9 @@ struct PanelView: View {
         }
 
         if quota.stale {
-            quotaStateNotice(
-                title: L("额度数据已过期"),
-                detail: L("当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。"),
-                source: quota.source ?? L("Provider 缓存"),
+            staleQuotaFootnote(
                 updated: quota.updated,
-                tint: tint,
-                warning: true
-            )
+                help: L("当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。"))
         } else if let updated = quota.updated {
             HStack(spacing: 5) {
                 Image(systemName: "clock")
@@ -1288,7 +1236,8 @@ struct PanelView: View {
         let quotaState = SubscriptionQuotaState.resolve([
             (value: g.pct, stale: g.stale),
         ])
-        let compactExpired = quotaState.shouldUseCompactCard(hasUsage: hasUsage)
+        let periodEnded = SubscriptionQuotaPresentation.hasResetSinceReading(
+            stale: g.stale == true, reset: g.reset)
         VStack(alignment: .leading, spacing: 11) {
             cardHead("Grok", tint: Theme.grok, sessions: r.sessions, toolID: "grok")
             if hasUsage {
@@ -1346,29 +1295,21 @@ struct PanelView: View {
                     .font(.system(size: Theme.fontSize(8.5)))
                     .foregroundStyle(Theme.tTertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if !compactExpired && quotaState != .unavailable {
+            } else if quotaState != .unavailable {
                 usageEmptyHint(recent: recentUsageHint { key in
                     let range = g.ranges.get(key)
                     return range.in + range.out + range.cr + range.reason
                 })
             }
 
-            if compactExpired {
-                quotaStateNotice(
-                    title: L("额度周期已结束"),
-                    detail: L("Grok 写入新周期日志后，将自动恢复额度展示。"),
-                    source: grokQuotaSourceLabel(g.source),
-                    updated: g.q_updated,
-                    tint: Theme.grok,
-                    warning: true
-                )
-            } else if let pct = g.pct {
-                if hasUsage { thinDivider }
+            if let pct = g.pct {
+                thinDivider
                 let title = (g.window == "month") ? L("月剩余") : L("周剩余")
                 // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset,
                          tint: Theme.grok, stale: g.stale == true)
-                ForEach(g.products.filter { $0.pct != nil }) { product in
+                // 周期结束后，分产品占比说的是上一个周期，不再列出
+                ForEach(periodEnded ? [] : g.products.filter { $0.pct != nil }) { product in
                     if let used = product.pct {
                         grokProductShareRow(
                             name: Self.grokProductLabel(product.name),
@@ -1391,16 +1332,6 @@ struct PanelView: View {
                 }
                 grokQuotaStatus(g)
                 if g.auth_expired == true { grokAuthExpiredNotice(g) }
-            } else if quotaState == .expired {
-                if hasUsage { thinDivider }
-                quotaStateNotice(
-                    title: L("额度周期已结束"),
-                    detail: L("当前用量仍可查看；新周期日志写入后会自动恢复。"),
-                    source: grokQuotaSourceLabel(g.source),
-                    updated: g.q_updated,
-                    tint: Theme.grok,
-                    warning: true
-                )
             } else if g.auth_expired == true {
                 if hasUsage { thinDivider }
                 grokAuthExpiredNotice(g)
@@ -2485,6 +2416,8 @@ struct PanelView: View {
     func quotaRow(title: String, pct: Double, detail: String? = nil, reset: Int?,
                   tint: Color, stale: Bool = false) -> some View {
         let low = pct <= 15 && !stale
+        let resetSinceReading = SubscriptionQuotaPresentation.hasResetSinceReading(
+            stale: stale, reset: reset)
         return VStack(spacing: 4) {
             HStack {
                 Text(title).font(.system(size: Theme.fontSize(11))).foregroundStyle(Theme.tSecondary)
@@ -2494,59 +2427,70 @@ struct PanelView: View {
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Spacer()
-                Text(SubscriptionQuotaPresentation.remainingLabel(pct))
-                    .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
-                    .foregroundStyle(low ? AnyShapeStyle(.red)
-                                         : AnyShapeStyle(stale ? Theme.tTertiary : Theme.tPrimary))
-                // 无重置时间时不显示「· ?」，避免分产品行误导。
-                if reset != nil {
-                    Text("· \(Fmt.reset(reset))")
-                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                if resetSinceReading {
+                    Text(L("已重置"))
+                        .font(.system(size: Theme.fontSize(11), weight: .semibold))
                         .foregroundStyle(Theme.tTertiary)
+                } else {
+                    Text(SubscriptionQuotaPresentation.remainingLabel(pct))
+                        .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                        .foregroundStyle(low ? AnyShapeStyle(.red)
+                                             : AnyShapeStyle(stale ? Theme.tTertiary : Theme.tPrimary))
+                    // 无重置时间时不显示「· ?」，避免分产品行误导。
+                    if reset != nil {
+                        Text("· \(Fmt.reset(reset))")
+                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                            .foregroundStyle(Theme.tTertiary)
+                    }
                 }
             }
-            MiniBar(value: pct, tint: low ? .red : tint.opacity(stale ? 0.4 : 1))
+            // 已经翻篇的窗口不画旧进度条：空条像「剩 0%」，满条像「回满了」，都不对
+            if !resetSinceReading {
+                MiniBar(value: pct, tint: low ? .red : tint.opacity(stale ? 0.4 : 1))
+            }
         }
         .opacity(stale ? 0.65 : 1)
-        .help(stale ? L("上次读到的额度，尚未刷新")
-                    : (reset != nil ? L("%@ 后重置", Fmt.countdown(reset)) : ""))
+        .help(resetSinceReading
+              ? L("窗口已在 %@ 重置，还没读到新窗口的额度", Fmt.reset(reset))
+              : stale ? L("上次读到的额度，尚未刷新")
+                      : (reset != nil ? L("%@ 后重置", Fmt.countdown(reset)) : ""))
     }
 
+    @ViewBuilder
     func claudeQuotaStatus(_ stat: ClaudeStat) -> some View {
-        let staleCount = [stat.q5_stale, stat.q7_stale, stat.qf_stale].filter { $0 == true }.count
+        // 读数的来源是一起刷新的：只要还有一个窗口是新的，其余过期的只是窗口翻篇（行上写「已重置」）
         let hasFreshQuota = (stat.q5 != nil && stat.q5_stale != true) ||
             (stat.q7 != nil && stat.q7_stale != true) ||
             (stat.qf != nil && stat.qf_stale != true)
-        let stale = staleCount > 0
-        let label: String
-        if stale {
-            label = hasFreshQuota ? L("部分额度待更新") : L("额度数据已过期")
+        if hasFreshQuota {
+            HStack(spacing: 5) {
+                Image(systemName: "clock")
+                    .font(.system(size: Theme.fontSize(9)))
+                Text(L("额度更新") + " · " + (stat.q_updated.map { Fmt.reset($0) } ?? L("更新时间未知")))
+                    .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                Spacer()
+            }
+            .foregroundStyle(Theme.tTertiary)
+            .help(L("来自 Claude Code CLI 或 Desktop"))
         } else {
-            label = L("额度更新")
+            staleQuotaFootnote(
+                updated: stat.q_updated,
+                help: L("Claude Code 或 Claude 桌面端下次读到额度时自动刷新"))
         }
-        let updated = stat.q_updated.map { Fmt.reset($0) } ?? L("更新时间未知")
-        return HStack(spacing: 5) {
-            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
-                .font(.system(size: Theme.fontSize(9)))
-            Text("\(label) · \(updated)")
-                .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
-            Spacer()
-        }
-        .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
-        .help(stale ? L("等待 Claude Code 更新额度") : L("来自 Claude Code CLI 或 Desktop"))
     }
 
-    func codexQuotaStatus(_ stat: CodexStat) -> some View {
-        let updated = stat.q_updated.map { Fmt.reset($0) } ?? L("更新时间未知")
-        return HStack(spacing: 5) {
-            Image(systemName: "exclamationmark.triangle.fill")
+    /// 读数过期时的落款。照常展示最后一次读数，这里只轻轻标一下是什么时候读到的——
+    /// 应用退出一晚、工具久没用都会这样，不是故障，不用警告框。
+    func staleQuotaFootnote(updated: Int?, help: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "clock.arrow.circlepath")
                 .font(.system(size: Theme.fontSize(9)))
-            Text(L("额度数据已过期 · 更新于 %@", updated))
+            Text(L("上次读到 · %@", updated.map { Fmt.reset($0) } ?? L("更新时间未知")))
                 .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
             Spacer()
         }
-        .foregroundStyle(Color.orange.opacity(0.88))
-        .help(L("等待 Codex 写入新的额度读数"))
+        .foregroundStyle(Theme.tTertiary)
+        .help(help)
     }
 
     var footer: some View {

@@ -616,13 +616,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 }
 
 // 离屏截图模式:Tokei --shot /path/out.png
+// 加 --usage /path/usage.json 时直接渲染这份数据，不跑采集器——用来看过期、空态这类
+// 平时不好凑出来的状态。
 enum Shot {
     static func run(path: String) {
         _ = NSApplication.shared
         var usage: Usage?
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { usage = DataLoader.loadSync(); sem.signal() }
-        sem.wait()
+        if let idx = CommandLine.arguments.firstIndex(of: "--usage"),
+           CommandLine.arguments.count > idx + 1 {
+            let url = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
+            do {
+                usage = try JSONDecoder().decode(Usage.self, from: Data(contentsOf: url))
+            } catch {
+                fputs("Tokei --usage: \(error)\n", stderr)
+            }
+        } else {
+            let sem = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { usage = DataLoader.loadSync(); sem.signal() }
+            sem.wait()
+        }
         MainActor.assumeIsolated {
             let store = Store()
             store.usage = usage

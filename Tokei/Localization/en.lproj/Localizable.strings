@@ -58,6 +58,7 @@
 "<未配置 git remote>" = "<no git remote configured>";
 "API 价" = "API price";
 "Claude Code CLI 额度查询" = "Claude Code CLI quota lookup";
+"Claude Code 或 Claude 桌面端下次读到额度时自动刷新" = "Refreshes automatically the next time Claude Code or the Claude desktop app reads the quota";
 "Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，" = "No Claude Code weekly quota card yet: open the Usage page in Claude Desktop,";
 "Claude Code 额度缓存" = "Claude Code quota cache";
 "Claude 周" = "Claude weekly";
@@ -73,7 +74,6 @@
 "Grok Bot 额度查询" = "Grok Bot quota lookup";
 "Grok Build / 本机 CLI 编程消耗，占用本周统一额度池的比例。" = "Grok Build / local CLI coding usage, as a share of this week's unified quota pool.";
 "Grok Build（本机 CLI）" = "Grok Build (local CLI)";
-"Grok 写入新周期日志后，将自动恢复额度展示。" = "Quota display resumes automatically once Grok writes new-cycle logs.";
 "Grok 实时接口" = "Grok live API";
 "Grok 实时额度查询" = "Grok live quota lookup";
 "Grok 本地日志" = "Grok local logs";
@@ -85,10 +85,8 @@
 "Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。" = "Kimi Code's login session is expiring soon. After expiry Tokei stops querying official quota and will not refresh it on its behalf. Sending one message in Kimi Code lets it refresh itself, and quota updates resume.";
 "Kimi 订阅" = "Kimi subscription";
 "Loop滴神" = "Loop Legend";
-"Provider 缓存" = "Provider cache";
 "Provider 额度" = "Provider Quota";
 "Reserve 剩余" = "Reserve remaining";
-"Reserve 额度读数已过期" = "Reserve quota reading expired";
 "Sub2API URL 仅支持 HTTPS 或本机 HTTP" = "Sub2API URL supports HTTPS or local HTTP only";
 "Tokei · 知度" = "Tokei · AI Usage";
 "Tokei 仅通过千问办公桌面端的本机 QwenWork 接口读取额度，不读取或保存登录凭据。" = "Tokei only reads quota via the QwenWork desktop app's local QwenWork endpoint; it never reads or stores login credentials.";
@@ -107,6 +105,7 @@
 "万亿先生" = "Trillion Club";
 "上周" = "Last Week";
 "上次更新 %@" = "Last updated %@";
+"上次读到 · %@" = "Last read · %@";
 "上次读到的额度，尚未刷新" = "Last known quota, not refreshed yet";
 "下载中 %@%%" = "Downloading %@%%";
 "不是有效 JSON 对象" = "Not a valid JSON object";
@@ -285,6 +284,7 @@
 "已用 %@%%" = "Used %@%%";
 "已用尽" = "Exhausted";
 "已连续用机 %@ 分钟,起来活动一下 🧍" = "You have been at it %@ min—get up and stretch 🧍";
+"已重置" = "Reset";
 "已隐藏 %@ 个项目" = "%@ hidden projects";
 "常规额度外" = "Beyond regular quota";
 "平均深度" = "Avg depth";
@@ -296,8 +296,6 @@
 "当前展示最近一次成功结果；登录态或网络恢复后会自动刷新。" = "Showing the last successful result; refreshes automatically once login or network recovers.";
 "当前时间范围内还没有检测到额度下降" = "No quota drop detected in this range yet";
 "当前版本 %@" = "Current version %@";
-"当前用量仍可查看；新周期日志写入后会自动恢复。" = "Current usage still viewable; resumes automatically once new-cycle logs arrive.";
-"当前用量仍可查看；额度更新后会自动恢复。" = "Current usage still viewable; resumes automatically after quota updates.";
 "当前组织" = "Current organization";
 "当前范围无可分享的用量" = "No shareable usage in this range";
 "彩色" = "Colorful";
@@ -447,10 +445,9 @@
 "破千刀" = "$1K Club";
 "积分" = "Credits";
 "窗口" = "Window";
+"窗口已在 %@ 重置，还没读到新窗口的额度" = "This window reset at %@; the new window's quota hasn't been read yet";
+"窗口重置后本机又用过 Codex，旧读数不再准确；等下一条额度记录更新。" = "Codex was used on this Mac after the window reset, so the old reading is no longer accurate; waiting for the next quota record.";
 "第三方模型" = "Third-party models";
-"等待 Claude Code 更新额度" = "Waiting for Claude Code to update quota";
-"等待 Claude Code 更新额度，恢复后将自动展示。" = "Waiting for Claude Code to update quota; shown automatically once recovered.";
-"等待 Codex 写入新的额度读数" = "Waiting for Codex to write a new quota reading";
 "等待其他设备…" = "Waiting for other devices…";
 "等待授权…" = "Waiting for authorization…";
 "系统" = "System";
@@ -533,11 +530,9 @@
 "选择" = "Choose";
 "选择同步目录" = "Choose sync directory";
 "通过 xAI 开放 API（api.x.ai / Console 密钥）调用模型的消耗，与 CLI 共用同一周额度池。" = "Usage via the xAI public API (api.x.ai / Console key), sharing the same weekly pool as the CLI.";
-"部分额度待更新" = "Some quotas pending";
 "配置" = "Configure";
 "采样点" = "Samples";
 "重置卡" = "Reset cards";
-"重置后已有新的 Reserve 消耗；等待下一条额度记录更新。" = "New Reserve usage since reset; waiting for the next quota record.";
 "重试" = "Retry";
 "铁人" = "Iron Streak";
 "错误" = "Error";
@@ -552,10 +547,7 @@
 "项目足迹" = "Projects";
 "预览" = "Preview";
 "额度" = "Quota";
-"额度周期已结束" = "Quota cycle ended";
 "额度数据" = "Quota data";
-"额度数据已过期 · 更新于 %@" = "Quota data expired · updated %@";
-"额度数据已过期" = "Quota data expired";
 "额度曲线" = "Quota";
 "额度曲线来自本机定时快照；每日用量是当天剩余额度下降之和，回满不抵扣，当天有一头没采到的标「约」；模型标记来自同一分钟内本地会话 token 增量，仅表示相关活动，不等同于官方逐模型扣费归因。" = "Quota curves come from periodic local snapshots. Daily usage is the sum of drops in remaining quota that day (refills don't offset it); days not sampled at both ends are marked \"~\". Model markers come from local session token increases in the same minute and only indicate related activity, not official per-model billing.";
 "额度更新" = "Quota updated";
@@ -565,7 +557,6 @@
 "额度来源" = "Source";
 "额度比例未知" = "Quota share unknown";
 "额度窗口" = "Quota window";
-"额度读数已过期" = "Quota reading expired";
 "额度轨迹" = "Quota History";
 "首字" = "First letter";
 "高峰 %@" = "Peak %@";
