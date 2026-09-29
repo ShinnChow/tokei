@@ -6,13 +6,13 @@ enum RangeKey: String, CaseIterable, Identifiable {
     static let displayCases: [RangeKey] = [.today, .yesterday, .week, .lastWeek, .month, .year]
     var label: String {
         switch self {
-        case .today: return "今日"
-        case .yesterday: return "昨日"
-        case .week: return "本周"
-        case .lastWeek: return "上周"
-        case .month: return "本月"
-        case .year: return "本年"
-        case .all: return "全部"
+        case .today: return L("今日")
+        case .yesterday: return L("昨日")
+        case .week: return L("本周")
+        case .lastWeek: return L("上周")
+        case .month: return L("本月")
+        case .year: return L("本年")
+        case .all: return L("全部")
         }
     }
 }
@@ -1066,7 +1066,12 @@ enum Fmt {
 
     static func human(_ n: Int) -> String {
         let v = Double(n)
-        if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) }
+        // 中文按「亿」进位；其他语言用国际通行的 B（十亿）。
+        if L10n.isChinese {
+            if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) } // l10n-ignore
+        } else if v >= 1_000_000_000 {
+            return String(format: "%.1fB", v / 1_000_000_000)
+        }
         if v >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
         if v >= 1_000 { return String(format: "%.0fK", v / 1_000) }
         return String(format: "%.0f", v)
@@ -1108,7 +1113,7 @@ enum Fmt {
     static func countdown(_ epoch: Int?) -> String {
         guard let e = epoch else { return "?" }
         let s = TimeInterval(e) - Date().timeIntervalSince1970
-        if s <= 0 { return "即将重置" }
+        if s <= 0 { return L("即将重置") }
         let h = Int(s) / 3600, m = (Int(s) % 3600) / 60
         return h > 0 ? "\(h)h\(m)m" : "\(m)m"
     }
@@ -1122,16 +1127,26 @@ enum Fmt {
 
     static func price(_ x: Double) -> String { String(format: "%g", x) }
 
+    /// 周一到周日的短标签。中文沿用「一…日」，其他语言用系统自带的缩写（Mon / lun. / 月 / 월）。
+    static var weekdayLabels: [String] {
+        if L10n.isChinese { return ["一", "二", "三", "四", "五", "六", "日"] } // l10n-ignore
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: AppLanguage.current.rawValue)
+        let sundayFirst = formatter.shortStandaloneWeekdaySymbols ?? []
+        guard sundayFirst.count == 7 else { return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }
+        return Array(sundayFirst[1...]) + [sundayFirst[0]]
+    }
+
     static func relativeDate(_ iso: String) -> String {
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
         guard let d = f.date(from: iso) else { return iso }
         let days = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: d),
                                                     to: Calendar.current.startOfDay(for: Date())).day ?? 0
-        if days == 0 { return "今天" }
-        if days == 1 { return "昨天" }
-        if days <= 7 { return "\(days)天前" }
-        if days <= 30 { return "\(days / 7)周前" }
-        return "\(days / 30)月前"
+        if days == 0 { return L("今天") }
+        if days == 1 { return L("昨天") }
+        if days <= 7 { return L("%@天前", days) }
+        if days <= 30 { return L("%@周前", days / 7) }
+        return L("%@月前", days / 30)
     }
 }
 

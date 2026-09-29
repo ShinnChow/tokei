@@ -15160,18 +15160,27 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     night_share = round(night / hours_total * 100, 1) if hours_total else 0.0
 
     ach = []
-    def add(icon, title, desc, tint):
-        ach.append({"icon": icon, "title": title, "desc": desc, "tint": tint})
+    def add(icon, title, desc, tint, tokens=None, template=None):
+        # desc 是给中文界面的现成句子；带「亿」的另给原始数和不含单位的模板，
+        # 其他语言的界面用 K / M / B 重写数字（「亿」没法靠套模板换算）。
+        item = {"icon": icon, "title": title, "desc": desc, "tint": tint}
+        if tokens is not None and template:
+            item.update({"tokens": int(tokens), "tokens_template": template})
+        ach.append(item)
 
     # Token 里程碑(金,取最高档)
     if total_tokens >= 1_000_000_000_000:
-        add("crown.fill", "万亿先生", f"{total_tokens/1e12:.2f} 万亿 token", "gold")
+        add("crown.fill", "万亿先生", f"{total_tokens/1e12:.2f} 万亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 100_000_000_000:
-        add("hexagon.fill", "千亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold")
+        add("hexagon.fill", "千亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 10_000_000_000:
-        add("diamond.fill", "百亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold")
+        add("diamond.fill", "百亿先生", f"{total_tokens/1e8:.0f} 亿 token", "gold",
+            total_tokens, "%@ token")
     elif total_tokens >= 1_000_000_000:
-        add("diamond", "十亿先生", f"{total_tokens/1e8:.1f} 亿 token", "gold")
+        add("diamond", "十亿先生", f"{total_tokens/1e8:.1f} 亿 token", "gold",
+            total_tokens, "%@ token")
 
     # 成本里程碑(绿,取最高档)
     if total_cost >= 100000:
@@ -15191,7 +15200,8 @@ def build_wrapped(period="all", refresh=True, _cache=None):
 
     # 单日爆发(火橙)
     if busiest_tok >= 1_000_000_000:
-        add("bolt.fill", "爆肝日", f"单日 {busiest_tok/1e8:.0f} 亿 token", "coral")
+        add("bolt.fill", "爆肝日", f"单日 {busiest_tok/1e8:.0f} 亿 token", "coral",
+            busiest_tok, "单日 %@ token")
 
     # 项目维度(青蓝)
     if max_projs_day >= 5:

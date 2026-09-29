@@ -7,7 +7,7 @@ final class Store: ObservableObject {
     @Published var usage: Usage?
     @Published var localUsage: Usage?
     @Published var allDevicesUsage: Usage?
-    @Published var lastUpdated: String = "加载中…"
+    @Published var lastUpdated: String = L("加载中…")
     @Published var loadError: String?
     @Published var peers: [PeerDevice] = []
     @Published var syncing = false
@@ -66,7 +66,7 @@ final class Store: ObservableObject {
         }
         allDevicesUsage = allDevices
         applyDisplayMode()
-        lastUpdated = "缓存数据 · 后台更新中"
+        lastUpdated = L("缓存数据 · 后台更新中")
     }
 
     func refresh(prewarmQuotaDetail: Bool = false) {
@@ -102,16 +102,16 @@ final class Store: ObservableObject {
                 let willRetry = self.usage == nil && self.retryCount < 3
                 if willRetry {
                     self.retryCount += 1
-                    self.lastUpdated = "加载中…(\(self.retryCount))"
+                    self.lastUpdated = L("加载中…(%@)", self.retryCount)
                     if !hadPendingRefresh {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.refresh() }
                     }
                 } else if self.usage == nil {
-                    self.loadError = "读取用量失败"
-                    self.lastUpdated = "加载失败"
+                    self.loadError = L("读取用量失败")
+                    self.lastUpdated = L("加载失败")
                 } else {
                     self.loadError = nil
-                    self.lastUpdated = "缓存数据 · 等待刷新"
+                    self.lastUpdated = L("缓存数据 · 等待刷新")
                 }
                 (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
                 if !willRetry { self.prewarmQuotaDetailIfReady() }
@@ -144,7 +144,7 @@ final class Store: ObservableObject {
             self.allDevicesUsage = allDevices
             self.applyDisplayMode(updateStatusTitle: false)
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
-            self.lastUpdated = "更新 " + f.string(from: Date())
+            self.lastUpdated = L("更新 %@", f.string(from: Date()))
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
             if !self.refreshPending && !self.dashboardPrewarmStarted {
                 self.dashboardPrewarmStarted = true
@@ -176,7 +176,7 @@ final class Store: ObservableObject {
         let claudeRange = usage.claude.ranges.get(.today)
         let codexRange = usage.codex.ranges.get(.today)
         let claudeModels = claudeRange.models.reduce(into: [String: Int]()) { totals, model in
-            guard model.name != "合成" else { return }
+            guard model.name != "合成" else { return } // l10n-ignore
             totals[model.name, default: 0] += model.in + model.out + model.cr + model.cw
         }
         let codexModels = codexRange.models.reduce(into: [String: Int]()) { totals, model in
@@ -200,13 +200,13 @@ final class Store: ObservableObject {
     func doSync() {
         guard syncEnabled, !syncing else { return }
         guard let cfg = syncManager.config else {
-            syncStatus = "同步配置不可用"
+            syncStatus = L("同步配置不可用")
             syncSucceeded = false
-            syncDetail = "请先完成多设备同步配置"
+            syncDetail = L("请先完成多设备同步配置")
             return
         }
         syncing = true
-        syncStatus = "正在同步"
+        syncStatus = L("正在同步")
         syncSucceeded = nil
         syncDetail = ""
         let deviceID = SyncManager.normalizedDeviceID(cfg.device_id)
@@ -221,17 +221,17 @@ final class Store: ObservableObject {
                 self.syncFailStreak = 0
                 let formatter = DateFormatter()
                 formatter.dateFormat = "HH:mm"
-                self.syncStatus = "已同步 " + formatter.string(from: Date())
+                self.syncStatus = L("已同步 %@", formatter.string(from: Date()))
                 self.refresh()
             } else if result.code == .busy {
                 self.syncSucceeded = nil
-                self.syncStatus = "同步任务已在运行"
+                self.syncStatus = L("同步任务已在运行")
             } else {
                 self.syncSucceeded = false
                 self.syncFailStreak += 1
                 self.syncStatus = self.syncFailStreak > 1
-                    ? "同步失败（连续 \(self.syncFailStreak) 次）"
-                    : "同步失败"
+                    ? L("同步失败（连续 %@ 次）", self.syncFailStreak)
+                    : L("同步失败")
             }
             (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
         }
@@ -263,13 +263,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let panelLayout = PanelLayoutContext()
     var statusItem: NSStatusItem!
     var popover = NSPopover()
-    lazy var statusMenu: NSMenu = {
+    /// 每次右键现建，跟随当前界面语言。
+    var statusMenu: NSMenu {
         let menu = NSMenu()
-        let quitItem = NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: L("退出"), action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         return menu
-    }()
+    }
     var timer: Timer?
     /// 面板关着时按 30 秒刷；开着时用户正盯着看，30 秒的空窗会让人以为统计坏了，
     /// 所以加密到 10 秒。关上就退回去，免得白白每 10 秒拉起一次 Python。
@@ -292,6 +293,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         updateStatusTitle()
+        NotificationCenter.default.addObserver(
+            forName: L10n.languageDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            // 菜单栏标题与「更新于」这类状态文字是按旧语言写好的，换语言后重来一遍。
+            self?.updateStatusTitle()
+            self?.store.refresh()
+        }
 
         let host = NSHostingController(rootView: PanelView(
             store: store,
@@ -454,15 +462,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         var summaryParts = displayedMetrics.map { metric in
             let name = metric.kind.displayName
             if metric.remaining != nil {
-                return "\(name) 剩余 \(metric.value)%"
+                return L("%@ 剩余 %@%%", name, metric.value)
             }
             return "\(name) \(metric.value)"
         }
         if store.keepAwake.active {
-            summaryParts.insert("保持唤醒已开启", at: 0)
+            summaryParts.insert(L("保持唤醒已开启"), at: 0)
         }
         if store.syncFailStreak >= 3 {
-            summaryParts.insert("多设备同步已连续失败 \(store.syncFailStreak) 次，请打开设置查看", at: 0)
+            summaryParts.insert(L("多设备同步已连续失败 %@ 次，请打开设置查看", store.syncFailStreak), at: 0)
         }
         let summary = summaryParts.joined(separator: " · ")
         let accessibility = summary.isEmpty ? "Tokei" : "Tokei · \(summary)"
@@ -573,7 +581,7 @@ enum Shot {
         MainActor.assumeIsolated {
             let store = Store()
             store.usage = usage
-            store.lastUpdated = "预览"
+            store.lastUpdated = L("预览")
             let content = PanelView(store: store, scrollable: false)
                 .background(Color(red: 0.22, green: 0.23, blue: 0.26))
             let renderer = ImageRenderer(content: content)
@@ -648,6 +656,21 @@ if let idx = CommandLine.arguments.firstIndex(of: "--make-icon") {
     let out = CommandLine.arguments.count > idx + 1
         ? CommandLine.arguments[idx + 1] : "/tmp/tokei_icon.png"
     Icon.run(path: out)
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--lang"),
+   CommandLine.arguments.count > idx + 1 {
+    // 离屏截图检查各语言排版用：Tokei --lang en --shot /tmp/en.png
+    L10n.forcedLanguage = AppLanguage(rawValue: CommandLine.arguments[idx + 1])
+}
+
+if let idx = CommandLine.arguments.firstIndex(of: "--mode"),
+   CommandLine.arguments.count > idx + 1 {
+    let modes: [String: PanelView.PanelMode] = [
+        "cards": .cards, "settings": .settings, "dashboard": .dashboard,
+        "quota": .quotaHistory, "projects": .projects,
+    ]
+    PanelView.initialMode = modes[CommandLine.arguments[idx + 1]] ?? .cards
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--shot") {

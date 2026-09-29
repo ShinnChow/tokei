@@ -362,9 +362,9 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("模型用量").font(.system(size: Theme.fontSize(13), weight: .bold))
+            Text(L("模型用量")).font(.system(size: Theme.fontSize(13), weight: .bold))
             ForEach(top) { m in
-                StatBar(name: m.name,
+                StatBar(name: L10n.data(m.name),
                         tokens: m.tokens ?? ((m.in ?? 0) + (m.out ?? 0)),
                         cost_cny: m.cost_cny, cost: m.cost, maxTokens: maxTokens,
                         tint: modelTint(m.tool))
@@ -377,13 +377,13 @@ struct DashboardView: View {
         let top = Array(sorted.prefix(8))
         let maxTokens = Double(top.first?.tokens ?? 1)
         return VStack(alignment: .leading, spacing: 9) {
-            Text("账号 Provider 模型").font(.system(size: Theme.fontSize(13), weight: .bold))
-            Text("账号级统计单独展示，不并入本地工具总计")
+            Text(L("账号 Provider 模型")).font(.system(size: Theme.fontSize(13), weight: .bold))
+            Text(L("账号级统计单独展示，不并入本地工具总计"))
                 .font(.system(size: Theme.fontSize(9)))
                 .foregroundStyle(Theme.tTertiary)
             ForEach(top) { model in
                 StatBar(
-                    name: model.name,
+                    name: L10n.data(model.name),
                     tokens: model.tokens ?? ((model.in ?? 0) + (model.out ?? 0)),
                     cost: model.cost,
                     maxTokens: maxTokens,
@@ -434,7 +434,7 @@ struct DashboardView: View {
                 withAnimation(.easeInOut(duration: 0.25)) { hideProjects.toggle() }
             } label: {
                 HStack(spacing: 5) {
-                    Text("项目排行").font(.system(size: Theme.fontSize(13), weight: .bold))
+                    Text(L("项目排行")).font(.system(size: Theme.fontSize(13), weight: .bold))
                         .foregroundStyle(Theme.tPrimary)
                     Image(systemName: hideProjects ? "eye.slash.fill" : "eye")
                         .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
@@ -446,7 +446,7 @@ struct DashboardView: View {
             }
             .buttonStyle(.plain)
             if hideProjects {
-                Text("已隐藏 \(projects.count) 个项目")
+                Text(L("已隐藏 %@ 个项目", projects.count))
                     .font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             } else {
                 ForEach(projects) { p in
@@ -465,11 +465,11 @@ struct DashboardView: View {
     var heatmapSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("活跃热力")
+                Text(L("活跃热力"))
                     .font(.system(size: Theme.fontSize(13), weight: .bold))
                 Spacer()
                 Picker("", selection: $heatRange) {
-                    Text("周").tag(0); Text("月").tag(1); Text("年").tag(2)
+                    Text(L("周")).tag(0); Text(L("月")).tag(1); Text(L("年")).tag(2)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 120)
@@ -493,7 +493,7 @@ struct DashboardView: View {
         let today = Date()
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
+        let dayLabels = Fmt.weekdayLabels
         let activityMap = Dictionary(uniqueKeysWithValues: daily.map { ($0.date, Double($0.tokens)) })
         let maxActivity = daily.map { Double($0.tokens) }.max() ?? 1
 
@@ -552,7 +552,7 @@ struct DashboardView: View {
 
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd"
-        let dayLabels = ["一", "二", "三", "四", "五", "六", "日"]
+        let dayLabels = Fmt.weekdayLabels
 
         struct Cell: Identifiable {
             var id: Int; var row: Int; var col: Int; var activity: Double; var dateStr: String
@@ -644,13 +644,13 @@ struct DashboardView: View {
     var heatmapLegend: some View {
         HStack(spacing: 5) {
             Spacer()
-            Text("少").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
+            Text(L("少")).font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
             ForEach(0..<5, id: \.self) { i in
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .fill(i == 0 ? Color.primary.opacity(0.04) : Self.heatColors[i])
                     .frame(width: 12, height: 12)
             }
-            Text("多").font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
+            Text(L("多")).font(.system(size: Theme.fontSize(10))).foregroundStyle(Theme.tTertiary)
         }
     }
 
