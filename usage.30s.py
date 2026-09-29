@@ -852,6 +852,7 @@ def _remove_codex_event_cache_dir():
 def _migrate_legacy_scan_cache():
     if (_SCAN_CACHE_FILE != _DEFAULT_SCAN_CACHE_FILE
             or os.path.exists(_SCAN_CACHE_FILE)
+            or os.path.exists(os.path.join(_scan_shard_dir(), _SCAN_SHARD_MANIFEST))
             or not os.path.isfile(_LEGACY_SCAN_CACHE_FILE)):
         return
 
@@ -884,11 +885,123 @@ def _migrate_legacy_scan_cache():
             pass
 
 
+# 扫描缓存按工具分片存（issue: 活跃使用时整份 16 MB 每 30 秒重写一次）。
+#
+#   scan_cache.d/manifest.json      清单：当前每个键用哪个分片文件，外加少量标量
+#   scan_cache.d/<键>.<内容哈希>.json 分片：文件名带内容哈希，内容没变就不重写
+#
+# 清单最后原子替换，是唯一的提交点：采集器随时可能被 App 超时杀掉，分片写到一半也
+# 不会出现「Codex 换了新值、定价记录还是旧的」这种跨键不一致（那会让成本被重复重算）。
+# 不再被引用的旧分片过了宽限期才删：只读入口（数据面板等）可能还拿着上一份清单在读。
+# 旧版单文件 scan_cache.json 仍能读，首次保存时迁过来；哪边更新以修改时间为准。
+_SCAN_CACHE_TRANSIENT_KEYS = frozenset({"_dirty", "_keys"})
+_SCAN_SHARD_MANIFEST = "manifest.json"
+_SCAN_SHARD_GRACE = 120
+
+
+def _scan_shard_dir():
+    return os.path.splitext(_SCAN_CACHE_FILE)[0] + ".d"
+
+
+def _scan_shard_name(key, payload):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key) or "_"
+    return f"{safe}.{hashlib.sha1(payload).hexdigest()[:16]}.json"
+
+
+def _read_scan_cache_file():
+    """返回 (缓存, 是否需要重写)。清单与旧版单文件都在时取修改时间更新的那个。"""
+    directory = _scan_shard_dir()
+    manifest_path = os.path.join(directory, _SCAN_SHARD_MANIFEST)
+    try:
+        manifest_mtime = os.path.getmtime(manifest_path)
+    except OSError:
+        manifest_mtime = None
+    try:
+        legacy_mtime = os.path.getmtime(_SCAN_CACHE_FILE)
+    except OSError:
+        legacy_mtime = None
+    if manifest_mtime is not None and (legacy_mtime is None or manifest_mtime >= legacy_mtime):
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
+        cache = dict(manifest.get("meta") or {})
+        damaged = False
+        for key, name in (manifest.get("shards") or {}).items():
+            try:
+                with open(os.path.join(directory, name), "r") as f:
+                    cache[key] = json.load(f)
+            except (OSError, ValueError):
+                damaged = True  # 只丢这一个键，下一轮重扫补上
+        return cache, damaged
+    with open(_SCAN_CACHE_FILE, "r") as f:
+        return json.load(f), True
+
+
+def _write_sharded_scan_cache(cache):
+    directory = _scan_shard_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+    def write(path, payload):
+        fd, tmp = _tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(payload)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    shards, meta = {}, {}
+    for key, value in cache.items():
+        if key in _SCAN_CACHE_TRANSIENT_KEYS:
+            continue
+        if not isinstance(value, (dict, list)):
+            meta[key] = value
+            continue
+        payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
+        name = _scan_shard_name(key, payload)
+        path = os.path.join(directory, name)
+        if not os.path.exists(path):
+            write(path, payload)
+        shards[key] = name
+    write(os.path.join(directory, _SCAN_SHARD_MANIFEST),
+          json.dumps({"format": 1, "shards": shards, "meta": meta},
+                     separators=(",", ":")).encode("utf-8"))
+
+    keep = set(shards.values()) | {_SCAN_SHARD_MANIFEST}
+    horizon = _time.time() - _SCAN_SHARD_GRACE
+    for entry in os.scandir(directory):
+        try:
+            if entry.name not in keep and entry.stat().st_mtime < horizon:
+                os.unlink(entry.path)
+        except OSError:
+            pass
+    try:
+        os.remove(_SCAN_CACHE_FILE)  # 已迁到分片
+    except OSError:
+        pass
+
+
+def _remove_scan_cache_files():
+    import shutil
+    try:
+        os.remove(_SCAN_CACHE_FILE)
+    except OSError:
+        pass
+    shutil.rmtree(_scan_shard_dir(), ignore_errors=True)
+
+
 def _load_scan_cache():
     _migrate_legacy_scan_cache()
     try:
-        with open(_SCAN_CACHE_FILE, "r") as f:
-            c = json.load(f)
+        c, rewrite = _read_scan_cache_file()
         version = c.get("v")
         if version not in (_SCAN_CACHE_VERSION, _SCAN_CACHE_MIGRATABLE_VERSION):
             _remove_codex_event_cache_dir()
@@ -897,7 +1010,7 @@ def _load_scan_cache():
             c["v"] = _SCAN_CACHE_VERSION
             c["_dirty"] = True
         else:
-            c["_dirty"] = False
+            c["_dirty"] = rewrite
         if c.get("_pricing_fingerprint") != _PRICING_FINGERPRINT:
             # Keep token caches intact. Claude/Codex reprice compact events in place;
             # other estimated-cost tools are recalculated from cached model totals.
@@ -939,28 +1052,9 @@ def _save_scan_cache(cache):
     if not dirty:
         return
     cache["v"] = _SCAN_CACHE_VERSION
-    tmp = None
     try:
-        directory = os.path.dirname(_SCAN_CACHE_FILE)
-        if directory:
-            os.makedirs(directory, mode=0o700, exist_ok=True)
-            try:
-                os.chmod(directory, 0o700)
-            except OSError:
-                pass
-        fd, tmp = _tempfile.mkstemp(prefix="_tokei_scan_cache.", suffix=".json",
-                                    dir=directory or None)
-        payload = json.dumps(cache, separators=(',', ':')).encode("utf-8")
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _SCAN_CACHE_FILE)
+        _write_sharded_scan_cache(cache)
     except Exception:
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
         pass
 
 
@@ -14072,10 +14166,7 @@ def update_unknown():
     with open(OVERRIDES_FILE, "w", encoding="utf-8") as f:
         json.dump(ovr, f, ensure_ascii=False, indent=2)
     if added:
-        try:
-            os.remove(_SCAN_CACHE_FILE)
-        except OSError:
-            pass
+        _remove_scan_cache_files()
         _remove_codex_event_cache_dir()
 
     result = {"status": "ok", "count": len(added), "added": added}

@@ -80,8 +80,8 @@ class PricingCacheTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(USAGE.update_prices(), 0)
 
-            self.assertTrue(scan_cache.exists())
-            saved_cache = json.loads(scan_cache.read_text(encoding="utf-8"))
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                saved_cache, _ = USAGE._read_scan_cache_file()
             self.assertEqual(saved_cache["v"], USAGE._SCAN_CACHE_VERSION)
             self.assertIn("test/model", saved_cache["_pricing_changed_models"])
             self.assertTrue(saved_cache["_pricing_changed"])
@@ -117,8 +117,8 @@ class PricingCacheTests(unittest.TestCase):
                 **historical,
                 "retired": True,
             })
-            changed = json.loads(scan_cache.read_text(encoding="utf-8")).get(
-                "_pricing_changed_models", [])
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                changed = USAGE._read_scan_cache_file()[0].get("_pricing_changed_models", [])
             self.assertNotIn("historical/model", changed)
 
     def test_price_fingerprint_keeps_all_token_scan_caches(self):

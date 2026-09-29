@@ -1065,7 +1065,7 @@ class ScanCacheMigrationTests(unittest.TestCase):
                 migrated = USAGE._codex_migrate_event_cache(cache["codex"])
                 cache["_dirty"] = True
                 USAGE._save_scan_cache(cache)
-                stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                stored, _ = USAGE._read_scan_cache_file()
                 sidecar = USAGE._codex_event_cache_path(str(source))
                 cached_events = list(USAGE._iter_codex_cached_events(str(source)))
 
