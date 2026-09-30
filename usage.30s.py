@@ -1123,12 +1123,11 @@ def ledger_flush():
     try:
         fresh = _load_ledger_from_disk()
         memo = _LEDGER_CACHE["data"]
-        for qcli_tool in _QODERCLI_DIRS:
-            schema_key = f"{qcli_tool}_schema"
+        for schema_key, schema_tool in _ledger_schema_keys():
             memo_schema = int(memo.get(schema_key, 0) or 0)
             if memo_schema > int(fresh.get(schema_key, 0) or 0):
-                fresh.setdefault("tools", {})[qcli_tool] = dict(
-                    memo.get("tools", {}).get(qcli_tool, {}))
+                fresh.setdefault("tools", {})[schema_tool] = dict(
+                    memo.get("tools", {}).get(schema_tool, {}))
                 fresh[schema_key] = memo_schema
         for tool, days in memo.get("tools", {}).items():
             stored = fresh["tools"].setdefault(tool, {})
@@ -1219,6 +1218,45 @@ def _ledger_day_total(day):
     return sum(float(v) for k, v in day.items()
                if isinstance(v, (int, float)) and not isinstance(v, bool)
                and k not in ("cost", "cost_cny") and not k.startswith("_"))
+
+
+# 这些工具的旧版本遇到没有公开价的模型会按 Opus 兜底价估美元，账本里存着这些
+# 猜出来的成本（本机见过一个工具被多算四百美元）。清一次，之后新记录本身就不估。
+_UNPRICED_COST_TOOLS = ("workbuddy", "workbuddy_ai", "pi", "qwencode")
+_UNPRICED_COST_SCHEMA = 1
+
+
+def _drop_unpriced_costs(day):
+    """把账本某天（连同各来源）里没有公开价模型的成本清零，当天合计同步扣掉。"""
+    models = day.get("models")
+    if isinstance(models, dict):
+        for name, usage in models.items():
+            if (isinstance(usage, dict) and float(usage.get("cost", 0) or 0) > 0
+                    and not _pricing_id(name)):
+                day["cost"] = max(float(day.get("cost", 0) or 0) - float(usage["cost"]), 0.0)
+                usage["cost"] = 0.0
+    for source in (day.get("_sources") or {}).values():
+        if isinstance(source, dict):
+            _drop_unpriced_costs(source)
+
+
+def _prepare_unpriced_cost_ledger(tool):
+    ledger = _load_ledger()
+    schema_key = f"{tool}_unpriced_schema"
+    if ledger.get(schema_key) == _UNPRICED_COST_SCHEMA:
+        return
+    for day in ledger.setdefault("tools", {}).get(tool, {}).values():
+        if isinstance(day, dict):
+            _drop_unpriced_costs(day)
+    ledger[schema_key] = _UNPRICED_COST_SCHEMA
+    _LEDGER_CACHE["dirty"] = True
+
+
+def _ledger_schema_keys():
+    """需要整体迁移的工具账本：(schema 键, 工具)。迁移后的成本可能更低，
+    落盘时不能被磁盘上的旧高水位合并回去。"""
+    return ([(f"{tool}_schema", tool) for tool in _QODERCLI_DIRS]
+            + [(f"{tool}_unpriced_schema", tool) for tool in _UNPRICED_COST_TOOLS])
 
 
 def _ledger_record_version(day):
@@ -9471,7 +9509,11 @@ def _pi_usage_cost(u, model):
     parts = sum(float(cost_obj.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "cacheWrite"))
     if parts > 0:
         return parts
-    p = _raw_price(model)
+    # 日志没带成本、模型也没有公开价时不估美元（以前落到 Opus 兜底价）
+    price_id = _pricing_id(model)
+    if not price_id:
+        return 0.0
+    p = _raw_price(price_id)
     inp = _pi_usage_int(u, "input")
     out = _pi_usage_int(u, "output")
     cr = _pi_usage_int(u, "cacheRead", "cache_read")
@@ -9479,7 +9521,12 @@ def _pi_usage_cost(u, model):
     return inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
 
 
+# 解析口径版本。1：没有公开价的模型不再按 Opus 兜底价估美元。
+_PI_PARSER_VERSION = 1
+
+
 def scan_pi(bounds, cache):
+    _prepare_unpriced_cost_ledger("pi")
     ledger_touch("pi")
     fc = cache.setdefault("pi", {})
     changed = False
@@ -9505,7 +9552,7 @@ def scan_pi(bounds, cache):
             continue
         sig = f"{st.st_mtime}:{st.st_size}"
         entry = fc.get(f)
-        if not entry or entry.get("sig") != sig:
+        if not entry or entry.get("sig") != sig or entry.get("parser") != _PI_PARSER_VERSION:
             days = {}
             proj = None
             sid = os.path.basename(f)
@@ -9548,7 +9595,8 @@ def scan_pi(bounds, cache):
                         day["hours"][dt.astimezone().hour] += inp + out + cr + cw + reason
             except OSError:
                 continue
-            fc[f] = {"sig": sig, "days": days, "proj": proj, "sid": sid}
+            fc[f] = {"sig": sig, "parser": _PI_PARSER_VERSION,
+                     "days": days, "proj": proj, "sid": sid}
             changed = True
 
     for p in stale:
@@ -9749,7 +9797,8 @@ def scan_prime_agent(bounds, cache):
 # 两个独立 App 共用解析逻辑,但缓存、账本和展示分别统计。
 # 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
 # 不重复累计；reasoning_tokens 已包含在 output_tokens 中。
-_WORKBUDDY_PARSER_VERSION = 2
+# 3：没有公开价的模型不再按 Opus 兜底价估美元（与 CodeBuddy 一致）。
+_WORKBUDDY_PARSER_VERSION = 3
 
 
 def _workbuddy_number(obj, *keys):
@@ -9879,15 +9928,15 @@ def _workbuddy_usage_record(item, model_id_first=False):
                   ("requestModelName", "requestModelId"))
     model = (provider.get(model_keys[0]) or provider.get(model_keys[1])
              or provider.get("model") or message.get("model") or item.get("model") or "unknown")
-    price = _raw_price(str(model))
+    # 没有公开价的模型不估美元：以前会落到 Opus 兜底价，混元、Step 这类便宜模型
+    # 被算出几百美元。CodeBuddy 自带 Credit 计量，更严格，只认精确价。
+    price_id = _pricing_id(str(model))
+    if model_id_first and not _exact_pricing_id(_model_identity_id(str(model))):
+        price_id = None
+    price = _raw_price(price_id) if price_id else None
     cost = (input_tokens / 1e6 * price["in"] + output / 1e6 * price["out"]
             + cache_read / 1e6 * price["cache_read"]
-            + cache_write / 1e6 * price["cache_write"])
-    # CodeBuddy already records its native Credit value. Do not turn an
-    # unrecognised model into a guessed dollar estimate; keep the Credit
-    # total authoritative and leave USD at zero until an exact price exists.
-    if model_id_first and not _exact_pricing_id(_model_identity_id(str(model))):
-        cost = 0.0
+            + cache_write / 1e6 * price["cache_write"]) if price else 0.0
     item_id = item.get("id") or provider.get("messageId") or ""
     return {
         "date": dt.date().isoformat(),
@@ -9936,6 +9985,8 @@ def _iter_workbuddy_records(file_cache):
 
 
 def _scan_workbuddy_root(bounds, cache, root, tool_key):
+    if tool_key in _UNPRICED_COST_TOOLS:
+        _prepare_unpriced_cost_ledger(tool_key)
     ledger_touch(tool_key)
     fc = cache.setdefault(tool_key, {})
     B = _empty_token_ranges()
@@ -11478,9 +11529,11 @@ def _qwen_usage_parts(model, values):
     inp = max(input_total - cached, 0)
     out = _qwen_number(values.get("outputTokens"))
     reason = _qwen_number(values.get("thoughtsTokens"))
-    price = _raw_price(model)
+    # 没有公开价的模型不估美元（以前落到 Opus 兜底价）
+    price_id = _pricing_id(model)
+    price = _raw_price(price_id) if price_id else None
     cost = ((inp * price["in"] + cached * price["cache_read"]
-             + (out + reason) * price["out"]) / 1e6)
+             + (out + reason) * price["out"]) / 1e6) if price else 0.0
     return inp, out, cached, reason, cost
 
 
@@ -11667,6 +11720,7 @@ def _qwen_source_signature(paths):
 
 
 def scan_qwencode(bounds, cache):
+    _prepare_unpriced_cost_ledger("qwencode")
     ledger_touch("qwencode")
     fc = cache.setdefault("qwencode", {})
     B = _empty_token_ranges()
@@ -11680,10 +11734,11 @@ def scan_qwencode(bounds, cache):
             cache["_dirty"] = True
         return {"ranges": B}
 
-    if fc.get("sig") != sig or fc.get("accounting_version") != 2:
+    # 3：没有公开价的模型不再按 Opus 兜底价估美元
+    if fc.get("sig") != sig or fc.get("accounting_version") != 3:
         entries = _qwen_entries(token_files, summary_file)
         fc.clear()
-        fc.update({"sig": sig, "entries": entries, "accounting_version": 2})
+        fc.update({"sig": sig, "entries": entries, "accounting_version": 3})
         cache["_dirty"] = True
 
     live_days = {}
