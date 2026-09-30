@@ -39,6 +39,8 @@ struct PanelView: View {
     /// 新建的面板从哪一页开始。打开前量尺寸时按面板当前停留的页面临时设置（issue #105），
     /// 离屏截图检查各页面也用它（Tokei --shot out.png --mode settings）；平时恒为卡片页。
     static var initialMode: PanelMode = .cards
+    /// 离屏截图（--expand-models）时把按模型列表全部展开，方便检查明细行。
+    static var expandModelsForShot = false
     @State private var mode: PanelMode = PanelView.initialMode
     @State private var trailProjects: [TrailProject]?
     enum PanelMode: String { case cards, quotaHistory, dashboard, projects, settings }
@@ -2129,7 +2131,7 @@ struct PanelView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        if open.wrappedValue {
+        if open.wrappedValue || Self.expandModelsForShot {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L("按模型 · %@", periodLabel ?? sel.label))
                     .font(.system(size: Theme.fontSize(11), weight: .semibold))
@@ -2139,7 +2141,7 @@ struct PanelView: View {
                     let hit = tokenModelHit(m)
                     let hasBreakdown = m.in + m.out + m.cr + m.cw + m.reason > 0
                         || m.cost > 0 || m.credits > 0 || m.pin > 0 || m.pout > 0
-                    let isExpanded = expandedModels.contains(m.id)
+                    let isExpanded = expandedModels.contains(m.id) || Self.expandModelsForShot
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
                             guard hasBreakdown else { return }
@@ -2199,7 +2201,7 @@ struct PanelView: View {
                                            tokCR: m.cr, tokCW: m.cw,
                                            tokReason: m.reason,
                                            pin: m.pin, pout: m.pout, pcr: m.pcr, hit: hit, tint: tint,
-                                           componentsAreSubtotals: inclusiveIO)
+                                           componentsAreSubtotals: inclusiveIO, priceRef: m.pref)
                         }
                     }
                 }
@@ -2234,13 +2236,13 @@ struct PanelView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        if open.wrappedValue {
+        if open.wrappedValue || Self.expandModelsForShot {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L("按模型 · %@", periodLabel ?? sel.label))
                     .font(.system(size: Theme.fontSize(11), weight: .semibold))
                     .foregroundStyle(Theme.tSecondary)
                 ForEach(models) { m in
-                    let isExpanded = expandedModels.contains(m.id)
+                    let isExpanded = expandedModels.contains(m.id) || Self.expandModelsForShot
                     VStack(alignment: .leading, spacing: 0) {
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -2298,7 +2300,7 @@ struct PanelView: View {
     @ViewBuilder
     func modelDetailRow(tokIn: Int, tokOut: Int, tokCR: Int, tokCW: Int, tokReason: Int = 0,
                          pin: Double, pout: Double, pcr: Double = 0, hit: Double = 0, tint: Color,
-                         componentsAreSubtotals: Bool = false) -> some View {
+                         componentsAreSubtotals: Bool = false, priceRef: String? = nil) -> some View {
         let tagFont = Font.system(size: 9, weight: .medium, design: .monospaced)
         let labelFont = Font.system(size: 8.5)
         let bg = tint.opacity(0.08)
@@ -2331,7 +2333,8 @@ struct PanelView: View {
                 }
                 if pin > 0 || pout > 0 {
                     HStack(spacing: 2) {
-                        Text("$").font(tagFont).foregroundStyle(tint)
+                        // 没有公开价、借别的模型估算的，加「≈」，悬停说明参照了谁
+                        Text(priceRef == nil ? "$" : "≈$").font(tagFont).foregroundStyle(tint)
                         Text("\(String(format: "%.2g", pin))/\(String(format: "%.2g", pout))")
                             .font(tagFont).foregroundStyle(tint)
                         // 缓存读常占 Token 的绝大部分：不写出它的单价，按输入 / 输出价
@@ -2345,6 +2348,8 @@ struct PanelView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2.5)
                     .background(Capsule().fill(tint.opacity(0.12)))
                     .overlay(Capsule().strokeBorder(tint.opacity(0.25), lineWidth: 0.5))
+                    .help(priceRef.map { L("没有公开价格，按 %@ 的单价估算", L10n.data($0)) }
+                          ?? L("每百万 token 的输入 / 输出单价，读 = 缓存读"))
                 }
             }
         }

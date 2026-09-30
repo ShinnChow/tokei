@@ -751,6 +751,13 @@ final class SyncManager {
                 dst[idx].cost += m.cost
                 dst[idx].credits += m.credits
                 dst[idx].cost_cny = (dst[idx].cost_cny ?? 0) + (m.cost_cny ?? 0)
+                // 本机这条没带单价（旧版采集器）而对端带了，就用对端的，免得合并后单价消失
+                if dst[idx].pin == 0 && dst[idx].pout == 0 && (m.pin > 0 || m.pout > 0) {
+                    dst[idx].pin = m.pin
+                    dst[idx].pout = m.pout
+                    dst[idx].pcr = m.pcr
+                    dst[idx].pref = m.pref
+                }
                 if dst[idx].name == "未知" && m.name != "未知" { // l10n-ignore
                     dst[idx].name = m.name
                 }

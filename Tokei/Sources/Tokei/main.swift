@@ -730,6 +730,10 @@ if let idx = CommandLine.arguments.firstIndex(of: "--mode"),
     PanelView.initialMode = modes[CommandLine.arguments[idx + 1]] ?? .cards
 }
 
+if CommandLine.arguments.contains("--expand-models") {
+    PanelView.expandModelsForShot = true
+}
+
 if let idx = CommandLine.arguments.firstIndex(of: "--shot") {
     let out = CommandLine.arguments.count > idx + 1
         ? CommandLine.arguments[idx + 1] : "/tmp/tokei_shot.png"

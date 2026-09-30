@@ -264,6 +264,7 @@ _DEFAULT_PRICES = {
     "openai/gpt-5.5":                {"in": 5.0,   "out": 30.0, "cache_read": 0.5,    "cache_write": 0.0},
     "openai/gpt-6-astra":            {"in": 10.0,  "out": 50.0, "cache_read": 1.0,    "cache_write": 12.5},
     "openai/gpt-6-sol":              {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
+    "openai/gpt-6.1-sol":            {"in": 2.0,   "out": 10.0, "cache_read": 0.1,    "cache_write": 2.5},
     "openai/gpt-6-luna":             {"in": 0.1,   "out": 0.5,  "cache_read": 0.01,   "cache_write": 0.125},
     "qwen/qwen3.8-max":              {"in": 2.0,   "out": 6.0,  "cache_read": 0.25,   "cache_write": 2.5},
     "qwen/qwen3.7-max":              {"in": 1.25,  "out": 3.75, "cache_read": 0.25,   "cache_write": 1.5625},
@@ -356,10 +357,10 @@ _PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
 # 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
 # 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
 _BUILTIN_OVERRIDE_MODELS = {
-    # OpenAI Standard API rates, verified 2026-09-23:
+    # OpenAI Standard API rates, verified 2026-09-23 (gpt-6.1-sol 2026-09-30):
     # https://developers.openai.com/api/docs/pricing
     **{model: dict(_DEFAULT_PRICES[model]) for model in (
-        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6-luna",
+        "openai/gpt-6-astra", "openai/gpt-6-sol", "openai/gpt-6.1-sol", "openai/gpt-6-luna",
     )},
     "openai/gpt-5.6-sol": {
         "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
@@ -1719,9 +1720,11 @@ def _merge_live_token_day(agg, day):
             agg_hours[hour] += amount
 
 
-def _format_token_models(models, include_prices=True):
+def _format_token_models(models, include_prices=True, price_model=None):
     # Raw log aliases can resolve to the same SwiftUI row ID. Merge before
     # sorting, preserving accumulated costs rather than repricing usage.
+    # price_model：该工具算成本时实际用的查价规则。给了就按它展示单价，
+    # 这样没有公开价、按别的模型估算的行也能看到是按什么价算的（pref）。
     canonical_models = {}
     for model, usage in models.items():
         model_id = _model_identity_id(model)
@@ -1732,9 +1735,17 @@ def _format_token_models(models, include_prices=True):
     sort_key = (lambda kv: -kv[1].get("cost", 0)) if include_prices else (
         lambda kv: -token_total(kv[1]))
     for model_id, v in sorted(canonical_models.items(), key=sort_key):
-        price_id = _exact_pricing_id(model_id) if include_prices else None
+        if not include_prices:
+            price_id = None
+        elif price_model is not None:
+            price_id = price_model(model_id) if model_id else None
+        else:
+            price_id = _exact_pricing_id(model_id)
         p = _raw_price(price_id) if price_id else {
             "in": 0.0, "out": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+        # 单价不是这个模型自己的（查不到公开价，按别的模型估算）时注明参照
+        estimated_from = (nice_model(price_id)
+                          if price_id and _model_identity_id(price_id) != model_id else None)
         result.append({"model_id": model_id, "name": nice_model(model_id),
                        "in": v.get("in", 0), "out": v.get("out", 0),
                         "cr": v.get("cr", 0), "cw": v.get("cw", 0), "reason": v.get("reason", 0),
@@ -1742,7 +1753,8 @@ def _format_token_models(models, include_prices=True):
                         "credits": v.get("credits", 0),
                         "pin": 0 if v.get("cost_cny") else p["in"],
                         "pout": 0 if v.get("cost_cny") else p["out"],
-                        "pcr": 0 if v.get("cost_cny") else p["cache_read"]})
+                        "pcr": 0 if v.get("cost_cny") else p["cache_read"],
+                        "pref": None if v.get("cost_cny") else estimated_from})
     return result
 
 
@@ -2815,13 +2827,17 @@ def _codex_migrate_event_cache(file_cache):
     return True
 
 
-def _codex_estimated_cost(model, inp, cached, out):
+def _codex_price_model(model):
+    """Codex 一个模型实际按哪个价计：成本和卡片上的单价都用它，两边才对得上。"""
     if _codex_is_reserve_model(model):
         # Reserve 单独计量,按 Luna 级别计价,不吃 gpt-5.5 兜底。
-        price_model = _CODEX_RESERVE_PRICE_MODEL
-    else:
-        price_model = model if _has_known_price(model) else "openai/gpt-5.5"
-    base = _raw_price(price_model)
+        return _CODEX_RESERVE_PRICE_MODEL
+    # 没有公开价的（如自动审批用的 codex-auto-review）按 gpt-5.5 估算
+    return model if _has_known_price(model) else "openai/gpt-5.5"
+
+
+def _codex_estimated_cost(model, inp, cached, out):
+    base = _raw_price(_codex_price_model(model))
     high_context = inp > 272_000
     input_price = base["in"] * (2 if high_context else 1)
     output_price = base["out"] * (1.5 if high_context else 1)
@@ -13210,7 +13226,8 @@ def compute():
         hit = (b.get("cached", 0) / b["in"] * 100) if b.get("in") else 0.0
         return {"hit": hit, "in": b.get("in", 0) - b.get("cached", 0), "cached": b.get("cached", 0),
                 "out": b.get("out", 0), "reason": b.get("reason", 0), "cost": b.get("cost", 0.0),
-                "sessions": len(b.get("sessions", set())), "models": _format_token_models(b.get("models", {}))}
+                "sessions": len(b.get("sessions", set())),
+                "models": _format_token_models(b.get("models", {}), price_model=_codex_price_model)}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分

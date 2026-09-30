@@ -582,6 +582,8 @@ struct TokenModelStat: Codable, Identifiable {
     var pin: Double = 0
     var pout: Double = 0
     var pcr: Double = 0
+    /// 这个模型没有公开价、按别的模型估算成本时，参照的那个模型名。
+    var pref: String? = nil
     var id: String { modelId ?? name }
 
     init(from decoder: Decoder) throws {
@@ -600,11 +602,12 @@ struct TokenModelStat: Codable, Identifiable {
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
         pcr = try c.decodeIfPresent(Double.self, forKey: .pcr) ?? 0
+        pref = try c.decodeIfPresent(String.self, forKey: .pref)
     }
 
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
-        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout, pcr
+        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout, pcr, pref
         case credits
     }
 }

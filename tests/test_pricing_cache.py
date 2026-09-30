@@ -228,6 +228,25 @@ class PricingCacheTests(unittest.TestCase):
         for alias, model in USAGE._BUILTIN_OVERRIDE_ALIASES.items():
             self.assertEqual(shipped["aliases"][alias], model)
 
+    def test_codex_model_rows_show_the_price_their_cost_used(self):
+        """卡片上的单价必须就是算成本用的那个价：没有公开价的按 gpt-5.5 估算，要标出参照。"""
+        rows = {row["name"]: row for row in USAGE._format_token_models({
+            "gpt-6.1-sol": {"in": 1_000_000, "cost": 2.0},
+            "codex-auto-review": {"in": 1_000_000, "cost": 5.0},
+        }, price_model=USAGE._codex_price_model)}
+
+        sol = rows["GPT-6.1 Sol"]
+        self.assertEqual((sol["pin"], sol["pout"], sol["pcr"]), (2.0, 10.0, 0.1))
+        self.assertIsNone(sol["pref"], "官方价就是它自己的价")
+        # 10 万 token：避开超过 27.2 万输入时的长上下文加价
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("gpt-6.1-sol", 100_000, 0, 0), 0.2)
+
+        review = rows["Codex Auto Review"]
+        self.assertEqual((review["pin"], review["pout"]), (5.0, 30.0))
+        self.assertEqual(review["pref"], "GPT-5.5")
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("codex-auto-review", 100_000, 0, 0),
+                               review["pin"] / 10)
+
     def test_current_official_and_snapshot_prices_resolve_exactly(self):
         self.assertEqual(USAGE._resolve_id("gpt-5.6"), "openai/gpt-5.6-sol")
         self.assertEqual(USAGE._raw_price("gpt-5.6"), {
